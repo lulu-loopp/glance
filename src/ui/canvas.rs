@@ -280,6 +280,10 @@ pub trait Canvas {
     }
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
+    /// As `clip`, what is drawn fading out over the rectangle's last `fades` at its left and at its right.
+    fn clip_fading(&self, x: f32, y: f32, width: f32, height: f32, _fades: (f32, f32)) {
+        self.clip(x, y, width, height);
+    }
     fn unclip(&self);
     /// The rectangle as a fill of it comes out on whole pixels (see `Frame::on_pixels`): for a control drawn in parts
     /// (a track and what fills it, a bar standing on a floor) to cut its parts out of one box, not each put on pixels

@@ -674,7 +674,7 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
     let doc = made(if zh { "会议纪要.docx" } else { "Meeting notes.docx" }, None)?;
     let folder = made(if zh { "项目资料" } else { "Project files" }, None)?;
     let now = crate::station::now_ms();
-    let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+    let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
     // What was copied lately, the oldest first as the station keeps it.
     let copied = |id: u64, what: What, ago_min: u64| Item { copied: true, pinned: false, ..item(id, what, ago_min) };
     let text = |text: &str| What::Text { text: text.into() };
@@ -705,16 +705,7 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
         Ok(file)
     };
     use crate::station::recent::{Came, Key, Kind};
-    let came = |file: u128, path: PathBuf, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came {
-        key: Key { drive: 'D', file },
-        path,
-        came_ms: now - ago_min * 60_000,
-        bytes,
-        kind,
-        downloaded: site.is_some(),
-        site: site.map(String::from),
-        from: None,
-    };
+    let came = |file: u128, path: PathBuf, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came::of(Key { drive: 'D', file }, path, now - ago_min * 60_000, bytes, kind).downloaded_from(site);
     let (downloads, pictures, shots, documents) = if zh { ("下载", "图片", "屏幕截图", "文档") } else { ("Downloads", "Pictures", "Screenshots", "Documents") };
     let screen = r"C:\Windows\Web\Screen";
     crate::station::recent::pretend(vec![
@@ -792,7 +783,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let tab = match shot.tab.as_deref() {
         Some("copies") => crate::ui::view::Tab::Copies(Default::default()),
         Some("recent") => crate::ui::view::Tab::Recent(Default::default()),
-        _ => crate::ui::view::Tab::Shelf,
+        _ => crate::ui::view::Tab::default(),
     };
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
@@ -1397,7 +1388,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                     }
                     let read = if case == "sample" || paced { 200 + round } else { 200 };
                     let seen = Seen::of(&history[..read]);
-                    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history[..read], seen: &seen, pen_ms: history[read - 1].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history[..read], seen: &seen, pen_ms: history[read - 1].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::default(), hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
                     let shown = filming.lay_out(0.0, &scene, &theme, &seen, work, None);
                     let zoom = shown.zoom;
                     let at = if case == "moved" || case == "rough" { (40.0 + round as f32 * 2.0, 40.0 + round as f32) } else { (40.0, 40.0) };
@@ -1661,7 +1652,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     let form = Form::Lanes { detail: view::Detail::Compact, columns: 2 };
     let mut filming = Filming::new(Choice { form, scale: 1.0, extra: (0.0, 0.0) }, (40.0, 40.0));
     let seen = Seen::of(&history);
-    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: history[399].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: history[399].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::default(), hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
     let mut bitmap = None;
     let mut frame_at = |zoom: f32, surface: &mut crate::ui::gfx::Surface, filming: &mut Filming| -> Result<(), String> {
         filming.choice.scale = zoom;

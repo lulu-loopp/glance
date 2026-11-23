@@ -1,13 +1,16 @@
 //! What the station holds: the things put on it, each as what it is (files where they are, or what it keeps a copy of
-//! itself: text, a link, a picture), when it was put there, and whether it is pinned; and the rules it keeps them by.
+//! itself: text, a link, a picture), when it was put there, whether it is pinned, and its tags; and the rules it keeps
+//! them by.
 //!
-//! - What is not pinned goes after a while (`Rules::keep_days`, 7 by default); what is pinned stays.
+//! - Pinned, a thing is listed first on its page. Tagged, it is sorted under its tags. The one is nothing to the other.
+//! - What is pinned or tagged stays (see `Item::stays`). What is neither goes after a while (`Rules::keep_days`, 7 by
+//!   default), counted from when it last was either (see `Item::freed_ms`).
 //! - What the station keeps a copy of itself takes no more than `Rules::most_bytes` (2 GB by default): to make room,
-//!   what it keeps of the oldest things not pinned goes first; pinned things never go, and what is put on it is never
-//!   dropped unsaid: with no room left even then, it is not taken, and the person is told the station is full.
+//!   what it keeps of the oldest things that do not stay goes first; what stays never goes, and what is put on it is
+//!   never dropped unsaid: with no room left even then, it is not taken, and the person is told the station is full.
 //!
-//! What is pinned of what was copied may be tagged: tags are told apart by their own numbers, never given to another, and
-//! what is pinned no longer has none.
+//! Tags are told apart by their own numbers, never given to another. The files come lately are sorted under the same tags
+//! (see `super::recent`).
 //!
 //! Only the shelf: its files are the folder's (see `super::folder`), its windows the station's thread's.
 
@@ -40,9 +43,16 @@ pub struct Item {
     /// When it was last put on the clipboard from here, or copied again (ms since 1970; 0: not since it came).
     #[serde(default, skip_serializing_if = "never")]
     pub used_ms: u64,
-    /// Its tags, by their numbers (see `Tag`), in the order they were put on it (pinned things copied have them alone).
+    /// Its tags, by their numbers (see `Tag`), in the order they were put on it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<u32>,
+    /// Holds a file pinned or tagged among the files come lately (sent from a device nearby, kept here: see
+    /// `recent::Came::from`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// When it last stopped staying (ms since 1970, 0: it never has): its days counted from then.
+    #[serde(default, skip_serializing_if = "never")]
+    pub freed_ms: u64,
 }
 
 /// Whether a time is none (see `Item::used_ms`).
@@ -55,9 +65,28 @@ impl Item {
     pub fn last_ms(&self) -> u64 {
         self.used_ms.max(self.added_ms)
     }
+
+    /// Whether it stays: pinned, tagged, or holding a file that is (see `held`).
+    pub fn stays(&self) -> bool {
+        self.pinned || !self.tags.is_empty() || self.held
+    }
+
+    /// Since when its days are counted, and what is oldest told by (ms since 1970): when it came, or stopped staying.
+    fn since_ms(&self) -> u64 {
+        self.added_ms.max(self.freed_ms)
+    }
+
+    /// `change` made to it at `now_ms`, which may be what it stays by.
+    fn change(&mut self, now_ms: u64, change: impl FnOnce(&mut Item)) {
+        let stayed = self.stays();
+        change(self);
+        if stayed && !self.stays() {
+            self.freed_ms = now_ms;
+        }
+    }
 }
 
-/// A tag what is pinned is sorted by: its own number, and its name.
+/// A tag things are sorted by (on the station, copied lately, and files come lately): its own number, and its name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tag {
     pub id: u32,
@@ -162,37 +191,32 @@ impl What {
     }
 }
 
-/// Which of what was copied lately a page shows: all; what is pinned (all of it, or that of one tag, by its number); words (text, and links: a link copied is words too); pictures
-/// (what was copied as a picture, a screenshot among them, and picture files: files all of them pictures); files
-/// (files and folders copied where they are, picture files too, and files that came with no path).
+/// Which of what is on the station, or was copied lately, its page shows: all; what is pinned; what is of one tag, by
+/// its number; and of what was copied, words (text, and links: a link copied is words too), pictures (what was copied as
+/// a picture, a screenshot among them, and picture files: files all of them pictures), files (files and folders copied
+/// where they are, picture files too, and files that came with no path).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Filter {
     #[default]
     All,
-    Pinned(Option<u32>),
+    Pinned,
+    Tagged(u32),
     Words,
     Pictures,
     Files,
 }
 
-/// How many of what is pinned are listed first where all that was copied is (see `copies`).
+/// How many of what is pinned are listed first where all of a page is (see `listed`).
 pub const PINNED_FIRST: usize = 3;
 
 impl Filter {
-    pub const ALL: [Filter; 5] = [Filter::All, Filter::Pinned(None), Filter::Words, Filter::Pictures, Filter::Files];
+    /// The kinds of what was copied, as its page offers them.
+    pub const KINDS: [Filter; 3] = [Filter::Words, Filter::Pictures, Filter::Files];
 
-    /// The choice among `ALL` it is of (what is pinned, whatever tag of it).
-    pub fn choice(self) -> Filter {
-        match self {
-            Filter::Pinned(_) => Filter::Pinned(None),
-            filter => filter,
-        }
-    }
-
-    /// The same, as `tags` are now: what is pinned of a tag that is gone, all that is pinned.
+    /// The same, as `tags` are now: of a tag that is gone, all.
     pub fn among(self, tags: &[Tag]) -> Filter {
         match self {
-            Filter::Pinned(Some(id)) if !tags.iter().any(|tag| tag.id == id) => Filter::Pinned(None),
+            Filter::Tagged(id) if !tags.iter().any(|tag| tag.id == id) => Filter::All,
             filter => filter,
         }
     }
@@ -204,24 +228,25 @@ impl Filter {
             Filter::Words => 1,
             Filter::Pictures => 2,
             Filter::Files => 3,
-            Filter::Pinned(None) => 4,
-            Filter::Pinned(Some(tag)) => 5 + tag,
+            Filter::Pinned => 4,
+            Filter::Tagged(tag) => 5 + tag,
         }
     }
 
     /// Whether `item` is one it shows.
     pub fn takes(self, item: &Item) -> bool {
         match self {
-            Filter::Pinned(tag) => item.pinned && tag.is_none_or(|tag| item.tags.contains(&tag)),
+            Filter::Pinned => item.pinned,
+            Filter::Tagged(tag) => item.tags.contains(&tag),
             filter => filter.takes_what(&item.what),
         }
     }
 
-    /// Whether `what` is of its kind (what is pinned: of any).
+    /// Whether `what` is of its kind (what is pinned, or of a tag: of any).
     fn takes_what(self, what: &What) -> bool {
         let picture = |path: &std::path::Path| path.extension().is_some_and(|extension| super::recent::is_picture(&extension.to_string_lossy().to_lowercase()));
         match self {
-            Filter::All | Filter::Pinned(_) => true,
+            Filter::All | Filter::Pinned | Filter::Tagged(_) => true,
             Filter::Words => matches!(what, What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. }),
             Filter::Pictures => match what {
                 What::Picture { .. } => true,
@@ -235,36 +260,47 @@ impl Filter {
     }
 }
 
-/// What a page of what was copied lately lists, in its order (see `copies`): the pinned things listed first, under a
-/// heading of their own, how many are pinned in all (none: no such heading), and the rest.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Copies<'a> {
-    pub first: Vec<&'a Item>,
+/// What a page lists, in its order (see `listed`): the pinned things listed first, under a heading of their own, how many
+/// are pinned in all (none: no such heading), and the rest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed<T> {
+    pub first: Vec<T>,
     pub pinned: usize,
-    pub rest: Vec<&'a Item>,
+    pub rest: Vec<T>,
 }
 
-/// What a page of what was copied lately lists of `items` (the station's) under `filter`: with all of it, what is
-/// pinned first (the `PINNED_FIRST` last used; `folded`: none of them), what is not after; what is pinned by when it
-/// was last used; of a kind, by when it came, what is pinned among the rest.
-pub fn copies(items: &[Item], filter: Filter, folded: bool) -> Copies<'_> {
-    let newest = |filter: Filter| items.iter().rev().filter(move |item| item.copied && filter.takes(item));
-    let pinned = |tag: Option<u32>| {
-        let mut pinned: Vec<&Item> = newest(Filter::Pinned(tag)).collect();
+impl<T> Listed<T> {
+    /// All of a page: what is `pinned` first (the first `PINNED_FIRST` of it, or, `folded`, none), `rest` after.
+    pub fn grouped(mut pinned: Vec<T>, rest: Vec<T>, folded: bool) -> Listed<T> {
+        let of = pinned.len();
+        pinned.truncate(if folded { 0 } else { PINNED_FIRST });
+        Listed { first: pinned, pinned: of, rest }
+    }
+
+    /// What is under one filter: no groups.
+    pub fn plain(rest: Vec<T>) -> Listed<T> {
+        Listed { first: Vec::new(), pinned: 0, rest }
+    }
+}
+
+/// What the station's page lists of `items`, or (`copied`) the page of what was copied lately, under `filter`: with all
+/// of it, what is pinned first (the last used first, `folded`: none of them), what is not after; what is pinned alone;
+/// of a tag or a kind, by when it came, what is pinned among the rest.
+pub fn listed(items: &[Item], copied: bool, filter: Filter, folded: bool) -> Listed<&Item> {
+    let newest = |filter: Filter| items.iter().rev().filter(move |item| item.copied == copied && filter.takes(item));
+    let pinned = || {
+        let mut pinned: Vec<&Item> = newest(Filter::Pinned).collect();
         pinned.sort_by_key(|item| std::cmp::Reverse(item.last_ms()));
         pinned
     };
     match filter {
-        Filter::All => {
-            let pinned = pinned(None);
-            Copies { first: pinned.iter().copied().take(if folded { 0 } else { PINNED_FIRST }).collect(), pinned: pinned.len(), rest: newest(Filter::All).filter(|item| !item.pinned).collect() }
-        }
-        Filter::Pinned(tag) => Copies { rest: pinned(tag), ..Copies::default() },
-        filter => Copies { rest: newest(filter).collect(), ..Copies::default() },
+        Filter::All => Listed::grouped(pinned(), newest(Filter::All).filter(|item| !item.pinned).collect(), folded),
+        Filter::Pinned => Listed::plain(pinned()),
+        filter => Listed::plain(newest(filter).collect()),
     }
 }
 
-/// How long the station keeps what is not pinned, and how much of its own it keeps at most.
+/// How long the station keeps what does not stay, and how much of its own it keeps at most.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rules {
     pub keep_days: u32,
@@ -277,7 +313,7 @@ impl Default for Rules {
     }
 }
 
-/// No room for what was to be put on the station, even with all it keeps of what is not pinned gone.
+/// No room for what was to be put on the station, even with all it keeps of what does not stay gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Full;
 
@@ -306,13 +342,13 @@ impl Shelf {
     pub fn put(&mut self, what: What, now_ms: u64, copied: bool, stays_here: bool, own_bytes: u64) -> u64 {
         let id = self.next;
         self.next += 1;
-        self.items.push(Item { id, what, added_ms: now_ms, pinned: false, copied, stays_here, own_bytes, from: None, used_ms: 0, tags: Vec::new() });
+        self.items.push(Item { id, what, added_ms: now_ms, pinned: false, copied, stays_here, own_bytes, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 });
         id
     }
 
     /// Files sent from `from`, kept in its own folder (`own_bytes` of them, room made for them first), put on the shelf
-    /// at `now_ms`: with what came from that device last, where that came within `TOGETHER_MS` before and is not
-    /// pinned, else on their own. The number of what holds them.
+    /// at `now_ms`: with what came from that device last, where that came within `TOGETHER_MS` before and does not
+    /// stay, else on their own. The number of what holds them.
     pub fn arrived(&mut self, files: Vec<Arrived>, from: Device, now_ms: u64, own_bytes: u64) -> u64 {
         self.came(What::Came { files }, from, now_ms, own_bytes)
     }
@@ -325,11 +361,11 @@ impl Shelf {
     }
 
     /// What came from `from` (`what`: files kept, or files where they went) put on the shelf at `now_ms`: with what came
-    /// from that device last as the same, where that came within `TOGETHER_MS` before and is not pinned, else on its
+    /// from that device last as the same, where that came within `TOGETHER_MS` before and does not stay, else on its
     /// own.
     fn came(&mut self, what: What, from: Device, now_ms: u64, own_bytes: u64) -> u64 {
         let last = self.items.iter().rposition(|item| {
-            std::mem::discriminant(&item.what) == std::mem::discriminant(&what) && !item.pinned && item.from.as_ref().is_some_and(|device| device.fingerprint == from.fingerprint) && now_ms.saturating_sub(item.added_ms) <= TOGETHER_MS
+            std::mem::discriminant(&item.what) == std::mem::discriminant(&what) && !item.stays() && item.from.as_ref().is_some_and(|device| device.fingerprint == from.fingerprint) && now_ms.saturating_sub(item.added_ms) <= TOGETHER_MS
         });
         match last {
             // (Joined, it is as new as what joined it: the newest, last.)
@@ -371,14 +407,23 @@ impl Shelf {
         Some(self.items.remove(at))
     }
 
-    /// The thing `id` pinned, or not (and of no tag any more).
-    pub fn pin(&mut self, id: u64, pinned: bool) {
+    /// The thing `id` pinned, or not, at `now_ms`.
+    pub fn pin(&mut self, id: u64, pinned: bool, now_ms: u64) {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-            item.pinned = pinned;
-            if !pinned {
-                item.tags.clear();
-            }
+            item.change(now_ms, |item| item.pinned = pinned);
         }
+    }
+
+    /// The things that hold a file pinned or tagged among the files come lately as they are at `now_ms` (see
+    /// `Item::held`): those `holds` says. Whether any other than before.
+    pub fn hold(&mut self, now_ms: u64, holds: impl Fn(&Item) -> bool) -> bool {
+        let mut changed = false;
+        for item in &mut self.items {
+            let held = holds(item);
+            changed |= item.held != held;
+            item.change(now_ms, |item| item.held = held);
+        }
+        changed
     }
 
     /// The thing `id` used at `now_ms`: put on the clipboard from here.
@@ -398,17 +443,19 @@ impl Shelf {
         }
     }
 
-    /// The things `ids` of the tag `tag` (pinned with it), or not of it any more.
-    pub fn tag(&mut self, ids: &[u64], tag: u32, on: bool) {
+    /// The things `ids` of the tag `tag`, or not of it any more, at `now_ms`.
+    pub fn tag(&mut self, ids: &[u64], tag: u32, on: bool, now_ms: u64) {
         if !self.tags.iter().any(|kept| kept.id == tag) {
             return;
         }
-        for item in self.items.iter_mut().filter(|item| item.copied && ids.contains(&item.id)) {
-            item.tags.retain(|of| *of != tag);
-            if on {
-                item.pinned = true;
-                item.tags.push(tag);
-            }
+        for item in self.items.iter_mut().filter(|item| ids.contains(&item.id)) {
+            item.change(now_ms, |item| {
+                if !on {
+                    item.tags.retain(|of| *of != tag);
+                } else if !item.tags.contains(&tag) {
+                    item.tags.push(tag);
+                }
+            });
         }
     }
 
@@ -439,11 +486,11 @@ impl Shelf {
         }
     }
 
-    /// The tag `id` gone, what was of it pinned still.
-    pub fn remove_tag(&mut self, id: u32) {
+    /// The tag `id` gone at `now_ms`, what was of it left.
+    pub fn remove_tag(&mut self, id: u32, now_ms: u64) {
         self.tags.retain(|tag| tag.id != id);
         for item in &mut self.items {
-            item.tags.retain(|of| *of != id);
+            item.change(now_ms, |item| item.tags.retain(|of| *of != id));
         }
     }
 
@@ -452,24 +499,27 @@ impl Shelf {
         self.items.iter().map(|item| item.own_bytes).sum()
     }
 
-    /// Takes off what has been on it longer than `rules` keep it, not pinned: what went.
+    /// Those of `of` that do not stay, past the `most` newest of them (see `Item::since_ms`), by their numbers.
+    pub fn past(&self, most: usize, of: impl Fn(&Item) -> bool) -> Vec<u64> {
+        let mut loose: Vec<&Item> = self.items.iter().filter(|item| !item.stays() && of(item)).collect();
+        loose.sort_by_key(|item| item.since_ms());
+        loose[..loose.len().saturating_sub(most)].iter().map(|item| item.id).collect()
+    }
+
+    /// Takes off what has been on it longer than `rules` keep it and does not stay: what went.
     pub fn expire(&mut self, rules: Rules, now_ms: u64) -> Vec<Item> {
         let keep = u64::from(rules.keep_days) * DAY_MS;
-        let (gone, kept) = std::mem::take(&mut self.items).into_iter().partition(|item| !item.pinned && now_ms.saturating_sub(item.added_ms) >= keep);
+        let (gone, kept) = std::mem::take(&mut self.items).into_iter().partition(|item| !item.stays() && now_ms.saturating_sub(item.since_ms()) >= keep);
         self.items = kept;
         gone
     }
 
-    /// The most it can make room for within `rules` (see `room_for`): all but what pinned things keep of their own.
+    /// The most it can make room for within `rules` (see `room_for`): all but what those that stay keep of their own.
     pub fn room(&self, rules: Rules) -> u64 {
-        rules.most_bytes.saturating_sub(self.pinned_bytes())
+        rules.most_bytes.saturating_sub(self.items.iter().filter(|item| item.stays()).map(|item| item.own_bytes).sum())
     }
 
-    fn pinned_bytes(&self) -> u64 {
-        self.items.iter().filter(|item| item.pinned).map(|item| item.own_bytes).sum()
-    }
-
-    /// Makes room for `bytes` more of its own within `rules`: the oldest things not pinned that keep something of
+    /// Makes room for `bytes` more of its own within `rules`: the oldest things that do not stay and keep something of
     /// their own taken off till there is (what went); else, with no room even with all of those gone, nothing taken
     /// off, and `Full`.
     pub fn room_for(&mut self, bytes: u64, rules: Rules) -> Result<Vec<Item>, Full> {
@@ -479,8 +529,9 @@ impl Shelf {
         let mut over = (self.own_bytes() + bytes).saturating_sub(rules.most_bytes);
         let mut gone = Vec::new();
         while over > 0 {
-            // (There is one: what is not pinned holds the rest, at least `over`.)
-            let at = self.items.iter().position(|item| !item.pinned && item.own_bytes > 0).expect("something not pinned holds the rest");
+            // (There is one: what does not stay holds the rest, at least `over`.)
+            let loose = self.items.iter().enumerate().filter(|(_, item)| !item.stays() && item.own_bytes > 0);
+            let (at, _) = loose.min_by_key(|(_, item)| item.since_ms()).expect("something that does not stay holds the rest");
             let item = self.items.remove(at);
             over = over.saturating_sub(item.own_bytes);
             gone.push(item);
@@ -527,40 +578,48 @@ mod tests {
     }
 
     /// With all that was copied, what is pinned is listed first, the three last used, and only there. Folded, none of
-    /// them. What is pinned is listed by when it was last used, that of a tag alone under it. Of a kind, all of it by
-    /// when it came.
+    /// them. What is pinned is listed by when it was last used. Of a tag or of a kind, all of it by when it came, pinned
+    /// or not. What was put on the station is on its own page, and listed the same.
     #[test]
     fn what_is_pinned_is_listed_first() {
         let mut shelf = Shelf::default();
         let ids: Vec<u64> = (0..7).map(|at| shelf.put(text(&at.to_string()), at, true, false, 0)).collect();
-        shelf.put(text("put there"), 8, false, false, 0);
+        let put = [8, 9].map(|at| shelf.put(text("put there"), at, false, false, 0));
         for at in [0, 1, 2, 4] {
-            shelf.pin(ids[at], true);
+            shelf.pin(ids[at], true, 0);
         }
         let of = |items: &[&Item]| items.iter().map(|item| item.id).collect::<Vec<_>>();
         let listed = |shelf: &Shelf, filter: Filter, folded: bool| {
-            let copies = copies(&shelf.items, filter, folded);
-            (of(&copies.first), copies.pinned, of(&copies.rest))
+            let listed = listed(&shelf.items, true, filter, folded);
+            (of(&listed.first), listed.pinned, of(&listed.rest))
         };
         assert_eq!(listed(&shelf, Filter::All, false), (vec![4, 2, 1], 4, vec![6, 5, 3]));
         assert_eq!(listed(&shelf, Filter::All, true), (vec![], 4, vec![6, 5, 3]));
         // The oldest of them used: first of them.
         shelf.used(0, 20);
         assert_eq!(listed(&shelf, Filter::All, false), (vec![0, 4, 2], 4, vec![6, 5, 3]));
-        assert_eq!(listed(&shelf, Filter::Pinned(None), false), (vec![], 0, vec![0, 4, 2, 1]));
+        assert_eq!(listed(&shelf, Filter::Pinned, false), (vec![], 0, vec![0, 4, 2, 1]));
         assert_eq!(listed(&shelf, Filter::Words, false), (vec![], 0, vec![6, 5, 4, 3, 2, 1, 0]));
         let work = shelf.new_tag("work").unwrap();
-        shelf.tag(&[1, 3], work, true);
-        assert_eq!(listed(&shelf, Filter::Pinned(Some(work)), false), (vec![], 0, vec![3, 1]));
+        shelf.tag(&[1, 3], work, true, 0);
+        assert_eq!(listed(&shelf, Filter::Tagged(work), false), (vec![], 0, vec![3, 1]));
+        assert_eq!(listed(&shelf, Filter::All, false), (vec![0, 4, 2], 4, vec![6, 5, 3]));
+        let page = |shelf: &Shelf| {
+            let listed = super::listed(&shelf.items, false, Filter::All, false);
+            (of(&listed.first), listed.pinned, of(&listed.rest))
+        };
+        assert_eq!(page(&shelf), (vec![], 0, vec![put[1], put[0]]));
+        shelf.pin(put[0], true, 0);
+        assert_eq!(page(&shelf), (vec![put[0]], 1, vec![put[1]]));
         // With nothing pinned, no heading of it.
-        (0..7).for_each(|at| shelf.pin(ids[at], false));
+        (0..7).for_each(|at| shelf.pin(ids[at], false, 0));
         assert_eq!(listed(&shelf, Filter::All, false), (vec![], 0, vec![6, 5, 4, 3, 2, 1, 0]));
     }
 
-    /// Tagged, a thing copied is pinned with it (one put on the station is not tagged). Pinned no longer, it is of no
-    /// tag. A tag gone leaves what was of it pinned. A name there is already is that tag's, and no other may take it.
+    /// Tags and pins are nothing to one another, on what was copied and what was put on the station alike. A tag gone
+    /// leaves what was of it. A name there is already is that tag's, and no other may take it.
     #[test]
-    fn a_tag_pins_and_goes_without_what_it_is_on() {
+    fn a_tag_pins_nothing_and_goes_without_what_it_is_on() {
         let mut shelf = Shelf::default();
         let copied = shelf.put(text("a"), 0, true, false, 0);
         let other = shelf.put(text("b"), 1, true, false, 0);
@@ -568,71 +627,108 @@ mod tests {
         let one = shelf.new_tag(" one ").unwrap();
         assert_eq!((shelf.new_tag("one"), shelf.new_tag("  ")), (Some(one), None));
         let two = shelf.new_tag("two").unwrap();
-        shelf.tag(&[copied, other, put], one, true);
-        shelf.tag(&[copied], two, true);
+        shelf.tag(&[copied, other, put], one, true, 3);
+        shelf.tag(&[copied], two, true, 3);
+        // (Put on it again, it is where it was.)
+        shelf.tag(&[copied], one, true, 3);
         let of = |shelf: &Shelf, id: u64| shelf.get(id).map(|item| (item.pinned, item.tags.clone())).unwrap();
-        assert_eq!((of(&shelf, copied), of(&shelf, other), of(&shelf, put)), ((true, vec![one, two]), (true, vec![one]), (false, vec![])));
-        shelf.pin(other, false);
-        assert_eq!(of(&shelf, other), (false, vec![]));
+        assert_eq!((of(&shelf, copied), of(&shelf, other), of(&shelf, put)), ((false, vec![one, two]), (false, vec![one]), (false, vec![one])));
+        shelf.pin(other, true, 3);
+        assert_eq!(of(&shelf, other), (true, vec![one]));
+        shelf.pin(other, false, 3);
+        assert_eq!(of(&shelf, other), (false, vec![one]));
         shelf.rename_tag(two, "one");
         shelf.rename_tag(one, " first ");
         assert_eq!(shelf.tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(), ["first", "two"]);
-        shelf.remove_tag(one);
-        assert_eq!(of(&shelf, copied), (true, vec![two]));
-        assert_eq!(Filter::Pinned(Some(one)).among(&shelf.tags), Filter::Pinned(None));
-        assert_eq!(Filter::Pinned(Some(two)).among(&shelf.tags), Filter::Pinned(Some(two)));
+        shelf.remove_tag(one, 4);
+        assert_eq!((of(&shelf, copied), of(&shelf, put)), ((false, vec![two]), (false, vec![])));
+        assert_eq!(Filter::Tagged(one).among(&shelf.tags), Filter::All);
+        assert_eq!(Filter::Tagged(two).among(&shelf.tags), Filter::Tagged(two));
         // (Its number never another's.)
         assert_ne!(shelf.new_tag("one"), Some(one));
         let read: Shelf = serde_json::from_str(&serde_json::to_string(&shelf).unwrap()).unwrap();
         assert_eq!(read, shelf);
     }
 
+    /// What is pinned, tagged, or holds a file that is, stays. What no longer is goes after its days from then.
     #[test]
-    fn what_is_not_pinned_goes_after_its_days() {
+    fn what_is_neither_pinned_nor_tagged_goes_after_its_days() {
         let rules = Rules::default();
         let mut shelf = Shelf::default();
         let old = shelf.put(text("old"), 0, false, false, 0);
         let pinned = shelf.put(text("pinned"), 0, false, false, 0);
+        let tagged = shelf.put(text("tagged"), 0, true, false, 0);
+        let held = shelf.put(text("held"), 0, false, false, 0);
         let new = shelf.put(text("new"), 6 * DAY_MS, false, false, 0);
-        shelf.pin(pinned, true);
-        let gone = shelf.expire(rules, 7 * DAY_MS);
-        assert_eq!(gone.iter().map(|item| item.id).collect::<Vec<_>>(), [old]);
-        assert_eq!(shelf.items.iter().map(|item| item.id).collect::<Vec<_>>(), [pinned, new]);
+        shelf.pin(pinned, true, 0);
+        let tag = shelf.new_tag("t").unwrap();
+        shelf.tag(&[tagged], tag, true, 0);
+        assert!(shelf.hold(0, |item| item.id == held) && !shelf.hold(0, |item| item.id == held));
+        let ids = |items: &[Item]| items.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(ids(&shelf.expire(rules, 7 * DAY_MS)), [old]);
+        assert_eq!(ids(&shelf.items), [pinned, tagged, held, new]);
         // Kept longer, as set.
         let mut longer = shelf.clone();
         assert!(longer.expire(Rules { keep_days: 30, ..rules }, 13 * DAY_MS).is_empty());
+        // Pinned and tagged both, one of the two gone: it stays still.
+        let mut both = shelf.clone();
+        both.tag(&[pinned], tag, true, 0);
+        both.pin(pinned, false, 20 * DAY_MS);
+        assert!(!ids(&both.expire(rules, 40 * DAY_MS)).contains(&pinned));
+        shelf.pin(pinned, false, 20 * DAY_MS);
+        shelf.remove_tag(tag, 21 * DAY_MS);
+        shelf.hold(22 * DAY_MS, |_| false);
+        assert_eq!(ids(&shelf.expire(rules, 27 * DAY_MS - 1)), [new]);
+        assert_eq!(ids(&shelf.expire(rules, 27 * DAY_MS)), [pinned]);
+        assert_eq!(ids(&shelf.expire(rules, 28 * DAY_MS)), [tagged]);
+        assert_eq!(ids(&shelf.expire(rules, 29 * DAY_MS)), [held]);
+    }
+
+    /// Past the most kept, the oldest of those that do not stay, by when they came or stopped staying.
+    #[test]
+    fn the_oldest_past_the_most_go() {
+        let mut shelf = Shelf::default();
+        let ids: Vec<u64> = (0..5).map(|at| shelf.put(text(&at.to_string()), at, true, false, 0)).collect();
+        shelf.pin(ids[0], true, 0);
+        shelf.pin(ids[1], true, 0);
+        shelf.pin(ids[1], false, 9);
+        assert_eq!(shelf.past(2, |item| item.copied), [ids[2], ids[3]]);
+        assert!(shelf.past(2, |item| !item.copied).is_empty());
     }
 
     #[test]
-    fn room_is_made_from_the_oldest_not_pinned() {
+    fn room_is_made_from_the_oldest_that_do_not_stay() {
         let rules = Rules { keep_days: 7, most_bytes: 100 };
         let mut shelf = Shelf::default();
         let first = shelf.put(picture("a"), 0, false, false, 40);
         let pinned = shelf.put(picture("b"), 1, false, false, 30);
-        shelf.pin(pinned, true);
+        shelf.pin(pinned, true, 0);
         let second = shelf.put(picture("c"), 2, false, false, 20);
         // (Pointing to files keeps nothing of its own: never taken off for room.)
         let files = shelf.put(What::Files { paths: vec!["C:\\a.txt".into()], kept: Vec::new() }, 0, false, false, 0);
         // 90 held: 10 more fit.
         assert_eq!(shelf.room_for(10, rules), Ok(Vec::new()));
-        // 30 more: the oldest not pinned goes.
+        // 30 more: the oldest that does not stay goes.
         let gone = shelf.room_for(30, rules).unwrap();
         assert_eq!(gone.iter().map(|item| item.id).collect::<Vec<_>>(), [first]);
         assert!(shelf.get(files).is_some() && shelf.get(second).is_some());
     }
 
     #[test]
-    fn pinned_things_are_never_taken_off_for_room() {
+    fn what_stays_is_never_taken_off_for_room() {
         let rules = Rules { keep_days: 7, most_bytes: 100 };
         let mut shelf = Shelf::default();
         assert_eq!(shelf.room(rules), 100);
-        let pinned = shelf.put(picture("a"), 0, false, false, 80);
-        shelf.pin(pinned, true);
+        let pinned = shelf.put(picture("a"), 0, false, false, 50);
+        shelf.pin(pinned, true, 0);
+        let tagged = shelf.put(picture("t"), 0, false, false, 30);
+        let tag = shelf.new_tag("t").unwrap();
+        shelf.tag(&[tagged], tag, true, 0);
         let loose = shelf.put(picture("b"), 1, false, false, 10);
-        // More than the pinned leave: full, and nothing taken off.
+        // More than what stays leaves: full, and nothing taken off.
         assert_eq!(shelf.room_for(30, rules), Err(Full));
-        assert_eq!(shelf.items.len(), 2);
-        // What fits beside the pinned: the loose one goes.
+        assert_eq!(shelf.items.len(), 3);
+        // What fits beside what stays: the loose one goes.
         assert_eq!(shelf.room_for(20, rules).unwrap().iter().map(|item| item.id).collect::<Vec<_>>(), [loose]);
     }
 

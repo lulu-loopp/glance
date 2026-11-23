@@ -1189,8 +1189,8 @@ impl Controller {
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_BACK_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Back),
                 // Ctrl+A: all of the list under the pointer chosen.
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == CHOOSE_ALL_HOTKEY as usize => {
-                    if let Some((window, hit, shown)) = list_under(&panels, &widgets) {
-                        crate::station::select::all(window.0 as isize, hit, shown);
+                    if let Some((window, hit, shown, whole)) = list_under(&panels, &widgets) {
+                        crate::station::select::all(window.0 as isize, hit, shown, whole);
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_PLAY_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Toggle),
@@ -1250,19 +1250,20 @@ impl Controller {
                 }
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
-                // Something dragged over where a page of the workbench is chosen: that page shown.
+                // Something dragged over where a page of the workbench is chosen: that page shown. Something let go on
+                // one: all of it, where it is shown.
                 crate::station::run::SHOW_PAGE if owner.is_some() => {
                     let panel = &mut panels[owner.unwrap()];
-                    if let Some(page) = view::Tab::numbered(msg.wParam.0).filter(|page| *page != panel.tab.page()) {
+                    if let Some(page) = view::Tab::numbered(msg.wParam.0).filter(|page| (*page == panel.tab.page()) == (msg.lParam.0 != 0)) {
                         panel.tab = page;
                         crate::station::select::turned(panel.window.hwnd.0 as isize, page);
                         panel.next_frame = now;
                     }
                 }
-                crate::station::run::SHOW_PAGE if widgets.owns(msg.hwnd) => {
-                    if let Some(page) = view::Tab::numbered(msg.wParam.0) {
-                        widgets.show_page(msg.hwnd, page);
-                    }
+                crate::station::run::SHOW_PAGE if widgets.owns(msg.hwnd) => match view::Tab::numbered(msg.wParam.0) {
+                    Some(page) if msg.lParam.0 != 0 => widgets.show_all(msg.hwnd, page),
+                    Some(page) => widgets.show_page(msg.hwnd, page),
+                    None => {}
                 }
                 OPEN_SETTINGS => settings_window::open(crate::ui::genie::of_told(msg.lParam.0)),
                 STICK_NOTES => {
@@ -1523,7 +1524,7 @@ impl Controller {
                     // A button of its station's head: its menu.
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::StationHead(choices, Some(msg.hwnd))));
+                        menu = lane_menu(hit, tab, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd), Some(msg.hwnd));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1536,14 +1537,14 @@ impl Controller {
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                     // On a thing on the station, its menu; else the widget's.
                     let panel_shown = panels.iter().any(Panel::is_shown);
-                    let hit = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam));
+                    let hit = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).map(of_thing);
                     // (On one of several chosen together: their menu.)
-                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(msg.hwnd.0 as isize, hit, widgets.page_of(msg.hwnd)));
+                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(msg.hwnd.0 as isize, hit, widgets.page_of(msg.hwnd), widgets.lane_whole(msg.hwnd)));
                     menu = match hit {
                         Some(_) if !together.is_empty() => cursor_position().and_then(|at| crate::station::many_menu(&together, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Many(together, choices))),
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
-                        Some(Hit::Tab(view::Tab::Copies(crate::station::shelf::Filter::Pinned(Some(tag))))) => cursor_position().and_then(|at| crate::station::tag_menu(tag, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices))),
+                        Some(hit) if hit.tag().is_some() => hit.tag().zip(cursor_position()).and_then(|(tag, at)| crate::station::tag_menu(tag, at, panel_shown, widgets.look_of(msg.hwnd)).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices)))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
                         // A note stuck on the desktop, its card: the note's menu (its colours, taken off, taken away).
                         Some(Hit::Note(number) | Hit::Words(number)) => widgets.note_menu(msg.hwnd, number, panels[0].lang, panel_shown).map(|(open, name, choices)| (open, MenuFor::Note(name, choices))).or_else(|| widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd)))),
@@ -1553,15 +1554,15 @@ impl Controller {
                 }
                 // On a thing on the station in the panel, its menu.
                 WM_RBUTTONUP if owner.is_some() => {
-                    let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam));
+                    let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam)).map(of_thing);
                     let look = panels[owner.unwrap()].menu_look();
-                    if matches!(hit, Some(Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_) | Hit::Tab(view::Tab::Copies(crate::station::shelf::Filter::Pinned(Some(_)))))) {
+                    if hit.is_some_and(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_)) || hit.tag().is_some()) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu_of = owner;
                     }
                     let panel = &panels[owner.unwrap()];
-                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab));
+                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab, view::lane_whole(&panel.hits)));
                     match hit {
                         // On one of several chosen together: their menu.
                         Some(_) if !together.is_empty() => {
@@ -1572,8 +1573,8 @@ impl Controller {
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true, look)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
-                        Some(Hit::Tab(view::Tab::Copies(crate::station::shelf::Filter::Pinned(Some(tag))))) => {
-                            menu = cursor_position().and_then(|at| crate::station::tag_menu(tag, at, true, look)).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices)));
+                        Some(hit) if hit.tag().is_some() => {
+                            menu = hit.tag().zip(cursor_position()).and_then(|(tag, at)| crate::station::tag_menu(tag, at, true, look).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices))));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::App(at)) => {
@@ -1672,13 +1673,13 @@ impl Controller {
                 {
                     panels[owner.unwrap()].dismiss();
                 }
-                // The station's head's buttons: their menus.
+                // The station's head's buttons, and those of a thing's tags and of a tag: their menus.
                 WM_LBUTTONUP if owner.is_some_and(|at| panels[at].hit_at(lparam_point(msg.lParam)).is_some_and(Hit::opens_menu)) => {
                     let at = owner.unwrap();
                     let hit = panels[at].hit_at(lparam_point(msg.lParam)).unwrap();
                     panels[at].click(lparam_point(msg.lParam));
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true, panels[at].menu_look())).map(|(open, choices)| (open, MenuFor::StationHead(choices, None)));
+                    menu = lane_menu(hit, panels[at].tab, true, panels[at].menu_look(), None);
                     menu_of = Some(at);
                     keep_menu_above(&menu, &mut overlay);
                 }
@@ -1990,8 +1991,27 @@ enum MenuFor {
     Note(String, Vec<crate::ui::note::Choice>),
     /// Things on a station's lane chosen together, and what each row does (see `station::many_menu`).
     Many(Vec<Hit>, Vec<crate::station::ManyChoice>),
-    /// A tag of what was copied, by its number, its name, and what each row does (see `station::tag_menu`).
+    /// A tag, by its number, its name, and what each row does (see `station::tag_menu`).
     Tag(u32, String, Vec<crate::station::TagChoice>),
+    /// The tags of a thing on the station's lane, and what each row does (see `station::tags_menu`).
+    Tags(crate::station::Thing, Vec<crate::station::TagsChoice>),
+}
+
+/// The menu a button of the station's lane opens where the pointer is (`hit`, the page `tab` shown, see
+/// `Hit::opens_menu`; `over_the_panel`: as `Menu::open_at` says), on the widget `on` (none: the panel), and what it is for.
+fn lane_menu(hit: Hit, tab: view::Tab, over_the_panel: bool, look: crate::ui::menu::Look, on: Option<HWND>) -> Option<(crate::ui::menu::Menu, MenuFor)> {
+    let at = cursor_position()?;
+    match hit {
+        Hit::TagThing(thing) => crate::station::tags_menu(thing, at, over_the_panel, look).map(|(open, choices)| (open, MenuFor::Tags(thing, choices))),
+        Hit::TagMore(tag) => crate::station::tag_menu(tag, at, over_the_panel, look).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices))),
+        _ => crate::station::head_menu(hit, tab, at, over_the_panel, look).map(|(open, choices)| (open, MenuFor::StationHead(choices, on))),
+    }
+}
+
+/// What a right click, or the preview's shortcut, on `hit` is for: the thing a button of the station's lane is on, else
+/// what it is itself.
+fn of_thing(hit: Hit) -> Hit {
+    hit.button_of(&crate::station::run::shown().items).unwrap_or(hit)
 }
 
 impl MenuFor {
@@ -2147,7 +2167,7 @@ impl Controller {
                 }
                 (Some(crate::station::Choice::NewTag), _) => {
                     if let Some(at) = name_at() {
-                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![id]), at, look, crate::update::language());
+                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Item(id)]), at, look, crate::update::language());
                     }
                 }
                 (Some(choice), _) => crate::station::chose(id, *choice),
@@ -2160,6 +2180,15 @@ impl Controller {
                     }
                 }
                 Some(crate::station::TagChoice::Remove) => crate::station::run::ask(crate::station::run::Ask::RemoveTag(tag)),
+                None => {}
+            },
+            MenuFor::Tags(thing, choices) => match choice.and_then(|row| choices.get(row)) {
+                Some(crate::station::TagsChoice::Tag(tag)) => crate::station::turn_tag(&[thing], *tag),
+                Some(crate::station::TagsChoice::New) => {
+                    if let Some(at) = name_at() {
+                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![thing]), at, look, crate::update::language());
+                    }
+                }
                 None => {}
             },
             MenuFor::App(app, choices) => match choice.and_then(|row| choices.get(row)) {
@@ -2182,17 +2211,21 @@ impl Controller {
                 Some(choice) => widgets.note_chose(&name, *choice),
                 None => {}
             },
-            MenuFor::Recent(file, choices) => {
-                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    crate::station::recent_chose(file, *choice);
+            MenuFor::Recent(file, choices) => match choice.and_then(|row| choices.get(row)) {
+                Some(crate::station::RecentChoice::NewTag) => {
+                    if let Some(at) = name_at() {
+                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Recent(file)]), at, look, crate::update::language());
+                    }
                 }
-            }
+                Some(choice) => crate::station::recent_chose(file, *choice),
+                None => {}
+            },
             MenuFor::Many(hits, choices) => {
                 match choice.and_then(|row| choices.get(row)) {
                     Some(crate::station::ManyChoice::NewTag) => {
-                        let ids = hits.iter().filter_map(|hit| if let Hit::Copied(id) = hit { Some(*id) } else { None }).collect();
+                        let things = hits.iter().filter_map(|hit| crate::station::Thing::of(*hit)).collect();
                         if let Some(at) = name_at() {
-                            crate::ui::rename::open(owner, crate::station::naming_tag(ids), at, look, crate::update::language());
+                            crate::ui::rename::open(owner, crate::station::naming_tag(things), at, look, crate::update::language());
                         }
                     }
                     Some(choice) => crate::station::many_chose(&hits, *choice),
@@ -2328,21 +2361,23 @@ fn looked_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(H
         Some(panel) => panel.is_shown().then(|| panel.hit_at(client)).flatten(),
         None if widgets.owns(under) => widgets.hit_at(under, client),
         None => None,
-    }?;
+    }
+    .map(of_thing)?;
     hit.looks().then_some((under, hit))
 }
 
 /// The list of things that may be chosen together under the pointer (see `station::select`), where the pointer is
-/// over one: the window it is on (the panel's, a widget's), one of its things, and the page that window shows.
-fn list_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(HWND, Hit, view::Tab)> {
+/// over one: the window it is on (the panel's, a widget's), one of its things, the page that window shows, and whether
+/// it shows it whole (see `view::lane_whole`).
+fn list_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(HWND, Hit, view::Tab, bool)> {
     use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
     let at = cursor_position()?;
     let under = unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) };
     let mut client = at;
     let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(under, &mut client) };
     match panels.iter().find(|panel| panel.window.hwnd == under) {
-        Some(panel) => panel.is_shown().then(|| panel.choosing_at(client)).flatten().map(|hit| (under, hit, panel.tab)),
-        None if widgets.owns(under) => widgets.list_at(under, client).map(|hit| (under, hit, widgets.page_of(under))),
+        Some(panel) => panel.is_shown().then(|| panel.choosing_at(client)).flatten().map(|hit| (under, hit, panel.tab, view::lane_whole(&panel.hits))),
+        None if widgets.owns(under) => widgets.list_at(under, client).map(|hit| (under, hit, widgets.page_of(under), widgets.lane_whole(under))),
         None => None,
     }
 }
@@ -2670,6 +2705,8 @@ struct Panel<'a> {
     frost: f32,
     /// How far its lists are scrolled (see `view::Scrolls`).
     scrolls: view::Scrolls,
+    /// The choices over its station's page, as they were last drawn (see `view::show_choice`).
+    choice_shown: view::ChoiceShown,
     /// Its station's page shown (see `view::Tab`).
     tab: view::Tab,
     hover: Option<Hit>,
@@ -2858,6 +2895,7 @@ impl<'a> Panel<'a> {
             tried_behind: Instant::now(),
             frost: 0.0,
             scrolls: view::Scrolls::default(),
+            choice_shown: view::ChoiceShown::default(),
             tab: view::Tab::default(),
             hover: None,
             hint: view::Hint::default(),
@@ -3768,7 +3806,7 @@ impl<'a> Panel<'a> {
         }
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
         if let (Some(hit), Some(from)) = (self.hit_at(client).filter(|hit| hit.drags()), cursor_position()) {
-            self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.tab, keys, from));
+            self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.tab, view::lane_whole(&self.hits), keys, from));
             self.follow_pointer();
             return;
         }
@@ -4717,10 +4755,12 @@ impl<'a> Panel<'a> {
         }
         // (Its own faces: what another window of this thread drew meanwhile was let go of as it began.)
         let faces = view::faces();
+        let mut choices_moving = false;
         if let Some(hits) = hits {
             // (Its buttons over what is under them.)
             self.hits = rack_hits.into_iter().chain(hits).collect();
             self.faces = faces;
+            choices_moving = view::show_choice(&mut self.scrolls, &mut self.choice_shown, &self.hits, self.tab.there(&crate::station::run::shown()));
             self.follow_settings();
             self.hover_again();
         }
@@ -4731,7 +4771,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel (or, with none, four times a second).
-        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turn.turning(now) || self.restoring.is_some();
+        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || choices_moving || crate::ui::view::gliding_drawn() || self.turn.turning(now) || self.restoring.is_some();
         self.next_frame = if moving {
             now
         } else {
@@ -5196,12 +5236,6 @@ impl<'a> Panel<'a> {
                 self.tab = tab;
                 crate::station::select::turned(self.window.hwnd.0 as isize, tab);
             }
-            // (Named in its box, over its button: see `ui::rename`.)
-            Some(Hit::NewTag) => {
-                if let Some(at) = self.on_screen(Hit::NewTag) {
-                    crate::ui::rename::open(self.window.hwnd, crate::station::naming_tag(Vec::new()), POINT { x: at.left, y: at.top }, self.menu_look(), self.lang);
-                }
-            }
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
             Some(Hit::Search) => crate::ui::find::toggle(),
@@ -5632,11 +5666,9 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
                 Lang::En => format!("Switch to the next player ({players} in all)"),
             })
         }
-        Hit::PinCopy(id) => {
-            let pinned = crate::station::run::shown().items.iter().any(|item| item.id == id && item.pinned);
-            Some(if pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }.into())
-        }
-        Hit::NewTag => Some(lang.pick("新建标签", "New tag").into()),
+        Hit::PinThing(thing) => Some(if crate::station::marks(&[thing]).0 { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }.into()),
+        Hit::TagThing(_) => Some(lang.pick("标签", "Tags").into()),
+        Hit::TagMore(_) => Some(lang.pick("标签选项", "Tag options").into()),
         _ => None,
     }
 }

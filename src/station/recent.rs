@@ -29,6 +29,12 @@
 //!
 //! The page shows the files come into one folder together, many at once (copied from a phone, an archive extracted),
 //! as one row (see `listed`): a rule of how the list is shown, the list kept file by file.
+//!
+//! A file may be pinned (listed first) and tagged (sorted under the tags of what is on the station: see `super::shelf`).
+//! What is either stays: it is not aged off, does not count toward the most listed, and is shown whatever the user asked
+//! of the list, wherever it was moved and whatever it was named. The marks are on the record, the file is not copied: a
+//! file gone takes its record with it. A program that saves a file by putting another in its place (Word writes a new
+//! file, names the old one out of the way and deletes it) leaves the record on the file now there (see `Kept::settle`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -73,13 +79,123 @@ pub struct Came {
     /// by its drive's journal, and listed while it is there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// What the user marked it with (none: nothing, and it never was).
+    #[serde(default, skip_serializing_if = "Marks::none")]
+    pub marks: Marks,
+    /// Where it was lost, while it is looked for there (see `Kept::settle`).
+    #[serde(skip)]
+    lost: Option<Lost>,
 }
 
-/// Which of them a page shows: all; those downloaded; screenshots; documents; pictures and videos.
+/// What a file come lately is marked with: whether it is pinned, its tags (by their numbers, see `shelf::Tag`), and when
+/// it last stopped being either (ms since 1970: its days are counted from then).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Marks {
+    pub pinned: bool,
+    pub tags: Vec<u32>,
+    pub freed_ms: u64,
+}
+
+impl Marks {
+    fn none(&self) -> bool {
+        *self == Marks::default()
+    }
+
+    /// `change` made to them at `now`.
+    fn change(&mut self, now: u64, change: impl FnOnce(&mut Marks)) {
+        let stayed = self.stays();
+        change(self);
+        if stayed && !self.stays() {
+            self.freed_ms = now;
+        }
+    }
+
+    fn stays(&self) -> bool {
+        self.pinned || !self.tags.is_empty()
+    }
+}
+
+/// Where a file that stays was when its number was gone, or had a name or a place not listed: another file may come to
+/// be there in its stead. And when that was (ms since 1970), and whether it is gone.
+#[derive(Clone, PartialEq, Debug)]
+struct Lost {
+    path: PathBuf,
+    at_ms: u64,
+    gone: bool,
+}
+
+/// How long a file lost (see `Lost`) is looked for where it was, for another put there in its stead (ms): a program
+/// saving so is done within it.
+const LOST_FOR_MS: u64 = 10_000;
+
+impl Came {
+    /// It stays, named or moved at `now` to `path`, where it would not be listed (`bytes` large there): where it was is
+    /// looked at for another put there in its stead. Whether anything of it is other than it was.
+    fn elsewhere(&mut self, path: PathBuf, bytes: u64, now: u64) -> bool {
+        if self.path != path {
+            self.lose(now, false);
+        }
+        let changed = (&self.path, self.bytes) != (&path, bytes);
+        (self.path, self.bytes) = (path, bytes);
+        changed
+    }
+
+    /// Whether it stays: pinned, or tagged.
+    pub fn stays(&self) -> bool {
+        self.marks.stays()
+    }
+
+    /// Since when its days are counted (ms since 1970): when it came, or stopped staying.
+    fn since_ms(&self) -> u64 {
+        self.came_ms.max(self.marks.freed_ms)
+    }
+
+    /// Whether it is still listed at `now`, by its days.
+    fn lasts(&self, now: u64) -> bool {
+        self.stays() || now.saturating_sub(self.since_ms()) <= KEEP_MS
+    }
+
+    /// Its number gone (`gone`), or its name or place no longer one listed, at `now`: looked for where it was, where it
+    /// stays. Whether it does (else it is taken off).
+    fn lose(&mut self, now: u64, gone: bool) -> bool {
+        if !self.stays() {
+            return false;
+        }
+        let path = self.lost.take().map_or_else(|| self.path.clone(), |lost| lost.path);
+        self.lost = Some(Lost { path, at_ms: now, gone });
+        true
+    }
+}
+
+/// A file come, with nothing more to say of it: for tests and pictures.
+#[cfg(any(test, feature = "studio"))]
+impl Came {
+    pub fn of(key: Key, path: PathBuf, came_ms: u64, bytes: u64, kind: Kind) -> Came {
+        Came { key, path, came_ms, bytes, kind, downloaded: false, site: None, from: None, marks: Marks::default(), lost: None }
+    }
+
+    /// It marked with `marks`.
+    #[cfg(test)]
+    pub fn marked(self, marks: Marks) -> Came {
+        Came { marks, ..self }
+    }
+
+    /// It downloaded from `site`, where one is named.
+    #[cfg(feature = "studio")]
+    pub fn downloaded_from(self, site: Option<&str>) -> Came {
+        Came { downloaded: site.is_some(), site: site.map(str::to_string), ..self }
+    }
+}
+
+/// Which of them a page shows: all; what is pinned; what is of a tag, by its number; those downloaded; screenshots;
+/// documents; pictures and videos.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Filter {
     #[default]
     All,
+    Pinned,
+    Tagged(u32),
     Downloads,
     Screenshots,
     Documents,
@@ -87,12 +203,36 @@ pub enum Filter {
 }
 
 impl Filter {
-    pub const ALL: [Filter; 5] = [Filter::All, Filter::Downloads, Filter::Screenshots, Filter::Documents, Filter::Pictures];
+    /// The kinds of them, as the page offers them.
+    pub const KINDS: [Filter; 4] = [Filter::Downloads, Filter::Screenshots, Filter::Documents, Filter::Pictures];
 
-    /// Whether `came` is one it shows.
+    /// The same, as `tags` are now: of a tag that is gone, all.
+    pub fn among(self, tags: &[super::shelf::Tag]) -> Filter {
+        match self {
+            Filter::Tagged(id) if !tags.iter().any(|tag| tag.id == id) => Filter::All,
+            filter => filter,
+        }
+    }
+
+    /// It as a number, each its own.
+    pub fn number(self) -> u32 {
+        match self {
+            Filter::All => 0,
+            Filter::Downloads => 1,
+            Filter::Screenshots => 2,
+            Filter::Documents => 3,
+            Filter::Pictures => 4,
+            Filter::Pinned => 5,
+            Filter::Tagged(tag) => 6 + tag,
+        }
+    }
+
+    /// Whether `came` is one it shows (all: but what is pinned, listed apart from the rest).
     pub fn takes(self, came: &Came) -> bool {
         match self {
-            Filter::All => true,
+            Filter::All => !came.marks.pinned,
+            Filter::Pinned => came.marks.pinned,
+            Filter::Tagged(tag) => came.marks.tags.contains(&tag),
             Filter::Downloads => came.downloaded || came.site.is_some(),
             Filter::Screenshots => came.kind == Kind::Screenshot,
             Filter::Documents => came.kind == Kind::Document,
@@ -101,7 +241,7 @@ impl Filter {
     }
 }
 
-/// How long a file stays listed after it was made, and the most listed.
+/// How long a file stays listed after it was made, and the most listed (of those that do not stay: see `Came::stays`).
 const KEEP_MS: u64 = 7 * 24 * 3_600_000;
 const MOST: usize = 300;
 /// How often the journals are read (with nothing left to read on).
@@ -284,13 +424,115 @@ impl Entry {
     }
 }
 
+/// What the page lists of `files` (newest first) under `filter`, each row with the filter it is found under (see
+/// `listed`): with all of it, what is pinned first (`folded`: none of it), the rest after.
+pub fn page(files: &[Came], filter: Filter, folded: bool) -> super::shelf::Listed<(Filter, Vec<&Came>)> {
+    use super::shelf::Listed;
+    let rows = |filter: Filter| listed(files, filter).into_iter().map(|row| (filter, row)).collect::<Vec<_>>();
+    match filter {
+        Filter::All => Listed::grouped(rows(Filter::Pinned), rows(Filter::All), folded),
+        filter => Listed::plain(rows(filter)),
+    }
+}
+
+/// The files of `entry` among `files`, the list as it is: the newest first.
+pub fn files_of(files: &[Came], entry: Entry) -> Vec<&Came> {
+    match entry {
+        Entry::File(key) => files.iter().filter(|came| came.key == key).collect(),
+        Entry::Burst(filter, key) => listed(files, filter).into_iter().find(|row| row.iter().any(|came| came.key == key)).unwrap_or_default(),
+    }
+}
+
 /// Where the files of `entry` are, as the list is now: the newest first.
 pub fn paths_of(entry: Entry) -> Option<Vec<PathBuf>> {
     let shown = shown();
-    match entry {
-        Entry::File(key) => shown.iter().find(|came| came.key == key).map(|came| vec![came.path.clone()]),
-        Entry::Burst(filter, key) => listed(&shown, filter).into_iter().find(|row| row.iter().any(|came| came.key == key)).map(|row| row.iter().map(|came| came.path.clone()).collect()),
+    let files = files_of(&shown, entry);
+    (!files.is_empty()).then(|| files.iter().map(|came| came.path.clone()).collect())
+}
+
+/// What a file come lately is marked with, or no longer: pinned, or of a tag (by its number).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    Pinned(bool),
+    Tag(u32, bool),
+}
+
+/// The files `keys` of `files` marked with `mark` at `now`.
+fn marked(files: &mut [Came], keys: &[Key], mark: Mark, now: u64) {
+    for came in files.iter_mut().filter(|came| keys.contains(&came.key)) {
+        came.marks.change(now, |marks| match mark {
+            Mark::Pinned(pinned) => marks.pinned = pinned,
+            Mark::Tag(tag, false) => marks.tags.retain(|of| *of != tag),
+            Mark::Tag(tag, true) if !marks.tags.contains(&tag) => marks.tags.push(tag),
+            Mark::Tag(..) => {}
+        });
     }
+}
+
+/// The marks of `files` as the tags there are (`tags`) leave them at `now`: of none that is gone. Whether any was.
+fn only_tags(files: &mut [Came], tags: &[u32], now: u64) -> bool {
+    let mut changed = false;
+    for came in files.iter_mut().filter(|came| came.marks.tags.iter().any(|tag| !tags.contains(tag))) {
+        came.marks.change(now, |marks| marks.tags.retain(|tag| tags.contains(tag)));
+        changed = true;
+    }
+    changed
+}
+
+/// What the list's thread is to take: the tags there are (none: not told yet), and the marks made since it last took
+/// them, each when it was made. What is shown has them at once (see `publish`).
+struct Asked {
+    tags: Option<Vec<u32>>,
+    marks: Vec<(Vec<Key>, Mark, u64)>,
+}
+
+static ASKED: Mutex<Asked> = Mutex::new(Asked { tags: None, marks: Vec::new() });
+
+/// The files `keys` marked with `mark`, or no longer (shown so at once, kept by the list's thread).
+pub fn mark(keys: Vec<Key>, mark: Mark) {
+    let mut asked = ASKED.lock().unwrap();
+    let mut files = SHOWN.lock().unwrap().as_deref().cloned().unwrap_or_default();
+    asked.marks.push((keys, mark, super::now_ms()));
+    asked.upon(&mut files);
+    show(files, asked);
+}
+
+/// The tags there are: a file is of none other.
+pub fn tags_are(tags: &[super::shelf::Tag]) {
+    let tags: Vec<u32> = tags.iter().map(|tag| tag.id).collect();
+    let mut asked = ASKED.lock().unwrap();
+    if asked.tags.as_ref() == Some(&tags) {
+        return;
+    }
+    asked.tags = Some(tags);
+    let Some(mut files) = SHOWN.lock().unwrap().as_deref().cloned() else { return };
+    asked.upon(&mut files);
+    show(files, asked);
+}
+
+impl Asked {
+    /// What is asked, upon `files`: the marks not yet taken, and none of a tag that is gone. Whether a tag was.
+    fn upon(&self, files: &mut [Came]) -> bool {
+        for (keys, mark, at) in &self.marks {
+            marked(files, keys, *mark, *at);
+        }
+        self.tags.as_ref().is_some_and(|tags| only_tags(files, tags, super::now_ms()))
+    }
+}
+
+/// Shows `files` as the list (`asked` held till it is shown: what is asked after is upon it).
+fn show(files: Vec<Came>, asked: std::sync::MutexGuard<Asked>) {
+    *SHOWN.lock().unwrap() = Some(Arc::new(files));
+    drop(asked);
+    if let Some(told) = TOLD.get() {
+        told();
+    }
+}
+
+/// The paths of those sent from devices nearby, kept in the station's own folder, that stay (see `shelf::Item::held`).
+/// None while the list is off (what stays is not known then).
+pub fn held() -> Option<HashSet<PathBuf>> {
+    on().then(|| shown().iter().filter(|came| came.from.is_some() && came.stays()).map(|came| came.path.clone()).collect())
 }
 
 /// What the file at `path` is (see `Kind`), and whether it came into Downloads; none, for a file not listed: one being
@@ -466,9 +708,9 @@ impl Kept {
             return false;
         }
         if change.reason & DELETED != 0 {
-            let before = self.files.len();
-            self.files.retain(|came| came.key != key);
             self.later.retain(|(letter, later, _)| (*letter, later.file) != (drive, change.file));
+            let before = self.files.len();
+            self.files.retain_mut(|came| came.key != key || came.lose(now, true));
             return self.files.len() != before;
         }
         let had = self.files.iter().position(|came| came.key == key);
@@ -481,13 +723,13 @@ impl Kept {
         // (Made hidden, the system's or passing since it was listed: no longer listed.)
         if change.attributes & reasons::NOT_LISTED != 0 {
             self.later.retain(|(letter, later, _)| (*letter, later.file) != (drive, change.file));
-            return had.map(|at| self.files.remove(at)).is_some();
+            return had.is_some_and(|at| self.no_longer(at, now));
         }
         if !(come || had.is_some()) {
             return false;
         }
         let (path, made_ms, bytes) = match open(change.file) {
-            Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => return had.map(|at| self.files.remove(at)).is_some(),
+            Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => return had.is_some_and(|at| self.no_longer(at, now)),
             Looked::At(path, made_ms, bytes, _) => (path, made_ms, bytes),
             Looked::Unknown => {
                 if self.later.len() < LATER_MOST && !self.later.iter().any(|(letter, later, _)| (*letter, later.file) == (drive, change.file)) {
@@ -497,29 +739,95 @@ impl Kept {
             }
             Looked::Gone | Looked::Theirs => return false,
         };
-        let listed = (now.saturating_sub(made_ms) <= KEEP_MS && !out(&path)).then(|| kind_of(&path, places)).flatten();
+        let lasts = now.saturating_sub(made_ms) <= KEEP_MS || had.is_some_and(|at| self.files[at].lasts(now));
+        let listed = (lasts && !out(&path)).then(|| kind_of(&path, places)).flatten();
         match (listed, had) {
             (Some((kind, downloaded)), Some(at)) => {
                 let came = &mut self.files[at];
                 let site = if downloaded { site(&path) } else { None };
                 let changed = came.path != path || came.kind != kind || came.bytes != bytes;
-                *came = Came { path, kind, downloaded, bytes, site: site.or(came.site.take()), ..came.clone() };
+                *came = Came { path, kind, downloaded, bytes, site: site.or(came.site.take()), lost: None, ..came.clone() };
                 changed
             }
             (Some((kind, downloaded)), None) => {
                 let site = site(&path);
-                self.files.push(Came { key, path, came_ms: made_ms, bytes, kind, downloaded, site, from: None });
-                self.files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
-                self.files.truncate(MOST);
+                self.files.push(Came { key, path, came_ms: made_ms, bytes, kind, downloaded, site, from: None, marks: Marks::default(), lost: None });
+                self.sort();
                 true
             }
-            // (Renamed into a folder left out, or to a name not listed: no longer listed.)
+            // (Renamed into a folder left out, or to a name not listed: no longer listed, but where it stays.)
+            (None, Some(at)) if self.files[at].stays() => self.files[at].elsewhere(path, bytes, now),
             (None, Some(at)) => {
                 self.files.remove(at);
                 true
             }
             (None, None) => false,
         }
+    }
+
+    /// The file at `at` in the list is no longer one listed, at `now`: taken off, but where it stays. Whether it was.
+    fn no_longer(&mut self, at: usize, now: u64) -> bool {
+        let taken = !self.files[at].lose(now, false);
+        if taken {
+            self.files.remove(at);
+        }
+        taken
+    }
+
+    /// The list in its order, the newest first, with no more than `MOST` of those that do not stay (the last that came,
+    /// or stopped staying).
+    fn sort(&mut self) {
+        self.files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
+        let mut loose: Vec<(u64, Key)> = self.files.iter().filter(|came| !came.stays()).map(|came| (came.since_ms(), came.key)).collect();
+        if loose.len() > MOST {
+            loose.sort_by_key(|(since, _)| std::cmp::Reverse(*since));
+            let past: HashSet<Key> = loose[MOST..].iter().map(|(_, key)| *key).collect();
+            self.files.retain(|came| !past.contains(&came.key));
+        }
+    }
+
+    /// Those lost (see `Lost`), as they are at `now`: another file come to be where one was (`at`: which file is at a
+    /// path, `look`: that file) is it from then on, with what the list held of that file. None come for `LOST_FOR_MS`,
+    /// one gone is taken off, and one named or moved elsewhere is where it is now. Whether the list changed.
+    fn settle(&mut self, now: u64, at: impl Fn(&Path) -> Option<Key>, look: impl Fn(Key) -> Looked) -> bool {
+        let lost: Vec<Key> = self.files.iter().filter(|came| came.lost.is_some()).map(|came| came.key).collect();
+        let mut changed = false;
+        for key in lost {
+            // (One may have become another's meanwhile.)
+            let Some(index) = self.files.iter().position(|came| came.key == key && came.lost.is_some()) else { continue };
+            let mut came = self.files.remove(index);
+            let Some(lost) = came.lost.clone() else { continue };
+            let put = at(&lost.path).filter(|there| *there != key).and_then(|there| match look(there) {
+                Looked::At(path, _, bytes, _) => Some((there, path, bytes)),
+                _ => None,
+            });
+            match put {
+                Some((there, path, bytes)) => {
+                    (came.key, came.path, came.bytes, came.lost) = (there, path, bytes, None);
+                    if let Some(other) = self.files.iter().position(|other| other.key == there).map(|other| self.files.remove(other)) {
+                        came.came_ms = came.came_ms.max(other.came_ms);
+                        (came.kind, came.downloaded, came.site) = (other.kind, other.downloaded, other.site.or(came.site));
+                        came.marks.change(now, |marks| {
+                            marks.pinned |= other.marks.pinned;
+                            marks.tags.extend(other.marks.tags.iter().filter(|tag| !marks.tags.contains(tag)).copied().collect::<Vec<u32>>());
+                        });
+                    }
+                    self.files.push(came);
+                    changed = true;
+                }
+                None if now.saturating_sub(lost.at_ms) > LOST_FOR_MS && lost.gone => changed = true,
+                None => {
+                    if now.saturating_sub(lost.at_ms) > LOST_FOR_MS || !lost.gone && came.path == lost.path {
+                        came.lost = None;
+                    }
+                    self.files.insert(index, came);
+                }
+            }
+        }
+        if changed {
+            self.sort();
+        }
+        changed
     }
 
     /// The drives as they were looked for: the volume at each one's letter (see `volumes`).
@@ -532,8 +840,9 @@ impl Kept {
 
     /// The files kept that `scope` shows, each on the drive its letter last was.
     fn shown(&self, scope: &Scope) -> Vec<Came> {
-        // (Those sent from a device nearby are in no folder the user chose to list or not.)
-        self.files.iter().filter(|came| came.from.is_some() || !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
+        // (Those sent from a device nearby are in no folder the user chose to list or not, and what stays is shown
+        // wherever it is.)
+        self.files.iter().filter(|came| came.from.is_some() || came.stays() || !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
     }
 
     /// What was listed from the drives `outside` (by their letters and volumes), what waits to be tried on them, and
@@ -544,17 +853,29 @@ impl Kept {
         if letters.is_empty() {
             return false;
         }
-        self.files.retain(|came| !letters.contains(&came.key.drive));
+        self.files.retain(|came| came.stays() || !letters.contains(&came.key.drive));
         self.later.retain(|(letter, ..)| !letters.contains(letter));
         self.read.retain(|(letter, ..)| !letters.contains(letter));
         self.volumes.retain(|(letter, _)| !letters.contains(letter));
         true
     }
 
+    /// What is asked of the list (see `Asked`) taken: the marks made since, and none of a tag that is gone. Whether the
+    /// list changed.
+    fn take_asked(&mut self, asked: &mut Asked) -> bool {
+        let gone = asked.upon(&mut self.files);
+        let marked = !asked.marks.is_empty();
+        asked.marks.clear();
+        if marked || gone {
+            self.sort();
+        }
+        marked || gone
+    }
+
     /// Those made longer ago than the days kept before `now` taken off; whether any were.
     fn age(&mut self, now: u64) -> bool {
         let before = self.files.len();
-        self.files.retain(|came| now.saturating_sub(came.came_ms) <= KEEP_MS);
+        self.files.retain(|came| came.lasts(now));
         self.files.len() != before
     }
 
@@ -579,36 +900,46 @@ impl Kept {
 
     /// Each file listed looked for by its number (`look`): followed where it is now (moved with its folder: the journal
     /// tells of the folder alone), and what it is told again there (`kind_of`: moved out of Downloads, or into the
-    /// screenshots' folder); taken off where it is gone, or where it is now `out` or no kind listed there; one that
-    /// cannot be looked for now (its drive away, it locked) kept as it is. Whether the list changed. (By its number,
-    /// not its path: another file put where it was is not it.)
+    /// screenshots' folder); taken off where it is gone, or where it is now `out` or no kind listed there (one that stays:
+    /// see `Came::lose`); one that cannot be looked for now (its drive away, it locked) kept as it is. Whether the list
+    /// changed. (By its number, not its path: another file put where it was is not it.)
     /// Only those `which` asks for are looked for (the rest kept as they are).
-    fn recheck(&mut self, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool, which: impl Fn(&Came) -> bool) -> bool {
+    fn recheck(&mut self, now: u64, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool, which: impl Fn(&Came) -> bool) -> bool {
         let mut changed = false;
         self.files.retain_mut(|came| {
             // (One sent from a device nearby, by where it is kept.)
             if came.from.is_some() {
-                let keep = came.path.exists();
-                changed |= !keep;
-                return keep;
-            }
-            if !which(came) {
+                let there = came.path.exists();
+                if there || !came.stays() {
+                    changed |= !there;
+                    return there;
+                }
+            } else if !which(came) {
                 return true;
             }
             let keep = match look(came.key) {
-                // (Made hidden, the system's or passing meanwhile: no longer listed.)
-                Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => false,
+                // (Made hidden, the system's or passing meanwhile: no longer listed, but where it stays.)
+                Looked::At(path, _, bytes, attributes) if attributes & reasons::NOT_LISTED != 0 => {
+                    let stays = came.stays();
+                    changed |= stays && came.elsewhere(path, bytes, now);
+                    stays
+                }
                 Looked::At(path, _, bytes, _) => match (!out(&path)).then(|| kind_of(&path, places)).flatten() {
                     Some((kind, downloaded)) => {
                         if (&came.path, came.kind, came.downloaded, came.bytes) != (&path, kind, downloaded, bytes) {
                             (came.path, came.kind, came.downloaded, came.bytes) = (path, kind, downloaded, bytes);
                             changed = true;
                         }
+                        came.lost = None;
                         true
                     }
-                    None => false,
+                    None => {
+                        let stays = came.stays();
+                        changed |= stays && came.elsewhere(path, bytes, now);
+                        stays
+                    }
                 },
-                Looked::Gone => false,
+                Looked::Gone => came.lost.as_ref().is_some_and(|lost| lost.gone) || came.lose(now, true),
                 Looked::Theirs | Looked::Unknown => true,
             };
             changed |= !keep;
@@ -751,7 +1082,7 @@ pub fn arrived(files: &[(PathBuf, u64)], from: &str) {
         .filter_map(|(path, bytes)| {
             let key = key_of(path)?;
             let kind = kind_of_extension(&path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).unwrap_or_default());
-            Some(Came { key, path: path.clone(), came_ms: now, bytes: *bytes, kind, downloaded: false, site: None, from: Some(from.to_string()) })
+            Some(Came { key, path: path.clone(), came_ms: now, bytes: *bytes, kind, downloaded: false, site: None, from: Some(from.to_string()), marks: Marks::default(), lost: None })
         })
         .collect();
     ARRIVED.lock().unwrap().extend(came);
@@ -760,10 +1091,12 @@ pub fn arrived(files: &[(PathBuf, u64)], from: &str) {
 /// Which file is at `path`: its drive's letter, and its number there (as the drive's journal numbers it).
 #[cfg(windows)]
 fn key_of(path: &Path) -> Option<Key> {
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO};
+    use windows::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO, FILE_READ_ATTRIBUTES};
     let drive = path.to_string_lossy().chars().next().filter(char::is_ascii_alphabetic)?.to_ascii_uppercase();
-    let file = std::fs::File::open(path).ok()?;
+    // (Its attributes alone asked for: one another program holds open is told all the same.)
+    let file = std::fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES.0).open(path).ok()?;
     let mut info = FILE_ID_INFO::default();
     unsafe { GetFileInformationByHandleEx(windows::Win32::Foundation::HANDLE(file.as_raw_handle()), FileIdInfo, std::ptr::addr_of_mut!(info).cast(), std::mem::size_of::<FILE_ID_INFO>() as u32) }.ok()?;
     Some(Key { drive, file: u128::from_le_bytes(info.FileId.Identifier) })
@@ -849,12 +1182,13 @@ fn follow() {
         let volumes = kept.volumes.clone();
         let out_on = |letter: char, path: &Path| out(path) || outside(&scope, &volumes, letter, path);
         let now = super::now_ms();
-        let mut changed = kept.age(now) | let_go;
+        let asked = kept.take_asked(&mut ASKED.lock().unwrap());
+        let mut changed = kept.age(now) | let_go | asked;
         // Those sent from a device nearby, listed (each once).
         for came in std::mem::take(&mut *ARRIVED.lock().unwrap()) {
             kept.files.retain(|listed| listed.key != came.key);
             kept.files.insert(0, came);
-            kept.files.truncate(MOST);
+            kept.sort();
             changed = true;
         }
         let mut folder_renamed = false;
@@ -930,11 +1264,13 @@ fn follow() {
             read_owed = true;
         }
         if folder_renamed || rechecked.is_none_or(|rechecked| rechecked.elapsed() > RECHECK_EVERY) {
-            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out, |_| true);
+            changed |= kept.recheck(now, &places, |key| open(key.drive, key.file), &out, |_| true);
             rechecked = Some(Instant::now());
         } else if files_moved {
-            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out, |came| !came.path.exists());
+            changed |= kept.recheck(now, &places, |key| open(key.drive, key.file), &out, |came| !came.path.exists());
         }
+        // (After the journals are read and the files looked for: a file put where one was is there by now.)
+        changed |= kept.settle(now, key_of, |key| open(key.drive, key.file));
         if changed || shown_scope.as_ref() != Some(&scope) {
             publish(kept.shown(&scope));
             shown_scope = Some(scope);
@@ -963,11 +1299,11 @@ fn pause(took: Duration, more: bool) -> Duration {
     took.max(if more { CATCHING_UP_PAUSE } else { EVERY })
 }
 
-fn publish(files: Vec<Came>) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(files));
-    if let Some(told) = TOLD.get() {
-        told();
-    }
+/// Shows `files` as the list, what was asked since the list's thread last took it upon them.
+fn publish(mut files: Vec<Came>) {
+    let asked = ASKED.lock().unwrap();
+    asked.upon(&mut files);
+    show(files, asked);
 }
 
 /// This user's Downloads, desktop and screenshots' folders.
@@ -1343,7 +1679,7 @@ mod tests {
     /// large as it is now.
     #[test]
     fn looks_for_each_file_again() {
-        let came = |drive: char, file: u128, path: &str, kind: Kind, downloaded: bool| Came { key: Key { drive, file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind, downloaded, site: None, from: None };
+        let came = |drive: char, file: u128, path: &str, kind: Kind, downloaded: bool| Came { downloaded, ..Came::of(Key { drive, file }, PathBuf::from(path), 1, 1, kind) };
         let mut kept = Kept {
             files: vec![
                 came('D', 1, r"D:\a\one.pdf", Kind::Document, false),
@@ -1367,11 +1703,11 @@ mod tests {
             ('C', 8) => Looked::At(PathBuf::from(r"D:\Photos\sea.png"), 1, 1, 0),
             _ => Looked::Unknown,
         };
-        assert!(kept.recheck(&places(), look, &|path: &Path| path.starts_with(r"D:\repo"), |_| true));
+        assert!(kept.recheck(1, &places(), look, &|path: &Path| path.starts_with(r"D:\repo"), |_| true));
         assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\a\one.pdf", r"D:\b renamed\two.pdf", r"E:\four.pdf", r"D:\d\five.pdf", r"D:\Photos\sea.png"]);
         assert_eq!(kept.files[0].bytes, 900);
         assert!(!kept.files[4].downloaded);
-        assert!(!kept.recheck(&places(), |_| Looked::Unknown, &|_| false, |_| true));
+        assert!(!kept.recheck(1, &places(), |_| Looked::Unknown, &|_| false, |_| true));
     }
 
     /// A folder renamed where all in it is left out (in the user's temporary files, or into them) changes nothing
@@ -1390,14 +1726,14 @@ mod tests {
         assert!(!moved_where_left_out(&Looked::Gone, out));
         assert!(!moved_where_left_out(&Looked::Unknown, out));
 
-        let came = |file: u128, path: &str| Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind: Kind::Document, downloaded: false, site: None, from: None };
+        let came = |file: u128, path: &str| Came::of(Key { drive: 'D', file }, PathBuf::from(path), 1, 1, Kind::Document);
         let mut kept = Kept { files: vec![came(1, r"D:\stays\one.pdf"), came(2, r"D:\went\two.pdf")], ..Kept::default() };
         let looked = std::cell::RefCell::new(Vec::new());
         let look = |key: Key| {
             looked.borrow_mut().push(key.file);
             Looked::At(PathBuf::from(r"D:\went on\two.pdf"), 1, 1, 0)
         };
-        assert!(kept.recheck(&places(), look, &|_| false, |came| came.path.starts_with(r"D:\went")));
+        assert!(kept.recheck(1, &places(), look, &|_| false, |came| came.path.starts_with(r"D:\went")));
         assert_eq!(*looked.borrow(), [2]);
         assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\stays\one.pdf", r"D:\went on\two.pdf"]);
     }
@@ -1447,7 +1783,7 @@ mod tests {
         assert!(kept.files.is_empty());
         // Made hidden while the journal was not read: taken off as it is looked for again.
         assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, now, &places, &out, open(5), |_| None));
-        assert!(kept.recheck(&places, |_| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, 5, 0x22), &out, |_| true));
+        assert!(kept.recheck(now, &places, |_| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, 5, 0x22), &out, |_| true));
         assert!(kept.files.is_empty());
     }
 
@@ -1602,7 +1938,7 @@ mod tests {
 
     /// A file come, as the bursts' rule takes it: its folder, its name, when it came (ms), how large it is, what it is.
     fn come(file: u128, path: &str, came_ms: u64, bytes: u64, kind: Kind) -> Came {
-        Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms, bytes, kind, downloaded: false, site: None, from: None }
+        Came::of(Key { drive: 'D', file }, PathBuf::from(path), came_ms, bytes, kind)
     }
 
     /// `files` newest first, as the list keeps them.
@@ -1694,6 +2030,182 @@ mod tests {
         pretend(newest_first(files));
         assert_eq!(paths_of(Entry::Burst(Filter::All, Key { drive: 'D', file: 5 })).map(|paths| paths.len()), Some(6));
         assert_eq!(paths_of(Entry::File(Key { drive: 'D', file: 7 })), None);
+    }
+
+    /// What is pinned or tagged stays past the days kept and the most listed, and is shown whatever is asked of the list.
+    /// Neither any more, its days are counted from then, and it is shown as the rest are. A tag gone is on none.
+    #[test]
+    fn what_is_pinned_or_tagged_stays() {
+        let day = 24 * 3_600_000;
+        let t = 1_760_800_000_000;
+        let mut kept = Kept { files: newest_first((1..=3).map(|file| come(file, &format!(r"D:\Documents\{file}.pdf"), t, 1, Kind::Document)).collect()), ..Kept::default() };
+        let key = |file: u128| Key { drive: 'D', file };
+        let files = |kept: &Kept| {
+            let mut files: Vec<u128> = kept.files.iter().map(|came| came.key.file).collect();
+            files.sort();
+            files
+        };
+        let mut asked = Asked { tags: Some(vec![7]), marks: vec![(vec![key(1)], Mark::Pinned(true), t), (vec![key(2)], Mark::Tag(7, true), t), (vec![key(2)], Mark::Tag(8, true), t)] };
+        assert!(kept.take_asked(&mut asked) && asked.marks.is_empty() && !kept.take_asked(&mut asked));
+        // (Of a tag there is not, none.)
+        assert_eq!(kept.files.iter().find(|came| came.key == key(2)).unwrap().marks.tags, [7]);
+        let none = Scope { only: Some(Vec::new()), ..Scope::default() };
+        assert_eq!(kept.shown(&none).len(), 2);
+        assert!(kept.age(t + 60 * day) && files(&kept) == [1, 2]);
+        // Three hundred come since: those kept beside them.
+        kept.files.extend((10..10 + MOST as u128 + 5).map(|file| come(file, &format!(r"D:\Documents\{file}.pdf"), t + 60 * day + file as u64, 1, Kind::Document)));
+        kept.sort();
+        assert_eq!(kept.files.len(), MOST + 2);
+        assert!(kept.files.iter().any(|came| came.key == key(1)) && !kept.files.iter().any(|came| came.key == key(10)));
+        kept.files.retain(|came| came.key.file < 10);
+        // Written in, long since made: followed as any listed.
+        let out = |path: &Path| left_out(path, &[]);
+        let change = Change { file: 1, folder: 9, reason: 0x8000_0002, attributes: 0x20, at_ms: t + 61 * day };
+        assert!(kept.take('D', change, t + 61 * day, &places(), &out, |_| Looked::At(PathBuf::from(r"D:\Documents\1.pdf"), t, 90, 0), |_| None));
+        let again: Kept = serde_json::from_slice(&serde_json::to_vec(&kept).unwrap()).unwrap();
+        assert_eq!(again.files, kept.files);
+        kept.take_asked(&mut Asked { tags: None, marks: vec![(vec![key(1)], Mark::Pinned(false), t + 61 * day)] });
+        // (Freed as the tag is found gone, at the time it is.)
+        assert!(only_tags(&mut kept.files, &[], t + 62 * day) && !only_tags(&mut kept.files, &[], t + 62 * day));
+        assert!(kept.shown(&none).is_empty() && !kept.age(t + 68 * day));
+        assert!(kept.take('D', Change { at_ms: t + 67 * day, ..change }, t + 67 * day, &places(), &out, |_| Looked::At(PathBuf::from(r"D:\Documents\1.pdf"), t, 91, 0), |_| None) && files(&kept) == [1, 2]);
+        assert!(kept.age(t + 68 * day + 1) && files(&kept) == [2]);
+        assert!(kept.age(t + 69 * day + 1) && kept.files.is_empty());
+    }
+
+    /// The list of all, what is pinned first (files come together, all pinned, as one row), and the rest, what is pinned
+    /// not among them. Under a tag or a kind, pinned or not.
+    #[test]
+    fn what_is_pinned_is_listed_apart() {
+        let t = 1_760_800_000_000;
+        let mut files: Vec<Came> = (1..=12).map(|file| come(file, &format!(r"D:\Phone\{file}.jpg"), t + file as u64 * 1_000, 1, Kind::Picture)).collect();
+        files.push(come(20, r"D:\Documents\a.pdf", t + 90_000, 1, Kind::Document));
+        let key = |file: u128| Key { drive: 'D', file };
+        marked(&mut files, &(1..=5).map(key).collect::<Vec<_>>(), Mark::Pinned(true), t);
+        marked(&mut files, &[key(5), key(12), key(20)], Mark::Tag(3, true), t);
+        let files = newest_first(files);
+        let row = |rows: &[(Filter, Vec<&Came>)]| rows.iter().map(|(filter, row)| (*filter, row.iter().map(|came| came.key.file).collect::<Vec<_>>())).collect::<Vec<_>>();
+        let all = page(&files, Filter::All, false);
+        assert_eq!((row(&all.first), all.pinned), (vec![(Filter::Pinned, vec![5, 4, 3, 2, 1])], 1));
+        assert_eq!(row(&all.rest), [(Filter::All, vec![20]), (Filter::All, vec![12, 11, 10, 9, 8, 7, 6])]);
+        let folded = page(&files, Filter::All, true);
+        assert_eq!((folded.first.len(), folded.pinned, folded.rest.len()), (0, 1, 2));
+        assert_eq!(row(&page(&files, Filter::Pinned, false).rest), [(Filter::Pinned, vec![5, 4, 3, 2, 1])]);
+        assert_eq!(rows_of(&files, Filter::Tagged(3)), vec![vec![20], vec![12], vec![5]]);
+        assert_eq!(rows_of(&files, Filter::Pictures), vec![(1..=12).rev().collect::<Vec<u128>>()]);
+        assert_eq!(files_of(&files, Entry::Burst(Filter::Pinned, key(2))).len(), 5);
+        assert!(files_of(&files, Entry::File(key(30))).is_empty());
+        assert_eq!(Filter::Tagged(3).among(&[]), Filter::All);
+        let numbers: HashSet<u32> = [Filter::All, Filter::Pinned, Filter::Tagged(0), Filter::Tagged(1)].into_iter().chain(Filter::KINDS).map(Filter::number).collect();
+        assert_eq!(numbers.len(), 8);
+    }
+
+    /// A pinned file saved by putting another in its place (as Word does: the new one named as it, the old one named out
+    /// of the way and deleted, or the old one deleted first) is the file now there, with its pin, one row. Deleted, it
+    /// goes, once no other came there. One not pinned goes at once.
+    #[test]
+    fn a_pinned_file_is_the_one_put_in_its_place() {
+        let t = 1_760_800_000_000;
+        let places = places();
+        let out = |path: &Path| left_out(path, &[]);
+        let key = |file: u128| Key { drive: 'D', file };
+        let change = |file: u128, reason: u32| Change { file, folder: 9, reason, attributes: 0x20, at_ms: t };
+        let at = |path: &'static str| move |_: u128| Looked::At(PathBuf::from(path), t - 5, 7, 0);
+        let path = r"D:\Documents\a.docx";
+        let start = |pinned: bool| {
+            let mut kept = Kept { files: vec![come(1, path, t - 50, 1, Kind::Document)], ..Kept::default() };
+            marked(&mut kept.files, &[key(1)], Mark::Pinned(pinned), t);
+            kept
+        };
+        let now_at = |file: u128| move |asked: &Path| (asked == Path::new(path)).then_some(key(file));
+        let look = |key: Key| if key.file == 2 { Looked::At(PathBuf::from(path), t - 5, 7, 0) } else { Looked::Gone };
+        let one = |kept: &Kept| {
+            assert_eq!(kept.files.len(), 1, "{:?}", kept.files);
+            let came = &kept.files[0];
+            (came.key.file, came.path.clone(), came.bytes, came.marks.pinned, came.lost.is_some())
+        };
+        let replaced = (2, PathBuf::from(path), 7, true, false);
+
+        // Named out of the way (a name not listed), the new one seen come, the old one deleted: all read at once.
+        let mut kept = start(true);
+        kept.take('D', change(1, 0x8000_2000), t, &places, &out, at(r"D:\Documents\~WRL0002.tmp"), |_| None);
+        kept.take('D', change(2, 0x8000_2100), t, &places, &out, at(path), |_| None);
+        kept.take('D', change(1, 0x8000_0200), t, &places, &out, |_| Looked::Gone, |_| None);
+        assert!(kept.settle(t, now_at(2), look));
+        assert_eq!(one(&kept), replaced);
+        // Read as it is done, the place empty for a while.
+        let mut kept = start(true);
+        assert!(kept.take('D', change(1, 0x8000_2000), t, &places, &out, at(r"D:\Documents\~WRL0002.tmp"), |_| None));
+        assert!(!kept.settle(t, |_| None, |_| Looked::Unknown));
+        kept.take('D', change(1, 0x8000_0200), t + 2_000, &places, &out, |_| Looked::Gone, |_| None);
+        assert!(!kept.settle(t + 2_000, |_| None, |_| Looked::Unknown));
+        kept.take('D', change(2, 0x8000_2100), t + 4_000, &places, &out, at(path), |_| None);
+        assert!(kept.settle(t + 4_000, now_at(2), look));
+        assert_eq!(one(&kept), replaced);
+        // Found so by being looked for (Glance not running meanwhile), the new one long since made and not listed.
+        let mut kept = start(true);
+        kept.recheck(t, &places, look, &out, |_| true);
+        assert!(kept.settle(t, now_at(2), look));
+        assert_eq!(one(&kept), replaced);
+        // Deleted, and no other there: gone after a while. Looked for again meanwhile, no longer for that.
+        let mut kept = start(true);
+        kept.take('D', change(1, 0x8000_0200), t, &places, &out, |_| Looked::Gone, |_| None);
+        kept.recheck(t + LOST_FOR_MS, &places, look, &out, |_| true);
+        assert!(!kept.settle(t + LOST_FOR_MS, |_| None, look) && kept.files.len() == 1);
+        assert!(kept.settle(t + LOST_FOR_MS + 1, |_| None, look) && kept.files.is_empty());
+        // Not pinned: gone at once.
+        let mut kept = start(false);
+        assert!(kept.take('D', change(1, 0x8000_0200), t, &places, &out, |_| Looked::Gone, |_| None) && kept.files.is_empty());
+    }
+
+    /// A pinned file renamed is the same file, wherever it was put and whatever it was named, its old place empty or
+    /// not. One put in its old place while it has a place listed is not it. Two pinned, one named over the other: one,
+    /// with the tags of both.
+    #[test]
+    fn a_pinned_file_is_followed_where_it_goes() {
+        let t = 1_760_800_000_000;
+        let places = places();
+        let out = |path: &Path| left_out(path, &[]);
+        let key = |file: u128| Key { drive: 'D', file };
+        let change = |file: u128, reason: u32| Change { file, folder: 9, reason, attributes: 0x20, at_ms: t };
+        let mut kept = Kept { files: vec![come(1, r"D:\Documents\a.pdf", t, 1, Kind::Document), come(2, r"D:\Documents\b.pdf", t, 1, Kind::Document)], ..Kept::default() };
+        marked(&mut kept.files, &[key(1), key(2)], Mark::Pinned(true), t);
+        marked(&mut kept.files, &[key(1)], Mark::Tag(1, true), t);
+        marked(&mut kept.files, &[key(2)], Mark::Tag(2, true), t);
+        let path = |kept: &Kept, file: u128| kept.files.iter().find(|came| came.key == key(file)).map(|came| came.path.clone());
+        let at = |path: &'static str| move |_: u128| Looked::At(PathBuf::from(path), t, 1, 0);
+        // To a place listed: there at once, whatever is put where it was.
+        assert!(kept.take('D', change(1, 0x8000_2000), t, &places, &out, at(r"D:\Documents\c.pdf"), |_| None));
+        assert!(!kept.settle(t, |_| Some(key(9)), |_| Looked::At(PathBuf::from(r"D:\Documents\a.pdf"), t, 1, 0)));
+        assert_eq!(path(&kept, 1), Some(PathBuf::from(r"D:\Documents\c.pdf")));
+        // To one left out, and to a name not listed: there too.
+        assert!(kept.take('D', change(1, 0x8000_2000), t, &places, &out, at(r"D:\Documents\.git\c.pdf"), |_| None));
+        kept.settle(t + LOST_FOR_MS + 1, |_| None, |_| Looked::Unknown);
+        assert_eq!(path(&kept, 1), Some(PathBuf::from(r"D:\Documents\.git\c.pdf")));
+        assert!(kept.files.iter().all(|came| came.lost.is_none()));
+        kept.recheck(t, &places, |key| Looked::At(PathBuf::from(if key.file == 1 { r"D:\Documents\.git\c.xyz" } else { r"D:\Documents\b.pdf" }), t, 1, 0), &out, |_| true);
+        assert_eq!(path(&kept, 1), Some(PathBuf::from(r"D:\Documents\.git\c.xyz")));
+        // Named over the other: that one's place and its tags are its own from then on.
+        kept.take('D', change(1, 0x8000_2000), t, &places, &out, at(r"D:\Documents\b.pdf"), |_| None);
+        kept.take('D', change(2, 0x8000_0200), t, &places, &out, |_| Looked::Gone, |_| None);
+        kept.settle(t, |_| Some(key(1)), |_| Looked::At(PathBuf::from(r"D:\Documents\b.pdf"), t, 1, 0));
+        assert_eq!(kept.files.len(), 1);
+        let came = &kept.files[0];
+        assert_eq!((came.key, came.path.clone(), came.marks.tags.clone()), (key(1), PathBuf::from(r"D:\Documents\b.pdf"), vec![2, 1]));
+    }
+
+    /// Which file is at a path is told of one another program holds open too.
+    #[test]
+    fn a_file_held_open_is_told_by_its_number() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = crate::settings::local_dir().join("recent-held.txt");
+        std::fs::write(&path, "a").unwrap();
+        let told = key_of(&path);
+        let held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&path).unwrap();
+        assert!(told.is_some() && key_of(&path) == told);
+        drop(held);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(key_of(&path), None);
     }
 
     /// The list read as Windows keeps the user's files: an ignored test that lists what it finds now (it reads this

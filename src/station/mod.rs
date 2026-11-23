@@ -18,6 +18,86 @@ pub mod thumbs;
 #[cfg(test)]
 mod spike;
 
+/// A thing that may be pinned and tagged, on any of the station's pages: one on it, or copied lately, by its number, or a
+/// file come lately (or files come together, as one: all of them).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Thing {
+    Item(u64),
+    Recent(recent::Entry),
+}
+
+impl Thing {
+    /// The thing `hit` is, if one.
+    pub fn of(hit: crate::ui::view::Hit) -> Option<Thing> {
+        use crate::ui::view::Hit;
+        match hit {
+            Hit::Shelf(id) | Hit::Copied(id) => Some(Thing::Item(id)),
+            Hit::Recent(entry) => Some(Thing::Recent(entry)),
+            _ => None,
+        }
+    }
+}
+
+/// Whether all of `things` are pinned, and the tags all of them have, the station holding `items` and the files come
+/// lately being `files` (those gone are not counted, none left: not pinned, of no tag).
+fn marks_among(things: &[Thing], items: &[shelf::Item], files: &[recent::Came]) -> (bool, Vec<u32>) {
+    let mut marks: Vec<(bool, &[u32])> = Vec::new();
+    for thing in things {
+        match *thing {
+            Thing::Item(id) => marks.extend(items.iter().filter(|item| item.id == id).map(|item| (item.pinned, item.tags.as_slice()))),
+            Thing::Recent(entry) => marks.extend(recent::files_of(files, entry).into_iter().map(|came| (came.marks.pinned, came.marks.tags.as_slice()))),
+        }
+    }
+    let Some((_, first)) = marks.first() else { return (false, Vec::new()) };
+    (marks.iter().all(|(pinned, _)| *pinned), first.iter().copied().filter(|tag| marks.iter().all(|(_, tags)| tags.contains(tag))).collect())
+}
+
+/// Whether all of `things` are pinned now, and the tags all of them have.
+pub fn marks(things: &[Thing]) -> (bool, Vec<u32>) {
+    marks_among(things, &run::shown().items, &recent::shown())
+}
+
+/// `things` taken apart: those on the station or copied lately, by their numbers, and the files come lately, by theirs.
+fn apart(things: &[Thing]) -> (Vec<u64>, Vec<recent::Key>) {
+    let files = recent::shown();
+    let ids = things.iter().filter_map(|thing| if let Thing::Item(id) = thing { Some(*id) } else { None }).collect();
+    let keys = things.iter().flat_map(|thing| if let Thing::Recent(entry) = thing { recent::files_of(&files, *entry) } else { Vec::new() }).map(|came| came.key).collect();
+    (ids, keys)
+}
+
+/// The files come lately `keys` marked with `mark`, and what holds them on the station told (see `shelf::Item::held`).
+fn mark_files(keys: Vec<recent::Key>, mark: recent::Mark) {
+    if !keys.is_empty() {
+        recent::mark(keys, mark);
+        run::ask(run::Ask::Held);
+    }
+}
+
+/// `things` pinned, or not any more.
+pub fn pin(things: &[Thing], pinned: bool) {
+    let (ids, keys) = apart(things);
+    ids.into_iter().for_each(|id| run::ask(run::Ask::Pin(id, pinned)));
+    mark_files(keys, recent::Mark::Pinned(pinned));
+}
+
+/// `things` of the tag `tag`, or, where all are, not of it any more.
+pub fn turn_tag(things: &[Thing], tag: u32) {
+    let on = !marks(things).1.contains(&tag);
+    let (ids, keys) = apart(things);
+    if !ids.is_empty() {
+        run::ask(run::Ask::Tag(ids, tag, on));
+    }
+    mark_files(keys, recent::Mark::Tag(tag, on));
+}
+
+/// The tags a page shows to sort it by (`tags`: those there are, in their order): those its own things have (`here`), those
+/// nothing has on any page, for them to be taken away somewhere (`items`, `files`: all there is), and the one it shows
+/// (`lit`).
+pub fn tags_of<'a>(tags: &'a [shelf::Tag], here: impl Fn(u32) -> bool, lit: Option<u32>, items: &[shelf::Item], files: &[recent::Came]) -> Vec<&'a shelf::Tag> {
+    let used = |tag: u32| items.iter().any(|item| item.tags.contains(&tag)) || files.iter().any(|came| came.marks.tags.contains(&tag));
+    tags.iter().filter(|tag| lit == Some(tag.id) || here(tag.id) || !used(tag.id)).collect()
+}
+
 /// A press on what a station's lane shows (see `view::Hit`), in the panel and in a widget alike: done; whether it was
 /// one. A thing on it, or copied lately, is put on the clipboard (pressed again within a double click's time, a thing
 /// on it is opened).
@@ -35,12 +115,9 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
         // Its pin: pinned, or not any more. What is pinned, where it is listed first: folded away, or shown.
-        Hit::PinCopy(id) => {
-            let pinned = run::shown().items.iter().any(|item| item.id == id && item.pinned);
-            run::ask(run::Ask::Pin(id, !pinned));
-        }
-        Hit::PinsHead => {
-            std::thread::spawn(|| crate::app().change(|settings| settings.station.pins_folded ^= true));
+        Hit::PinThing(thing) => pin(&[thing], !marks(&[thing]).0),
+        Hit::PinsHead(page) => {
+            std::thread::spawn(move || crate::app().change(|settings| settings.station.folded.turn(page)));
         }
         // A device on the strip a sending to goes on: that sending cancelled.
         Hit::SendTo(key) => {
@@ -76,8 +153,7 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
 }
 
 /// What a thing on the station's menu does: put it on the clipboard, open it, show it in Explorer, pin it (or not), tag
-/// it (one copied lately: `Tags`, the row opening the tags, `Tag` one of them by its number, `NewTag` one made: see
-/// `tags_row`), send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key: see
+/// it (`Tags`, the row opening the tags, `Tag` one of them by its number, `NewTag` one made: see `tags_row`), send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key: see
 /// `send::menu_row`), take it off.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Choice {
@@ -94,21 +170,48 @@ pub enum Choice {
     Remove,
 }
 
-/// A menu's "标签" of `items`, copied lately: the row, opening the tags there are (`tags`: those all of them have
-/// ticked, taken off them as they are chosen again) and a new one made, and what each of those is chosen as.
-fn tags_row<C>(items: &[&shelf::Item], tags: &[shelf::Tag], tag: fn(u32) -> C, new: C) -> (crate::ui::menu::Item<'static>, Vec<C>) {
+/// The tags there are, as `things` may be of them: those all of them have ticked (taken off them as they are chosen
+/// again), and a new one made, and what each is chosen as.
+fn tag_rows<C>(things: &[Thing], tag: fn(u32) -> C, new: C) -> (Vec<crate::ui::menu::Item<'static>>, Vec<C>) {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Mark};
-    let lang = crate::update::language();
-    let mut row = Item::new(lang.pick("标签", "Tags"), Some(Mark::Icon(Icon::Tag)), false, false);
-    row.more = tags.iter().map(|tag| Item::new(tag.name.clone(), Some(Mark::Icon(Icon::Tag)), items.iter().all(|item| item.tags.contains(&tag.id)), false)).collect();
-    row.more.push(Item::new(lang.pick("新建标签", "New tag"), Some(Mark::Icon(Icon::Add)), false, !tags.is_empty()));
-    (row, tags.iter().map(|one| tag(one.id)).chain([new]).collect())
+    let shown = run::shown();
+    let (tags, (_, on)) = (&shown.tags, marks(things));
+    let mut rows: Vec<Item<'static>> = tags.iter().map(|tag| Item::new(tag.name.clone(), Some(Mark::Icon(Icon::Tag)), on.contains(&tag.id), false)).collect();
+    rows.push(Item::new(crate::update::language().pick("新建标签", "New tag"), Some(Mark::Icon(Icon::Add)), false, !tags.is_empty()));
+    (rows, tags.iter().map(|one| tag(one.id)).chain([new]).collect())
 }
 
-/// The box a new tag is named in (see `ui::rename`), `ids` of it as it is made.
-pub fn naming_tag(ids: Vec<u64>) -> crate::ui::rename::Naming {
-    crate::ui::rename::Naming::tag(String::new(), crate::update::language(), move |written| run::ask(run::Ask::NewTag(written.to_string(), ids)))
+/// A menu's "标签" of `things`: the row, opening the tags there are (see `tag_rows`), and what each of those is chosen
+/// as.
+fn tags_row<C>(things: &[Thing], tag: fn(u32) -> C, new: C) -> (crate::ui::menu::Item<'static>, Vec<C>) {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Mark};
+    let mut row = Item::new(crate::update::language().pick("标签", "Tags"), Some(Mark::Icon(Icon::Tag)), false, false);
+    let (more, chosen) = tag_rows(things, tag, new);
+    row.more = more;
+    (row, chosen)
+}
+
+/// What the menu of a thing's tags does (see `tags_menu`): the thing of one, or not any more, or a new one made.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TagsChoice {
+    Tag(u32),
+    New,
+}
+
+/// The menu of the tags of `thing` (its button pressed), at `at` on the screen: up, with what its rows do.
+pub fn tags_menu(thing: Thing, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<TagsChoice>)> {
+    let (rows, chosen) = tag_rows(&[thing], TagsChoice::Tag, TagsChoice::New);
+    Some((crate::ui::menu::Menu::open_at(rows, look, at, false, over_the_panel)?, chosen))
+}
+
+/// The box a new tag is named in (see `ui::rename`), `things` of it as it is made.
+pub fn naming_tag(things: Vec<Thing>) -> crate::ui::rename::Naming {
+    crate::ui::rename::Naming::tag(String::new(), crate::update::language(), move |written| {
+        let (ids, keys) = apart(&things);
+        run::ask(run::Ask::NewTag(written.to_string(), ids, keys))
+    })
 }
 
 /// What a tag's menu does (see `tag_menu`).
@@ -118,8 +221,8 @@ pub enum TagChoice {
     Remove,
 }
 
-/// The menu of the tag `id` of what is pinned of what was copied (a right click on it), at `at` on the screen: up, with
-/// what its rows do, and its name.
+/// The menu of the tag `id` (a right click on it, or its button), at `at` on the screen: up, with what its rows do, and
+/// its name.
 pub fn tag_menu(id: u32, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<TagChoice>, String)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Mark, Menu};
@@ -160,15 +263,10 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     let stays_here = item.stays_here;
     let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     let mut choices: Vec<Choice> = rows.into_iter().map(|(choice, ..)| choice).collect();
-    // "标签" (of what was copied) and "发送到" before the rule, their tags and devices chosen after all its rows (see
-    // `Menu::sub_choice`).
-    let mut tagged = Vec::new();
-    if item.copied {
-        let (tags, chosen) = tags_row(&[item], &shown.tags, Choice::Tag, Choice::NewTag);
-        items.insert(items.len() - 1, tags);
-        choices.insert(choices.len() - 1, Choice::Tags);
-        tagged = chosen;
-    }
+    // "标签" and "发送到" before the rule, their tags and devices chosen after all its rows (see `Menu::sub_choice`).
+    let (tags, tagged) = tags_row(&[Thing::Item(id)], Choice::Tag, Choice::NewTag);
+    items.insert(items.len() - 1, tags);
+    choices.insert(choices.len() - 1, Choice::Tags);
     let (send, keys) = send::menu_row(stays_here);
     items.insert(items.len() - 1, send);
     choices.insert(choices.len() - 1, Choice::Send);
@@ -179,19 +277,17 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
 
 /// `choice` made in the menu of the thing `id` on the station (see `menu`): done, on the station's thread.
 pub fn chose(id: u64, choice: Choice) {
-    let shown = run::shown();
-    let item = shown.items.iter().find(|item| item.id == id);
-    let pinned = item.is_some_and(|item| item.pinned);
+    let thing = Thing::Item(id);
     run::ask(match choice {
         Choice::Copy => run::Ask::Copy(id),
         Choice::Open => run::Ask::Open(id),
         // (Opened beside what it was chosen on, by that: see `Controller::end_menu`.)
         Choice::Preview => return,
         Choice::Show => run::Ask::Show(id),
-        Choice::Pin => run::Ask::Pin(id, !pinned),
+        Choice::Pin => return pin(&[thing], !marks(&[thing]).0),
         // (A new one named in its box first, opened by the thread the menu was up on: see `ui::rename`.)
         Choice::Tags | Choice::NewTag => return,
-        Choice::Tag(tag) => run::Ask::Tag(vec![id], tag, !item.is_some_and(|item| item.tags.contains(&tag))),
+        Choice::Tag(tag) => return turn_tag(&[thing], tag),
         Choice::Send => return,
         Choice::SendTo(key) => run::Ask::SendTo(vec![run::Given::Item(id)], key),
         Choice::Remove => run::Ask::Remove(id),
@@ -231,8 +327,8 @@ fn given(hits: &[crate::ui::view::Hit]) -> Vec<run::Given> {
 }
 
 /// What the menu of things chosen together does with all of them (see `select`): puts them on the clipboard as one,
-/// shows those that are files in Explorer, puts files come lately on the station, pins them on it or not, sends them
-/// to a device nearby (as `Choice` does), takes them off it.
+/// shows those that are files in Explorer, puts files come lately on the station, pins them or not, tags them, sends
+/// them to a device nearby (as `Choice` does), takes them off it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ManyChoice {
     Copy,
@@ -247,11 +343,11 @@ pub enum ManyChoice {
     Remove,
 }
 
-/// What the menu of `hits`, chosen together, offers, as the station holds `items`: putting them on the clipboard,
-/// showing them in Explorer, where any is a file (files come lately are), files come lately put on the station, things
-/// on it, or copied lately, pinned (unpinned, where all are), all of them copied lately tagged, all sent to a device nearby (the devices: see
-/// `many_menu`), and taken off.
-pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec<ManyChoice> {
+/// What the menu of `hits`, chosen together, offers, as the station holds `items` and the files come lately are `came`:
+/// putting them on the clipboard, showing them in Explorer, where any is a file (files come lately are), files come
+/// lately put on the station, all pinned (unpinned, where all are), tagged, and sent to a device nearby (the devices: see
+/// `many_menu`), and things on the station, or copied lately, taken off.
+pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item], came: &[recent::Came]) -> Vec<ManyChoice> {
     use crate::ui::view::Hit;
     let item = |id: u64| items.iter().find(|item| item.id == id);
     let ids: Vec<u64> = hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None }).collect();
@@ -264,14 +360,9 @@ pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec
     if recent {
         choices.push(ManyChoice::Station);
     }
-    if !ids.is_empty() {
-        let pinned = ids.iter().all(|id| item(*id).is_some_and(|item| item.pinned));
-        choices.push(ManyChoice::Pin(!pinned));
-    }
-    if hits.iter().all(|hit| matches!(hit, Hit::Copied(_))) {
-        choices.push(ManyChoice::Tags);
-    }
-    choices.push(ManyChoice::Send);
+    let things: Vec<Thing> = hits.iter().filter_map(|hit| Thing::of(*hit)).collect();
+    choices.push(ManyChoice::Pin(!marks_among(&things, items, came).0));
+    choices.extend([ManyChoice::Tags, ManyChoice::Send]);
     if !ids.is_empty() {
         choices.push(ManyChoice::Remove);
     }
@@ -287,11 +378,11 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
     let lang = crate::update::language();
     let shown = run::shown();
     let items_held = &shown.items;
-    let mut choices = many_choices(hits, items_held);
+    let mut choices = many_choices(hits, items_held, &recent::shown());
     // (Sent all together: none where one of them may not leave this PC.)
     let stays_here = hits.iter().any(|hit| matches!(hit, Hit::Shelf(id) | Hit::Copied(id) if items_held.iter().any(|item| item.id == *id && item.stays_here)));
-    let copied: Vec<&shelf::Item> = hits.iter().filter_map(|hit| if let Hit::Copied(id) = hit { items_held.iter().find(|item| item.id == *id) } else { None }).collect();
-    let (tags, tagged) = tags_row(&copied, &shown.tags, ManyChoice::Tag, ManyChoice::NewTag);
+    let things: Vec<Thing> = hits.iter().filter_map(|hit| Thing::of(*hit)).collect();
+    let (tags, tagged) = tags_row(&things, ManyChoice::Tag, ManyChoice::NewTag);
     let (send, keys) = send::menu_row(stays_here);
     let row = |label: &'static str, icon: Icon, rule_before: bool| Item::new(label, Some(crate::ui::menu::Mark::Icon(icon)), false, rule_before);
     let items: Vec<Item<'static>> = choices
@@ -308,9 +399,7 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
         })
         .collect();
     // (Its tags and its devices chosen after all its rows: see `Menu::sub_choice`.)
-    if choices.contains(&ManyChoice::Tags) {
-        choices.extend(tagged);
-    }
+    choices.extend(tagged);
     choices.extend(keys.into_iter().map(ManyChoice::SendTo));
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, choices))
@@ -321,6 +410,7 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
 pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
     use crate::ui::view::Hit;
     let ids = || hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None });
+    let things = || hits.iter().filter_map(|hit| Thing::of(*hit)).collect::<Vec<Thing>>();
     match choice {
         ManyChoice::Copy => run::ask(run::Ask::Together(given(hits), run::Together::Copy)),
         ManyChoice::Show => run::ask(run::Ask::Together(given(hits), run::Together::Show)),
@@ -330,13 +420,9 @@ pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
                 run::ask(run::Ask::Take(clipboard::Content::Files(paths)));
             }
         }
-        ManyChoice::Pin(pinned) => ids().for_each(|id| run::ask(run::Ask::Pin(id, pinned))),
+        ManyChoice::Pin(pinned) => pin(&things(), pinned),
         ManyChoice::Tags | ManyChoice::NewTag => {}
-        ManyChoice::Tag(tag) => {
-            let shown = run::shown();
-            let all = ids().all(|id| shown.items.iter().any(|item| item.id == id && item.tags.contains(&tag)));
-            run::ask(run::Ask::Tag(ids().collect(), tag, !all));
-        }
+        ManyChoice::Tag(tag) => turn_tag(&things(), tag),
         ManyChoice::Send => {}
         ManyChoice::SendTo(key) => run::ask(run::Ask::SendTo(given(hits), key)),
         ManyChoice::Remove => {
@@ -346,15 +432,20 @@ pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
     }
 }
 
-/// What a file come lately's menu does: opens it, shows it in Explorer, puts it on the station, copies its path, sends
-/// it to a device nearby (as `Choice` does), lists no more of its folder's files. (Files come together: their folder
-/// opened showing them, all put on the station, the folder's path copied, all sent.)
+/// What a file come lately's menu does: opens it, shows it in Explorer, puts it on the station, copies its path, pins it
+/// (or not), tags it and sends it to a device nearby (as `Choice` does), lists no more of its folder's files. (Files
+/// come together: their folder opened showing them, all put on the station, the folder's path copied, all pinned, tagged
+/// and sent.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecentChoice {
     Open,
     Show,
     Station,
     CopyPath,
+    Pin,
+    Tags,
+    Tag(u32),
+    NewTag,
     Send,
     SendTo(u64),
     Hide,
@@ -367,27 +458,32 @@ pub fn recent_menu(entry: recent::Entry, at: windows::Win32::Foundation::POINT, 
     use crate::ui::menu::{Item, Menu};
     recent::paths_of(entry)?;
     let lang = crate::update::language();
-    let rows: Vec<(RecentChoice, &str, Icon, bool)> = match entry {
+    let thing = Thing::Recent(entry);
+    let mut rows: Vec<(RecentChoice, &str, Icon, bool)> = match entry {
         recent::Entry::File(_) => vec![
             (RecentChoice::Open, lang.pick("打开", "Open"), Icon::File, false),
             (RecentChoice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
             (RecentChoice::Station, lang.pick("放入中转站", "Put on the station"), Icon::Inbox, false),
             (RecentChoice::CopyPath, lang.pick("复制路径", "Copy its path"), Icon::Clipboard, false),
-            (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true),
         ],
         recent::Entry::Burst(..) => vec![
             (RecentChoice::Show, lang.pick("打开所在文件夹", "Open their folder"), Icon::Panel, false),
             (RecentChoice::Station, lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
             (RecentChoice::CopyPath, lang.pick("复制文件夹路径", "Copy the folder's path"), Icon::Clipboard, false),
-            (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true),
         ],
     };
+    rows.push((RecentChoice::Pin, if marks(&[thing]).0 { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
+    rows.push((RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true));
     let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     let mut choices: Vec<RecentChoice> = rows.into_iter().map(|(choice, ..)| choice).collect();
-    // "发送到" before the rule, its devices chosen after all its rows (see `Menu::sub_choice`).
+    // "标签" and "发送到" before the rule, their tags and devices chosen after all its rows (see `Menu::sub_choice`).
+    let (tags, tagged) = tags_row(&[thing], RecentChoice::Tag, RecentChoice::NewTag);
+    items.insert(items.len() - 1, tags);
+    choices.insert(choices.len() - 1, RecentChoice::Tags);
     let (send, keys) = send::menu_row(false);
     items.insert(items.len() - 1, send);
     choices.insert(choices.len() - 1, RecentChoice::Send);
+    choices.extend(tagged);
     choices.extend(keys.into_iter().map(RecentChoice::SendTo));
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, choices))
@@ -396,13 +492,17 @@ pub fn recent_menu(entry: recent::Entry, at: windows::Win32::Foundation::POINT, 
 /// `choice` made in the menu of `entry` among the files come lately (see `recent_menu`): done.
 pub fn recent_chose(entry: recent::Entry, choice: RecentChoice) {
     let Some(paths) = recent::paths_of(entry) else { return };
+    let thing = Thing::Recent(entry);
     // (The files come together are in one folder.)
     let folder = paths.first().and_then(|path| path.parent()).map(std::path::Path::to_path_buf);
     match choice {
         RecentChoice::Open => run::ask(run::Ask::Files(paths, run::FilesAct::Open)),
         RecentChoice::Show => run::ask(run::Ask::Files(paths, run::FilesAct::Show)),
         RecentChoice::Station => run::ask(run::Ask::Take(clipboard::Content::Files(paths))),
-        RecentChoice::Send => {}
+        RecentChoice::Pin => pin(&[thing], !marks(&[thing]).0),
+        RecentChoice::Tag(tag) => turn_tag(&[thing], tag),
+        // (A new one named in its box first, opened by the thread the menu was up on: see `ui::rename`.)
+        RecentChoice::Tags | RecentChoice::NewTag | RecentChoice::Send => {}
         RecentChoice::SendTo(key) => run::ask(run::Ask::SendTo(vec![run::Given::Files(paths)], key)),
         RecentChoice::CopyPath => {
             let copied = match entry {
@@ -476,8 +576,8 @@ pub fn app_chose(app: apps::App, choice: AppChoice) {
     }
 }
 
-/// What a row of the station's head's menus does: shows what is on it so; takes off what is not pinned, of what is on
-/// it or of what was copied lately; keeps no more of what is copied; opens the settings.
+/// What a row of the station's head's menus does: shows what is on it so; takes off what does not stay, of what is on it
+/// or of what was copied lately; keeps no more of what is copied; opens the settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeadChoice {
     /// One of its pages shown (from the menu of them all, where their names do not fit side by side).
@@ -502,7 +602,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     // Its pages, as one: each, the one shown ticked.
     if hit == Hit::StationPages {
         let shown = run::shown();
-        let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), Icon::Inbox)];
+        let mut pages = vec![(Tab::Shelf(Default::default()).again(tab), lang.pick("中转站", "Station"), Icon::Inbox)];
         if shown.history {
             pages.push((Tab::Copies(Default::default()).again(tab), lang.pick("最近复制", "Copied"), Icon::Clipboard));
         }
@@ -519,7 +619,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     // Each row: what it does, its name, its icon, whether it is ticked, and whether a rule sets it off. How the page
     // shows (each page its own way); under a rule, what else is done with it; the settings last.
     let (page, view) = match tab {
-        Tab::Shelf => (crate::settings::StationPage::Shelf, view),
+        Tab::Shelf(_) => (crate::settings::StationPage::Shelf, view),
         Tab::Copies(_) => (crate::settings::StationPage::Copies, run::shown().copies_view),
         Tab::Recent(_) => (crate::settings::StationPage::Recent, run::shown().recent_view),
     };
@@ -528,10 +628,10 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
         .map(|(shows, label, icon)| (HeadChoice::View(page, shows), label, icon, shows == view, false))
         .collect();
     rows.extend(match tab {
-        Tab::Shelf => vec![(HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Trash, false, true)],
+        Tab::Shelf(_) => vec![(HeadChoice::Clear, lang.pick("全部清空（保留固定和带标签的内容）", "Clear all but the pinned and tagged"), Icon::Trash, false, true)],
         Tab::Recent(_) => vec![(HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::EyeOff, false, true)],
         Tab::Copies(_) => vec![
-            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定的项目）", "Clear Recently copied but the pinned"), Icon::Trash, false, true),
+            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定和带标签的内容）", "Clear Recently copied but the pinned and tagged"), Icon::Trash, false, true),
             (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
         ],
     });
@@ -590,25 +690,59 @@ mod tests {
     }
 
     /// The menu of things chosen together offers what may be done with all of them: put on the clipboard ever, shown
-    /// in Explorer where any is a file, files come lately put on the station, things on it pinned (unpinned where all
-    /// are) and taken off.
+    /// in Explorer where any is a file, files come lately put on the station, all pinned (unpinned where all are) and
+    /// tagged, and things on the station taken off.
     #[test]
     fn the_menu_of_things_chosen_together_offers_what_all_may_do() {
         use shelf::{Item, What};
-        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Link { url: "https://a.b".into() }, false),
             item(3, What::Picture { file: "3.png".into() }, true),
             item(4, What::Saved { file: "4".into(), name: "a.txt".into(), words: true }, false),
         ];
-        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(2)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Send, ManyChoice::Remove]);
-        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Copied(4)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Send, ManyChoice::Remove]);
-        // (All copied lately: tagged together.)
-        assert_eq!(many_choices(&[Hit::Copied(4), Hit::Copied(5)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Tags, ManyChoice::Send, ManyChoice::Remove]);
-        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(3)], &items), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Pin(false), ManyChoice::Send, ManyChoice::Remove]);
-        let entry = recent::Entry::File(recent::Key { drive: 'C', file: 1 });
-        let other = recent::Entry::File(recent::Key { drive: 'C', file: 2 });
-        assert_eq!(many_choices(&[Hit::Recent(entry), Hit::Recent(other)], &items), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Station, ManyChoice::Send]);
+        let choices = |hits: &[Hit], files: &[recent::Came]| many_choices(hits, &items, files);
+        assert_eq!(choices(&[Hit::Shelf(1), Hit::Shelf(2)], &[]), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Tags, ManyChoice::Send, ManyChoice::Remove]);
+        assert_eq!(choices(&[Hit::Shelf(1), Hit::Copied(4)], &[]), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Tags, ManyChoice::Send, ManyChoice::Remove]);
+        assert_eq!(choices(&[Hit::Shelf(1), Hit::Shelf(3)], &[]), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Pin(false), ManyChoice::Tags, ManyChoice::Send, ManyChoice::Remove]);
+        let key = |file: u128| recent::Key { drive: 'C', file };
+        let hits = [1, 2].map(|file| Hit::Recent(recent::Entry::File(key(file))));
+        let mut files: Vec<recent::Came> = [1, 2].map(|file| recent::Came::of(key(file), format!(r"C:\{file}.pdf").into(), 1, 1, recent::Kind::Document)).into();
+        assert_eq!(choices(&hits, &files), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Station, ManyChoice::Pin(true), ManyChoice::Tags, ManyChoice::Send]);
+        files.iter_mut().for_each(|came| came.marks.pinned = true);
+        assert!(choices(&hits, &files).contains(&ManyChoice::Pin(false)));
+    }
+
+    /// Things marked together: pinned where all are, of the tags all have, files come together each of its own. Those
+    /// gone are not counted.
+    #[test]
+    fn things_are_marked_as_all_of_them_are() {
+        use shelf::{Item, What};
+        let item = |id: u64, pinned: bool, tags: &[u32]| Item { id, what: What::Text { text: "a".into() }, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: tags.to_vec(), held: false, freed_ms: 0 };
+        let items = [item(1, true, &[1, 2]), item(2, true, &[2, 3]), item(3, false, &[2])];
+        let mut files: Vec<recent::Came> = (1..=5).rev().map(|file| recent::Came::of(recent::Key { drive: 'D', file }, format!(r"D:\Phone\{file}.jpg").into(), file as u64, 1, recent::Kind::Picture)).collect();
+        files.iter_mut().for_each(|came| came.marks = recent::Marks { pinned: true, tags: vec![2], freed_ms: 0 });
+        let burst = Thing::Recent(recent::Entry::Burst(recent::Filter::Pinned, files[0].key));
+        let marks = |things: &[Thing], files: &[recent::Came]| marks_among(things, &items, files);
+        assert_eq!(marks(&[Thing::Item(1), Thing::Item(2), Thing::Item(9)], &files), (true, vec![2]));
+        assert_eq!(marks(&[Thing::Item(1), Thing::Item(3)], &files), (false, vec![2]));
+        assert_eq!(marks(&[Thing::Item(1), burst], &files), (true, vec![2]));
+        files[3].marks.tags.clear();
+        assert_eq!(marks(&[burst], &files), (true, vec![]));
+        assert_eq!(marks(&[Thing::Item(9)], &files), (false, vec![]));
+    }
+
+    /// A page is sorted by the tags its own things have, those nothing has anywhere, and the one it shows.
+    #[test]
+    fn a_page_shows_its_own_tags() {
+        let tags: Vec<shelf::Tag> = (1..=4).map(|id| shelf::Tag { id, name: id.to_string() }).collect();
+        let mut file = recent::Came::of(recent::Key { drive: 'D', file: 1 }, r"D:\a.pdf".into(), 1, 1, recent::Kind::Document);
+        file.marks.tags = vec![2];
+        let item = shelf::Item { id: 1, what: shelf::What::Text { text: "a".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: vec![1, 4], held: false, freed_ms: 0 };
+        let shown = |here: &[u32], lit: Option<u32>| tags_of(&tags, |tag| here.contains(&tag), lit, &[item.clone()], &[file.clone()]).iter().map(|tag| tag.id).collect::<Vec<_>>();
+        assert_eq!(shown(&[1, 4], None), [1, 3, 4]);
+        assert_eq!(shown(&[2], None), [2, 3]);
+        assert_eq!(shown(&[], Some(4)), [3, 4]);
     }
 }

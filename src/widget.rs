@@ -1426,6 +1426,8 @@ struct Readings {
     note_shown: view::NoteShown,
     /// Which of the AI component's sources it shows first, too small for all of them (see `view::keep_source`).
     source_shown: view::SourceShown,
+    /// The choices over its station's page, as they were last drawn (see `view::show_choice`).
+    choice_shown: view::ChoiceShown,
     /// Where a press finds what it shows, as it was last drawn anew (DIPs from its corner): merged, given with what
     /// plays' again each frame it is drawn from its layers as it was (see `draw_merged`).
     hits: Vec<view::HitBox>,
@@ -1433,7 +1435,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -2288,8 +2290,6 @@ impl Widgets {
         self.save();
     }
 
-    /// The menu a press on a widget's station asked for (see `Released::Menu`), taken: the button pressed, and the page
-    /// its station shows.
     /// The station's page `tab` shown on the widget at `hwnd` (chosen in its menu of them, or something dragged over
     /// where it is chosen): the one shown already keeps its filter.
     pub fn show_page(&mut self, hwnd: HWND, tab: view::Tab) {
@@ -2302,6 +2302,20 @@ impl Widgets {
         }
     }
 
+    /// All of the station's page `tab` shown on the widget at `hwnd`, where that is the page it shows (something let go
+    /// on it).
+    pub fn show_all(&mut self, hwnd: HWND, tab: view::Tab) {
+        if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
+            if let Some(readings) = widget.content.readings_mut().filter(|readings| readings.tab.page() == tab && readings.tab != tab) {
+                readings.tab = tab;
+                crate::station::select::turned(widget.window.hwnd.0 as isize, tab);
+                widget.next_frame = Instant::now();
+            }
+        }
+    }
+
+    /// The menu a press on a widget's station asked for (see `Released::Menu`), taken: the button pressed, and the page
+    /// its station shows.
     pub fn take_menu_asked(&mut self) -> Option<(view::Hit, view::Tab)> {
         self.menu_asked.take()
     }
@@ -2525,6 +2539,11 @@ impl Widgets {
     /// The station's page the widget at `hwnd` shows (see `view::Tab`).
     pub fn page_of(&self, hwnd: HWND) -> view::Tab {
         self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(view::Tab::default, |widget| widget.content.tab())
+    }
+
+    /// Whether the widget at `hwnd` shows its station's page whole (see `view::lane_whole`).
+    pub fn lane_whole(&self, hwnd: HWND) -> bool {
+        self.list.iter().find(|w| w.window.hwnd == hwnd).is_some_and(|widget| view::lane_whole(&widget.hits))
     }
 
     /// Where the pointer at `client` (physical px in the window of the widget at `hwnd`) is on a list of things that
@@ -3756,7 +3775,7 @@ impl Widget {
         }
         match takes {
             Takes::Shelf(hit) => {
-                self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.content.tab(), keys, from));
+                self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.content.tab(), view::lane_whole(&self.hits), keys, from));
                 unsafe { SetCapture(self.window.hwnd) };
                 return;
             }
@@ -4171,12 +4190,6 @@ impl Widget {
                                         readings.tab = tab;
                                     }
                                     crate::station::select::turned(self.window.hwnd.0 as isize, tab);
-                                }
-                                // A new tag: named in its box, over its button (see `ui::rename`).
-                                Some(view::Hit::NewTag) => {
-                                    if let Some(at) = self.hits_on_screen().into_iter().find(|(_, on)| *on == view::Hit::NewTag).map(|(rect, _)| rect) {
-                                        crate::ui::rename::open(self.window.hwnd, crate::station::naming_tag(Vec::new()), POINT { x: at.left, y: at.top }, self.menu_look(), crate::update::language());
-                                    }
                                 }
                                 // A dot beside the AI component's sources: turned to its page.
                                 Some(view::Hit::AiPage(page)) => {
@@ -4990,6 +5003,12 @@ impl Widget {
         let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
+        // The choices over its station's page: the one just lit, or just come, brought into sight.
+        let choices_moving = {
+            let Widget { content, hits, .. } = &mut *self;
+            let shown = crate::station::run::shown();
+            content.readings_mut().is_some_and(|readings| view::show_choice(&mut readings.scrolls, &mut readings.choice_shown, hits, readings.tab.there(&shown)))
+        };
         self.follow_card(&theme, prefs, look.lang);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if sizing {
@@ -5015,7 +5034,7 @@ impl Widget {
             Content::Merged(merged) => merged.busy(),
             _ => false,
         };
-        if moving || easing || turning || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
+        if moving || choices_moving || easing || turning || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
     }
 
     /// On the device for the screen it is on, if it is not on it (a driver reset, a device lost, or it was moved to a
@@ -5802,13 +5821,13 @@ mod tests {
     fn readings_merged_with_what_plays_are_found_as_it_plays() {
         let _device = gfx::held().unwrap();
         let _pretending = crate::pretending();
-        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         crate::station::run::pretend((1..=40).map(item).collect(), crate::settings::ShelfView::List);
         let theme = workbench_dressed(Theme::new(Skin::Fluent, false));
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::Shelf, hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let readings = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, ..Readings::new(choice) });
         let mut merged = Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, (600.0, 700.0));

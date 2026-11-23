@@ -31,24 +31,31 @@ impl Keys {
     }
 }
 
-/// A list things are chosen in: the window it shows in (its handle, as a number) and the page of the lane it is.
+/// A list things are chosen in: the window it shows in (its handle, as a number) and the page of the lane it is, or
+/// (`row`) all that is on the station, in a row, or a grid, of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct On {
     pub window: isize,
     pub page: Tab,
+    pub row: bool,
 }
 
 impl On {
-    /// The list `hit` is in, in `window`, its lane showing the page `shown` (a thing on the station shows on its page
-    /// whatever page is chosen where the lane is a row of them).
-    pub fn of(window: isize, hit: Hit, shown: Tab) -> On {
+    /// The list `hit` is in, in `window`, its lane showing the page `shown`, whole or not (see `view::lane_whole`: a
+    /// thing on the station shows whatever page is chosen where the lane is a row of them).
+    pub fn of(window: isize, hit: Hit, shown: Tab, whole: bool) -> On {
         let page = match (hit, shown) {
-            (Hit::Copied(_), Tab::Copies(_)) | (Hit::Recent(_), Tab::Recent(_)) => shown,
+            (Hit::Copied(_), Tab::Copies(_)) | (Hit::Recent(_), Tab::Recent(_)) | (Hit::Shelf(_), Tab::Shelf(_)) => shown,
             (Hit::Copied(_), _) => Tab::Copies(Default::default()),
             (Hit::Recent(_), _) => Tab::Recent(Default::default()),
-            _ => Tab::Shelf,
+            _ => Tab::default(),
         };
-        On { window, page }
+        On { window, page, row: matches!(hit, Hit::Shelf(_)) && !whole }
+    }
+
+    /// The things in it, in their order.
+    fn order(self) -> Vec<Hit> {
+        if self.row { crate::ui::view::row_order() } else { crate::ui::view::lane_order(self.page) }
     }
 }
 
@@ -201,11 +208,11 @@ pub struct Press {
     pub from: windows::Win32::Foundation::POINT,
 }
 
-/// `hit` pressed with `keys` held in the window `window`, its lane showing the page `shown`, the pointer at `from`:
-/// what is chosen as the press comes (see `Chosen::pressed`).
-pub fn press(window: isize, hit: Hit, shown: Tab, keys: Keys, from: windows::Win32::Foundation::POINT) -> Press {
-    let on = On::of(window, hit, shown);
-    change(|chosen| chosen.pressed(on, hit, keys, &crate::ui::view::lane_order(on.page)));
+/// `hit` pressed with `keys` held in the window `window`, its lane showing the page `shown` (`whole`: as `On::of`
+/// says), the pointer at `from`: what is chosen as the press comes (see `Chosen::pressed`).
+pub fn press(window: isize, hit: Hit, shown: Tab, whole: bool, keys: Keys, from: windows::Win32::Foundation::POINT) -> Press {
+    let on = On::of(window, hit, shown, whole);
+    change(|chosen| chosen.pressed(on, hit, keys, &on.order()));
     Press { hit, on, keys, from }
 }
 
@@ -216,20 +223,20 @@ pub fn release(press: Press) -> bool {
 
 /// `press` dragged off: what goes, the thing pressed first (see `Chosen::dragged`).
 pub fn drag(press: Press) -> Vec<Hit> {
-    change(|chosen| chosen.dragged(press.on, press.hit, press.keys, &crate::ui::view::lane_order(press.on.page)))
+    change(|chosen| chosen.dragged(press.on, press.hit, press.keys, &press.on.order()))
 }
 
 /// `hit` given a right click in the window `window` showing the page `shown`: what the menu of things chosen together
 /// is for, or none (see `Chosen::menu_on`).
-pub fn menu_on(window: isize, hit: Hit, shown: Tab) -> Vec<Hit> {
-    let on = On::of(window, hit, shown);
-    change(|chosen| chosen.menu_on(on, hit, &crate::ui::view::lane_order(on.page)))
+pub fn menu_on(window: isize, hit: Hit, shown: Tab, whole: bool) -> Vec<Hit> {
+    let on = On::of(window, hit, shown, whole);
+    change(|chosen| chosen.menu_on(on, hit, &on.order()))
 }
 
 /// All of the list `hit` is in chosen, in the window `window` showing the page `shown` (Ctrl+A over it).
-pub fn all(window: isize, hit: Hit, shown: Tab) {
-    let on = On::of(window, hit, shown);
-    change(|chosen| chosen.all(on, &crate::ui::view::lane_order(on.page)));
+pub fn all(window: isize, hit: Hit, shown: Tab, whole: bool) {
+    let on = On::of(window, hit, shown, whole);
+    change(|chosen| chosen.all(on, &on.order()));
 }
 
 /// What is chosen now.
@@ -266,7 +273,7 @@ pub fn window() -> Option<isize> {
 /// What is chosen in the window `window`, in its list's order: none where nothing is chosen there.
 pub fn in_window(window: isize) -> Vec<Hit> {
     let chosen = now();
-    chosen.on.filter(|on| on.window == window).map_or_else(Vec::new, |on| chosen.in_order(on, &crate::ui::view::lane_order(on.page)))
+    chosen.on.filter(|on| on.window == window).map_or_else(Vec::new, |on| chosen.in_order(on, &on.order()))
 }
 
 /// Nothing chosen in the window `window` any more (a press there where nothing is, it gone).
@@ -278,10 +285,11 @@ pub fn leave(window: isize) {
     });
 }
 
-/// The page shown in the window `window` turned to `page`: what was chosen on another page there, no longer.
+/// The page shown in the window `window` turned to `page`: what was chosen on another page there, no longer. (What was
+/// chosen in a row of all that is on the station is in no page.)
 pub fn turned(window: isize, page: Tab) {
     change(|chosen| {
-        if chosen.on.is_some_and(|on| on.window == window && on.page != page) {
+        if chosen.on.is_some_and(|on| on.window == window && !on.row && on.page != page) {
             chosen.clear();
         }
     });
@@ -313,7 +321,7 @@ pub fn landing(hits: &[Hit]) -> usize {
 mod tests {
     use super::*;
 
-    const ON: On = On { window: 7, page: Tab::Shelf };
+    const ON: On = On { window: 7, page: Tab::Shelf(crate::station::shelf::Filter::All), row: false };
     const ORDER: [Hit; 6] = [Hit::Shelf(10), Hit::Shelf(11), Hit::Shelf(12), Hit::Shelf(13), Hit::Shelf(14), Hit::Shelf(15)];
     const CTRL: Keys = Keys { ctrl: true, shift: false };
     const SHIFT: Keys = Keys { ctrl: false, shift: true };
@@ -425,8 +433,8 @@ mod tests {
     /// What is chosen lives in one list: a press in another (another page, another window) leaves it, Ctrl or not.
     #[test]
     fn what_is_chosen_lives_in_one_list() {
-        let copies = On { window: 7, page: Tab::Copies(Default::default()) };
-        let widget = On { window: 9, page: Tab::Shelf };
+        let copies = On { window: 7, page: Tab::Copies(Default::default()), row: false };
+        let widget = On { window: 9, page: Tab::default(), row: false };
         let mut chosen = Chosen::default();
         click(&mut chosen, ON, Hit::Shelf(10), CTRL);
         click(&mut chosen, ON, Hit::Shelf(11), CTRL);
@@ -468,18 +476,21 @@ mod tests {
         assert_eq!(chosen.in_order(ON, &fewer), fewer);
     }
 
-    /// The list a thing is in: the page shown, of its kind (a filter of it kept), a thing on the station, its page,
-    /// shown as a row of them whatever page is chosen.
+    /// The list a thing is in: the page shown, of its kind (a filter of it kept), a thing on the station where its lane
+    /// is a row of them, that row, whatever page is chosen.
     #[test]
     fn a_thing_is_in_the_list_of_its_page() {
         use crate::station::shelf::Filter;
         let words = Tab::Copies(Filter::Words);
-        assert_eq!(On::of(3, Hit::Copied(1), words).page, words);
-        assert_eq!(On::of(3, Hit::Copied(1), Tab::Shelf).page, Tab::Copies(Filter::All));
-        assert_eq!(On::of(3, Hit::Shelf(1), words).page, Tab::Shelf);
+        let pinned = Tab::Shelf(Filter::Pinned);
+        assert_eq!(On::of(3, Hit::Copied(1), words, true), On { window: 3, page: words, row: false });
+        assert_eq!(On::of(3, Hit::Copied(1), pinned, true).page, Tab::Copies(Filter::All));
+        assert_eq!(On::of(3, Hit::Shelf(1), words, true).page, Tab::default());
+        assert_eq!(On::of(3, Hit::Shelf(1), pinned, true), On { window: 3, page: pinned, row: false });
+        assert!(On::of(3, Hit::Shelf(1), words, false).row);
         let shots = Tab::Recent(crate::station::recent::Filter::Screenshots);
         let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: 1 });
-        assert_eq!(On::of(3, Hit::Recent(entry), shots), On { window: 3, page: shots });
+        assert_eq!(On::of(3, Hit::Recent(entry), shots, true), On { window: 3, page: shots, row: false });
     }
 
     /// Files put on the station together land as so many files, anything else as one.

@@ -1065,9 +1065,9 @@ pub struct StationSettings {
     pub view: ShelfView,
     pub copies_view: ShelfView,
     pub recent_view: ShelfView,
-    /// What is pinned of what was copied folded away where it is listed first (see `station::shelf::copies`).
-    pub pins_folded: bool,
-    /// How many days what is not pinned stays.
+    /// What is pinned folded away where it is listed first (see `station::shelf::listed`), on each page.
+    pub folded: PinsFolded,
+    /// How many days what is neither pinned nor tagged stays.
     pub keep_days: u32,
     /// Files put on it kept as a copy too (else only where they are).
     pub always_copy: bool,
@@ -1077,11 +1077,41 @@ pub struct StationSettings {
 
 impl Default for StationSettings {
     fn default() -> Self {
-        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, pins_folded: false, keep_days: 7, always_copy: false, remove_after_drag: false }
+        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, folded: PinsFolded { shelf: false, copies: false, recent: false }, keep_days: 7, always_copy: false, remove_after_drag: false }
     }
 }
 
-/// The most the station keeps of its own (GB): past it, what is oldest and not pinned goes first.
+/// On which of the station's pages what is pinned is folded away where it is listed first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PinsFolded {
+    pub shelf: bool,
+    pub copies: bool,
+    pub recent: bool,
+}
+
+impl PinsFolded {
+    /// Whether it is on `page`.
+    pub fn on(&self, page: StationPage) -> bool {
+        match page {
+            StationPage::Shelf => self.shelf,
+            StationPage::Copies => self.copies,
+            StationPage::Recent => self.recent,
+        }
+    }
+
+    /// Folded on `page` where it was not, and shown where it was folded.
+    pub fn turn(&mut self, page: StationPage) {
+        let folded = match page {
+            StationPage::Shelf => &mut self.shelf,
+            StationPage::Copies => &mut self.copies,
+            StationPage::Recent => &mut self.recent,
+        };
+        *folded ^= true;
+    }
+}
+
+/// The most the station keeps of its own (GB): past it, what is oldest and neither pinned nor tagged goes first.
 const STATION_MOST_GB: u64 = 2;
 
 impl StationSettings {

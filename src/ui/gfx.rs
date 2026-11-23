@@ -1358,7 +1358,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Cell::new(Matrix3x2::identity()), on: None, failed: Default::default(), moving: Cell::new(false) });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Cell::new(Matrix3x2::identity()), on: None, failed: Default::default(), moving: Cell::new(false), clips: Default::default() });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -1477,6 +1477,8 @@ pub struct Frame<'a> {
     failed: std::cell::RefCell<Option<windows::core::Error>>,
     /// Drawing what moves (see `set_moving`): nothing put on whole pixels meanwhile.
     moving: Cell<bool>,
+    /// The canvas's clips on now, each fading (a layer) or not (see `Canvas::clip_fading`).
+    clips: std::cell::RefCell<Vec<bool>>,
 }
 
 impl Canvas for Frame<'_> {
@@ -1522,6 +1524,23 @@ impl Canvas for Frame<'_> {
         // fill unclipped, and what was under showed there.)
         let (x, y, width, height) = self.on_pixels(x, y, width, height);
         unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        self.clips.borrow_mut().push(false);
+    }
+
+    fn clip_fading(&self, x: f32, y: f32, width: f32, height: f32, (left, right): (f32, f32)) {
+        let (bx, by, bw, bh) = self.on_pixels(x, y, width, height);
+        match self.fading(bx, bw, left, right) {
+            Some(mask) => {
+                // (The axes' clip is the layer's bounds: what is past them is not drawn.)
+                let mut layer = windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1 { contentBounds: rect(bx, by, bw, bh), maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, opacity: 1.0, opacityBrush: std::mem::ManuallyDrop::new(Some(mask)), maskTransform: Matrix3x2::identity(), ..Default::default() };
+                unsafe {
+                    self.dc.PushLayer(&layer, None);
+                    std::mem::ManuallyDrop::drop(&mut layer.opacityBrush);
+                }
+                self.clips.borrow_mut().push(true);
+            }
+            None => Canvas::clip(self, x, y, width, height),
+        }
     }
 
     fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
@@ -1529,7 +1548,10 @@ impl Canvas for Frame<'_> {
     }
 
     fn unclip(&self) {
-        unsafe { self.dc.PopAxisAlignedClip() };
+        match self.clips.borrow_mut().pop() {
+            Some(true) => unsafe { self.dc.PopLayer() },
+            _ => unsafe { self.dc.PopAxisAlignedClip() },
+        }
     }
 
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32) {
@@ -1990,7 +2012,7 @@ impl<'a> Frame<'a> {
                 return Err(error);
             }
         };
-        Ok(Frame { gfx, dc, brush, base: Cell::new(base), on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false) })
+        Ok(Frame { gfx, dc, brush, base: Cell::new(base), on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false), clips: Default::default() })
     }
 
     /// A frame drawn apart by `paint` (see `apart`) and finished, ready to be put where it shows; failed, if anything
@@ -2083,6 +2105,22 @@ impl<'a> Frame<'a> {
         match fill {
             Fill::Solid(color) => self.brush(color).cast().ok(),
             Fill::Down { top, from, bottom, to } => self.gradient(Vector2 { X: 0.0, Y: top }, from, Vector2 { X: 0.0, Y: bottom }, to),
+        }
+    }
+
+    /// A brush to see a box `width` wide at `x` through, fading out over its last `left` and `right`: none where it fades
+    /// at neither, or if Direct2D cannot make it.
+    fn fading(&self, x: f32, width: f32, left: f32, right: f32) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
+        if (left <= 0.0 && right <= 0.0) || width <= 0.0 {
+            return None;
+        }
+        let (seen, gone) = (Color::hex(0xFFFFFF, 1.0), Color::hex(0xFFFFFF, 0.0));
+        let stop = |at: f32, color: Color| D2D1_GRADIENT_STOP { position: (at / width).clamp(0.0, 1.0), color: color.d2d() };
+        let stops = [stop(0.0, if left > 0.0 { gone } else { seen }), stop(left, seen), stop(width - right, seen), stop(width, if right > 0.0 { gone } else { seen })];
+        unsafe {
+            let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
+            let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: x, Y: 0.0 }, endPoint: Vector2 { X: x + width, Y: 0.0 } };
+            self.dc.CreateLinearGradientBrush(&line, None, &collection).ok()?.cast().ok()
         }
     }
 

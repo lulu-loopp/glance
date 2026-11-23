@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// The longest text kept on the shelf itself (UTF-8 bytes); longer, it is kept as a file of the station's own (the
 /// shelf is written whole at each change).
 const TEXT_MOST: usize = 16 << 10;
-/// The most things copied kept in Recently copied, not pinned (the oldest go first).
+/// The most things copied kept in Recently copied, of those that do not stay (the oldest go first).
 const COPIED_MOST: usize = 200;
 
 /// How much a drive is left with by what devices nearby send to a folder of the user's (as the helper leaves its own).
@@ -18,7 +18,7 @@ const ROOM_LEFT: u64 = 1 << 30;
 /// Why what was given was not taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// No room left but what is pinned holds (see `shelf::Full`).
+    /// No room left but what stays holds (see `shelf::Full`).
     Full,
     /// What it keeps of it could not be written (its disk full, a file to be copied in use or gone).
     Unwritten,
@@ -52,10 +52,10 @@ impl Keep {
     /// Takes `content` onto the shelf at `now_ms` (`copied`: as it was copied, into Recently copied; `stays_here`: see
     /// `shelf::Item::stays_here`): its number; why not, where what it keeps of it has no room or cannot be written.
     pub fn take(&mut self, content: Content, copied: bool, stays_here: bool, now_ms: u64) -> Result<u64, Refused> {
-        // Copied again as it was before: the one before goes (the latest stands for both), but one pinned, which stays,
-        // its tags with it, the newest now.
+        // Copied again as it was before: the one before goes (the latest stands for both), but one pinned or tagged,
+        // which stays as it is, the newest now.
         let again: Vec<u64> = self.shelf.items.iter().filter(|item| copied && item.copied && self.is_of(item, &content)).map(|item| item.id).collect();
-        if let Some(id) = again.iter().copied().find(|id| self.shelf.get(*id).is_some_and(|item| item.pinned)) {
+        if let Some(id) = again.iter().copied().find(|id| self.shelf.get(*id).is_some_and(Item::stays)) {
             self.refused = None;
             self.shelf.copied_again(id, stays_here, now_ms);
             self.save();
@@ -75,9 +75,8 @@ impl Keep {
         }
         let id = self.shelf.put(what, now_ms, copied, stays_here, own_bytes);
         if copied {
-            let copies: Vec<u64> = self.shelf.items.iter().filter(|item| item.copied && !item.pinned).map(|item| item.id).collect();
-            for id in &copies[..copies.len().saturating_sub(COPIED_MOST)] {
-                self.remove(*id);
+            for id in self.shelf.past(COPIED_MOST, |item| item.copied) {
+                self.remove(id);
             }
         }
         self.save();
@@ -358,20 +357,34 @@ impl Keep {
         }
     }
 
-    /// All that is not pinned taken off: of what was put on it, or (`copied`) of what was copied lately.
+    /// All that does not stay taken off: of what was put on it, or (`copied`) of what was copied lately.
     pub fn clear(&mut self, copied: bool) {
-        let loose: Vec<u64> = self.shelf.items.iter().filter(|item| !item.pinned && item.copied == copied).map(|item| item.id).collect();
-        for id in loose {
+        for id in self.shelf.past(0, |item| item.copied == copied) {
             self.remove(id);
         }
     }
 
-    pub fn pin(&mut self, id: u64, pinned: bool) {
-        self.shelf.pin(id, pinned);
+    pub fn pin(&mut self, id: u64, pinned: bool, now_ms: u64) {
+        self.shelf.pin(id, pinned, now_ms);
         self.save();
     }
 
-    /// The thing `id` used at `now_ms`, where it is pinned (they are listed by it: see `shelf::copies`).
+    /// The things that hold one of `files` (sent from devices nearby, kept here and listed among the files come lately,
+    /// pinned or tagged there) held at `now_ms` for it, and no others (see `shelf::Item::held`).
+    pub fn hold(&mut self, files: &std::collections::HashSet<PathBuf>, now_ms: u64) {
+        let holding: Vec<u64> = self
+            .shelf
+            .items
+            .iter()
+            .filter(|item| !files.is_empty() && matches!(&item.what, What::Came { files: came } if self.given_each(came).into_iter().flatten().any(|path| files.contains(&path))))
+            .map(|item| item.id)
+            .collect();
+        if self.shelf.hold(now_ms, |item| holding.contains(&item.id)) {
+            self.save();
+        }
+    }
+
+    /// The thing `id` used at `now_ms`, where it is pinned (they are listed by it: see `shelf::listed`).
     pub fn used(&mut self, id: u64, now_ms: u64) {
         if self.shelf.get(id).is_some_and(|item| item.pinned) {
             self.shelf.used(id, now_ms);
@@ -501,7 +514,7 @@ mod tests {
             for (at, content) in contents.iter().enumerate() {
                 let at = at as u64 * 10;
                 let first = keep.take(content.clone(), true, false, at).unwrap();
-                keep.pin(first, pinned);
+                keep.pin(first, pinned, at);
                 let second = keep.take(content.clone(), true, true, at + 1).unwrap();
                 assert_eq!(second == first, pinned);
                 assert_eq!(keep.shelf.items.len() as u64, at / 10 + 1);
@@ -515,8 +528,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What is pinned, copied again, is not listed twice: it stays, its tags with it, the newest now. Used from here, it
-    /// is the last used, where it was before.
+    /// What is pinned or tagged, copied again, is not listed twice: it stays as it is, the newest now. Used from here,
+    /// what is pinned is the last used, where it was before.
     #[test]
     fn what_is_pinned_copied_again_stands_once() {
         let mut keep = keep("again-pinned", Rules::default());
@@ -524,14 +537,14 @@ mod tests {
         let b = keep.take(Content::Text("b".into()), true, false, 1).unwrap();
         keep.tags(|shelf| {
             let tag = shelf.new_tag("t").unwrap();
-            shelf.tag(&[a], tag, true);
+            shelf.tag(&[a], tag, true, 1);
         });
         assert_eq!(keep.take(Content::Text("a".into()), true, false, 2), Ok(a));
         let order = |keep: &Keep| keep.shelf.items.iter().map(|item| item.id).collect::<Vec<_>>();
         assert_eq!(order(&keep), [b, a]);
         let item = keep.shelf.get(a).unwrap();
-        assert_eq!((item.pinned, item.tags.len(), item.added_ms, item.last_ms()), (true, 1, 2, 2));
-        keep.pin(b, true);
+        assert_eq!((item.pinned, item.tags.len(), item.added_ms, item.last_ms()), (false, 1, 2, 2));
+        keep.pin(b, true, 2);
         keep.used(b, 9);
         assert_eq!((order(&keep), keep.shelf.get(b).unwrap().last_ms()), (vec![b, a], 9));
     }
@@ -540,7 +553,7 @@ mod tests {
     fn full_is_said_and_nothing_is_dropped() {
         let mut keep = keep("full", Rules { keep_days: 7, most_bytes: 10 });
         let pinned = keep.take(Content::Png(vec![0; 8]), false, false, 0).unwrap();
-        keep.pin(pinned, true);
+        keep.pin(pinned, true, 0);
         assert_eq!(keep.take(Content::Png(vec![0; 5]), false, false, 1), Err(Refused::Full));
         assert_eq!(keep.refused, Some(Refused::Full));
         assert_eq!(keep.shelf.items.len(), 1);

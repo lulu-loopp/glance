@@ -272,7 +272,6 @@ impl Local {
 #[cfg(any(windows, target_os = "macos"))]
 pub fn since(then: u64, now: u64, lang: Lang) -> String {
     const MINUTE: u64 = 60_000;
-    const DAY: u64 = 24 * 60 * MINUTE;
     let ago = now.saturating_sub(then);
     if ago < MINUTE {
         return lang.pick("刚刚", "Just now").into();
@@ -284,19 +283,27 @@ pub fn since(then: u64, now: u64, lang: Lang) -> String {
             Lang::En => format!("{minutes} min ago"),
         };
     }
-    let (at, today, yesterday) = (Local::at(then), Local::at(now), Local::at(now.saturating_sub(DAY)));
-    let same = |a: Local, b: Local| (a.month, a.day) == (b.month, b.day);
-    if same(at, today) && ago < DAY {
-        at.time(false, lang).0
-    } else if same(at, yesterday) && ago < 2 * DAY {
-        lang.pick("昨天", "Yesterday").into()
-    } else {
-        let date = at.date(lang);
-        // (The day without its weekday: "10月16日", "Oct 16".)
-        match lang {
-            Lang::Zh => date.split(' ').next().unwrap_or_default().to_string(),
-            Lang::En => date.split(", ").nth(1).unwrap_or_default().to_string(),
+    let at = Local::at(then);
+    match Day::of(then, now) {
+        Day::Today => at.time(false, lang).0,
+        Day::Yesterday => Day::Yesterday.named(lang).into(),
+        Day::Earlier => {
+            let date = at.date(lang);
+            // (The day without its weekday: "10月16日", "Oct 16".)
+            match lang {
+                Lang::Zh => date.split(' ').next().unwrap_or_default().to_string(),
+                Lang::En => date.split(", ").nth(1).unwrap_or_default().to_string(),
+            }
         }
+    }
+}
+
+/// When `then` was at `now` (ms since 1970), its day said with it: today or yesterday and the time of day, else the day.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn day_time(then: u64, now: u64, lang: Lang) -> String {
+    match Day::of(then, now) {
+        Day::Earlier => since(then, now, lang),
+        day => format!("{} {}", day.named(lang), Local::at(then).time(false, lang).0),
     }
 }
 
@@ -304,15 +311,41 @@ pub fn since(then: u64, now: u64, lang: Lang) -> String {
 /// earlier.
 #[cfg(any(windows, target_os = "macos"))]
 pub fn day_of(then: u64, now: u64, lang: Lang) -> &'static str {
-    const DAY: u64 = 24 * 3_600_000;
-    let (at, today, yesterday) = (Local::at(then), Local::at(now), Local::at(now.saturating_sub(DAY)));
-    let same = |a: Local, b: Local| (a.month, a.day) == (b.month, b.day);
-    if same(at, today) && now.saturating_sub(then) < DAY {
-        lang.pick("今天", "Today")
-    } else if same(at, yesterday) && now.saturating_sub(then) < 2 * DAY {
-        lang.pick("昨天", "Yesterday")
-    } else {
-        lang.pick("更早", "Earlier")
+    Day::of(then, now).named(lang)
+}
+
+/// A day, as near to now as it is told by.
+#[cfg(any(windows, target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Day {
+    Today,
+    Yesterday,
+    Earlier,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Day {
+    /// The day `then` was on at `now` (ms since 1970).
+    fn of(then: u64, now: u64) -> Day {
+        const DAY: u64 = 24 * 3_600_000;
+        let (at, today, yesterday) = (Local::at(then), Local::at(now), Local::at(now.saturating_sub(DAY)));
+        let same = |a: Local, b: Local| (a.month, a.day) == (b.month, b.day);
+        let ago = now.saturating_sub(then);
+        if same(at, today) && ago < DAY {
+            Day::Today
+        } else if same(at, yesterday) && ago < 2 * DAY {
+            Day::Yesterday
+        } else {
+            Day::Earlier
+        }
+    }
+
+    fn named(self, lang: Lang) -> &'static str {
+        match self {
+            Day::Today => lang.pick("今天", "Today"),
+            Day::Yesterday => lang.pick("昨天", "Yesterday"),
+            Day::Earlier => lang.pick("更早", "Earlier"),
+        }
     }
 }
 

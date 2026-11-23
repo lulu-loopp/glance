@@ -67,7 +67,7 @@ pub fn always_named() -> bool {
 }
 
 /// This thread's pictures drawn with what is kept at hand always named, or not (see `always_named`).
-#[cfg(any(test, feature = "studio"))]
+#[cfg(test)]
 pub fn pretend_named(named: bool) {
     PRETENDED_NAMED.with(|pretended| pretended.set(Some(named)));
 }

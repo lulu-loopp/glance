@@ -256,7 +256,7 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         let target = match lands {
             Lands::Apps | Lands::Send => Target::new(told),
             Lands::Folders => Target::folders(told),
-            Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
+            Lands::Pages(page) if page != crate::ui::view::Tab::default() => Target::refusing(told),
             Lands::Device(key) => super::send::ToDevice::over(key, rect),
             _ => Target::not_own(told),
         };

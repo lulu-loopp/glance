@@ -17,8 +17,9 @@ pub enum Op {
     Text { text: String, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, inked: f32, scale: f32 },
     /// A note's words in Markdown, written in lines in their box (see `Canvas::markdown`).
     Markdown { text: String, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32, scrolled: f32 },
-    /// To a box, or (`part`) the part of it a fraction fills, from its bottom or its left (see `Canvas::clip_part`).
-    Clip { x: f32, y: f32, w: f32, h: f32, part: Option<(f32, bool)> },
+    /// To a box, or (`part`) the part of it a fraction fills, from its bottom or its left (see `Canvas::clip_part`), what
+    /// is drawn fading out over its last `fades` at its left and its right (see `Canvas::clip_fading`).
+    Clip { x: f32, y: f32, w: f32, h: f32, part: Option<(f32, bool)>, fades: (f32, f32) },
     Unclip,
     Fill { color: Color, x: f32, y: f32, w: f32, h: f32 },
     Rounded { color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32 },
@@ -195,9 +196,9 @@ impl Op {
                 let x = if align == Align::End { start.x + inked - width } else { start.x };
                 Op::Text { text, font, color, x, y: start.y, width, align, inked, scale: map.length(scale) }
             }
-            Op::Clip { x, y, w, h, part } => {
+            Op::Clip { x, y, w, h, part, fades } => {
                 let (x, y, w, h) = rect(x, y, w, h);
-                Op::Clip { x, y, w, h, part }
+                Op::Clip { x, y, w, h, part, fades: (map.length(fades.0), map.length(fades.1)) }
             }
             Op::Markdown { text, font, inks, x, y, w, h, scrolled } => {
                 let (x, y, w, h) = rect(x, y, w, h);
@@ -271,13 +272,13 @@ impl Op {
                     vec![old.faded(1.0 - t), new.faded(t)]
                 }
             }
-            (Op::Clip { x: ax, y: ay, w: aw, h: ah, part: ap }, Op::Clip { x: bx, y: by, w: bw, h: bh, part: bp }) => {
+            (Op::Clip { x: ax, y: ay, w: aw, h: ah, part: ap, fades: af }, Op::Clip { x: bx, y: by, w: bw, h: bh, part: bp, fades: bf }) => {
                 // (A part of the same kind each way, filled between; else as it comes to be.)
                 let part = match (ap, bp) {
-                    (Some((af, aup)), Some((bf, bup))) if aup == bup => Some((lerp(*af, *bf, t), *bup)),
+                    (Some((from, aup)), Some((to, bup))) if aup == bup => Some((lerp(*from, *to, t), *bup)),
                     _ => *bp,
                 };
-                vec![Op::Clip { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), part }]
+                vec![Op::Clip { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), part, fades: (lerp(af.0, bf.0, t), lerp(af.1, bf.1, t)) }]
             }
             (Op::Unclip, Op::Unclip) => vec![Op::Unclip],
             // (The same words in the same inks: their box and size between; other words, each faded on its own way.)
@@ -366,8 +367,8 @@ impl Op {
             Op::Text { text, font, color, x, y, width, align, scale, .. } if (scale - 1.0).abs() < 1e-3 => canvas.text(text, *font, *color, *x, *y, *width, *align),
             Op::Text { text, font, color, x, y, width, align, scale, .. } => canvas.text_scaled(text, *font, *color, *x, *y, *width, *align, *scale),
             Op::Markdown { text, font, inks, x, y, w, h, scrolled } => canvas.markdown(text, *font, *inks, *x, *y, *w, *h, *scrolled),
-            Op::Clip { x, y, w, h, part: None } => canvas.clip(*x, *y, *w, *h),
-            Op::Clip { x, y, w, h, part: Some((fraction, up)) } => canvas.clip_part(*x, *y, *w, *h, *fraction, *up),
+            Op::Clip { x, y, w, h, part: None, fades } => canvas.clip_fading(*x, *y, *w, *h, *fades),
+            Op::Clip { x, y, w, h, part: Some((fraction, up)), .. } => canvas.clip_part(*x, *y, *w, *h, *fraction, *up),
             Op::Unclip => canvas.unclip(),
             Op::Fill { color, x, y, w, h } => canvas.fill(*color, *x, *y, *w, *h),
             Op::Rounded { color, x, y, w, h, radius } => canvas.fill_rounded(*color, *x, *y, *w, *h, *radius),
@@ -550,11 +551,15 @@ impl Canvas for Recorder<'_> {
     }
 
     fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
-        self.push(Op::Clip { x, y, w, h, part: None });
+        self.push(Op::Clip { x, y, w, h, part: None, fades: (0.0, 0.0) });
     }
 
     fn clip_part(&self, x: f32, y: f32, w: f32, h: f32, fraction: f32, up: bool) {
-        self.push(Op::Clip { x, y, w, h, part: Some((fraction, up)) });
+        self.push(Op::Clip { x, y, w, h, part: Some((fraction, up)), fades: (0.0, 0.0) });
+    }
+
+    fn clip_fading(&self, x: f32, y: f32, w: f32, h: f32, fades: (f32, f32)) {
+        self.push(Op::Clip { x, y, w, h, part: None, fades });
     }
 
     fn unclip(&self) {

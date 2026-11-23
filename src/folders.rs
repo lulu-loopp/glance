@@ -113,7 +113,7 @@ thread_local! {
 }
 
 /// For pictures: as if these were told of.
-#[cfg(any(test, feature = "studio"))]
+#[cfg(test)]
 pub fn pretend(folders: Vec<Folder>) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(folders)));
 }

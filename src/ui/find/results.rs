@@ -234,7 +234,7 @@ pub struct Sources<'a> {
     pub programs: &'a [Program],
     pub notes: &'a [Note],
     pub held: &'a [Item],
-    /// The tags what is pinned of what was copied is sorted by.
+    /// The tags the station's pages are sorted by.
     pub tags: &'a [Tag],
     pub lately: &'a [Came],
     pub files: &'a dyn Fn(&Query, usize) -> crate::search::Found,
@@ -379,6 +379,7 @@ fn found(typed: &str, view: View, expanded: bool, order: Order, best_first: bool
     if matches!(view, View::All | View::Glance) {
         glance.extend(sources.notes.iter().filter_map(|note| note_row(note, &query, lang)));
         glance.extend(sources.held.iter().filter_map(|item| held_row(item, sources.tags, &query, lang)));
+        glance.extend(sources.lately.iter().filter_map(|came| tagged_row(came, sources.tags, &query, lang)));
     }
     let most = match view {
         View::All if expanded => FILES_ALL,
@@ -388,6 +389,10 @@ fn found(typed: &str, view: View, expanded: bool, order: Order, best_first: bool
     };
     let found = view.files(query).map(|query| (sources.files)(&query, most)).unwrap_or_default();
     let in_order: Vec<Row> = found.hits.into_iter().map(file_row).collect();
+    // (A file that came lately found by its name too: once, among the files.)
+    let named: std::collections::HashSet<&What> = in_order.iter().map(|row| &row.what).collect();
+    glance.retain(|row| !named.contains(&row.what));
+    drop(named);
     let (mut folders, mut files): (Vec<Row>, Vec<Row>) = if ordered { (Vec::new(), in_order) } else { in_order.into_iter().partition(|row| row.kind == Kind::Folder) };
     for rows in [&mut programs, &mut pages, &mut glance] {
         rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
@@ -539,7 +544,7 @@ fn held_row(item: &Item, tags: &[Tag], query: &Query, lang: Lang) -> Option<Row>
     if let Some((score, marks)) = query.meets_name(&name) {
         return Some(held_shown(item, tags, score, marks, lang));
     }
-    if let Some(score) = tags.iter().filter(|tag| item.tags.contains(&tag.id)).filter_map(|tag| query.meets_name(&tag.name)).map(|(score, _)| score).max_by(f32::total_cmp) {
+    if let Some(score) = meets_tag(&item.tags, tags, query) {
         return Some(held_shown(item, tags, score, Vec::new(), lang));
     }
     let text = match &item.what {
@@ -548,6 +553,22 @@ fn held_row(item: &Item, tags: &[Tag], query: &Query, lang: Lang) -> Option<Row>
         _ => return None,
     };
     query.in_text(text).then(|| held_shown(item, tags, IN_TEXT, Vec::new(), lang))
+}
+
+/// How well one of the tags `ids` (of `tags`) meets `query` by its name, the best of them.
+fn meets_tag(ids: &[u32], tags: &[Tag], query: &Query) -> Option<f32> {
+    tags.iter().filter(|tag| ids.contains(&tag.id)).filter_map(|tag| query.meets_name(&tag.name)).map(|(score, _)| score).max_by(f32::total_cmp)
+}
+
+/// A file that came lately meeting `query` by a tag of its (of `tags`): said to be one of those, with its tags.
+fn tagged_row(came: &Came, tags: &[Tag], query: &Query, lang: Lang) -> Option<Row> {
+    let score = meets_tag(&came.marks.tags, tags, query)?;
+    Some(Row { detail: with_tags(lang.pick("最近文件", "Recent files"), &came.marks.tags, tags), ..path_shown(came.path.clone(), false, score, Vec::new()) })
+}
+
+/// `place`, and the tags `ids` (of `tags`) after it.
+fn with_tags(place: &str, ids: &[u32], tags: &[Tag]) -> String {
+    std::iter::once(place).chain(tags.iter().filter(|tag| ids.contains(&tag.id)).map(|tag| tag.name.as_str())).collect::<Vec<_>>().join(" · ")
 }
 
 /// What a thing on the station is called in a line: its file's name (and how many more were put there with it), the
@@ -581,7 +602,7 @@ fn held_name(what: &Held, lang: Lang) -> String {
 fn held_shown(item: &Item, tags: &[Tag], rank: f32, marks: Vec<(usize, usize)>, lang: Lang) -> Row {
     let (kind, detail) = if item.copied { (Kind::Copied, lang.pick("最近复制", "Recently copied")) } else { (Kind::Held, lang.pick("中转站", "Station")) };
     // (Where it is, and its tags.)
-    let detail = std::iter::once(detail).chain(tags.iter().filter(|tag| item.tags.contains(&tag.id)).map(|tag| tag.name.as_str())).collect::<Vec<_>>().join(" · ");
+    let detail = with_tags(detail, &item.tags, tags);
     Row { kind, name: held_name(&item.what, lang), marks, detail, what: What::Item(item.id), rank, bytes: None, changed: None }
 }
 
@@ -770,8 +791,8 @@ mod tests {
     fn glance_s_own_are_found_by_name_and_by_what_they_say() {
         let notes = [Note { name: "a.md".into(), text: "下周要做的事\n回复 Steam 的邮件".into(), colour: Default::default(), stamp: Default::default() }];
         let held = [
-            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() },
-            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() },
+            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 },
+            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 },
         ];
         assert_eq!(shown("steam", View::Glance, false, &notes, &held, &[]), ["https://store.steampowered.com", "下周要做的事"]);
         assert_eq!(shown("xiazhou", View::Glance, false, &notes, &held, &[]), ["下周要做的事"]);
@@ -782,7 +803,7 @@ mod tests {
 
     #[test]
     fn nothing_typed_shows_what_came_lately() {
-        let came = |path: &str, ms: u64, kind: FileKind| Came { key: recent::Key { drive: 'D', file: u128::from(ms) }, path: path.into(), came_ms: ms, bytes: 0, kind, downloaded: false, site: None, from: None };
+        let came = |path: &str, ms: u64, kind: FileKind| Came::of(recent::Key { drive: 'D', file: u128::from(ms) }, path.into(), ms, 0, kind);
         let lately = [came("D:\\a.png", 1, FileKind::Screenshot), came("D:\\b.pdf", 2, FileKind::Document)];
         assert_eq!(shown("", View::All, false, &[], &[], &lately), ["# 最近的文件", "b.pdf", "a.png"]);
         assert_eq!(shown("", View::Pictures, false, &[], &[], &lately), ["# 最近的文件", "a.png"]);
@@ -790,14 +811,31 @@ mod tests {
         assert_eq!(shown(" ", View::Programs, false, &[], &[], &lately), ["# 应用", "QQ音乐", "Steam", "Visual Studio Code", "网易云音乐"]);
     }
 
-    /// What is pinned of what was copied is found by its tag, which its line says.
+    /// What is on any page of the station is found by its tag, pinned or not, which its line says: what was copied, what
+    /// is on the station, and a file that came lately (once, where its name meets what is typed too).
     #[test]
-    fn what_was_copied_is_found_by_its_tag() {
+    fn what_is_on_the_station_s_pages_is_found_by_its_tag() {
         let tags = [Tag { id: 3, name: "常用回复".into() }, Tag { id: 4, name: "命令".into() }];
-        let item = Item { id: 7, what: Held::Text { text: "您好".into() }, added_ms: 1, pinned: true, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: vec![4] };
-        let row = held_row(&item, &tags, &Query::read("命令"), Lang::Zh).unwrap();
+        let item = |id: u64, copied: bool, tag: u32| Item { id, what: Held::Text { text: "您好".into() }, added_ms: 1, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: vec![tag], held: false, freed_ms: 0 };
+        let row = held_row(&item(7, true, 4), &tags, &Query::read("命令"), Lang::Zh).unwrap();
         assert_eq!((row.name.as_str(), row.detail.as_str(), row.marks), ("您好", "最近复制 · 命令", Vec::new()));
-        assert!(held_row(&item, &tags, &Query::read("常用"), Lang::Zh).is_none());
+        assert_eq!(held_row(&item(7, false, 4), &tags, &Query::read("命令"), Lang::Zh).unwrap().detail, "中转站 · 命令");
+        assert!(held_row(&item(7, true, 4), &tags, &Query::read("常用"), Lang::Zh).is_none());
+        let came = |path: &str, marks: &[u32]| Came::of(recent::Key { drive: 'D', file: 1 }, path.into(), 1, 0, FileKind::Document).marked(recent::Marks { tags: marks.to_vec(), ..Default::default() });
+        let row = tagged_row(&came("D:\\a\\报价.pdf", &[4, 3]), &tags, &Query::read("命令"), Lang::Zh).unwrap();
+        assert_eq!((row.name.as_str(), row.detail.as_str(), row.what), ("报价.pdf", "最近文件 · 常用回复 · 命令", What::Path("D:\\a\\报价.pdf".into())));
+        assert!(tagged_row(&came("D:\\a\\命令.pdf", &[3]), &tags, &Query::read("命令"), Lang::Zh).is_none());
+        let found_in = |files: &dyn Fn(&Query, usize) -> crate::search::Found| {
+            let lately = [came("D:\\a\\报价.pdf", &[4]), came("D:\\a\\命令.txt", &[4])];
+            let sources = Sources { programs: &[], notes: &[], held: &[], tags: &tags, lately: &lately, files, lang: Lang::Zh, web: WebSearch::Off };
+            let shown = super::found("命令", View::All, false, Order::default(), true, &sources);
+            let mut names: Vec<String> = shown.lines.iter().filter_map(|line| if let Line::Row(row, _) = line { Some(row.name.clone()) } else { None }).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(found_in(&|_, _| Default::default()), ["命令.txt", "报价.pdf"]);
+        let hit = || crate::search::Hit { path: "D:\\a\\命令.txt".into(), name: "命令.txt".into(), folder: false, rank: 5.0, marks: Vec::new(), stat: Default::default() };
+        assert_eq!(found_in(&|_, _| crate::search::Found { hits: vec![hit()], total: 1, ..Default::default() }), ["命令.txt", "报价.pdf"]);
     }
 
     /// In the view of all, a sum's answer comes first, larger, what else is found under its headings (the best too), and
@@ -836,7 +874,7 @@ mod tests {
         let by_size = Order { by: crate::search::Sort::Size, reversed: false };
         assert_eq!(shown_with("main.rs", View::All, false, by_size, &[], &[], &[], WebSearch::Off).last().map(String::as_str), Some("打开 main.rs"));
         // What is copied already of it does not hold it back.
-        let held = [Item { id: 7, what: Held::Link { url: "https://github.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() }];
+        let held = [Item { id: 7, what: Held::Link { url: "https://github.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 }];
         assert_eq!(shown_with("github.com", View::All, false, Order::default(), &[], &held, &[], WebSearch::Off), ["* 打开 github.com", "# Glance", "https://github.com"]);
     }
 

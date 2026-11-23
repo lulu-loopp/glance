@@ -244,11 +244,16 @@ pub enum Hit {
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
     Shelf(u64),
     Copied(u64),
-    /// Something copied lately pinned, or not any more (the pin on its line or its card, by its number). What is pinned, where it is
-    /// listed first, folded away or shown. A new tag made.
-    PinCopy(u64),
-    PinsHead,
-    NewTag,
+    /// A thing pinned, or not any more (the pin on its line or its card); the menu of its tags (the button beside that). The
+    /// menu of a tag (the button on its choice over the page, while it is the one shown). What is pinned on a page, where
+    /// it is listed first, folded away or shown.
+    PinThing(crate::station::Thing),
+    TagThing(crate::station::Thing),
+    TagMore(u32),
+    PinsHead(crate::settings::StationPage),
+    /// A choice over a page of the station, how far along their row it is and how wide (DIPs, as `f32::to_bits`), where no
+    /// press finds it (see `show_choice`).
+    Choice(Tab, u32, u32),
     /// What a device nearby is sending, shown first on the station as it comes (see `nearby`).
     Receiving,
     /// A file come lately, by its number on its drive, or files come together, as the page's filter shows them (see
@@ -300,7 +305,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(..))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(..) | Hit::Choice(..))
     }
 
     /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
@@ -337,7 +342,7 @@ impl Hit {
             Hit::AppsArea => Some(crate::station::run::Lands::Apps),
             Hit::FoldersArea => Some(crate::station::run::Lands::Folders),
             Hit::Tab(page) => Some(crate::station::run::Lands::Pages(page.page())),
-            Hit::StationPages => Some(crate::station::run::Lands::Pages(Tab::Shelf)),
+            Hit::StationPages => Some(crate::station::run::Lands::Pages(Tab::default())),
             Hit::SendTo(key) => Some(crate::station::run::Lands::Device(key)),
             _ => None,
         }
@@ -363,9 +368,28 @@ impl Hit {
         hasher.finish()
     }
 
-    /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
+    /// Whether a press on it opens a menu (the station's head's buttons, a thing's tags', a tag's).
     pub fn opens_menu(self) -> bool {
-        matches!(self, Hit::StationView | Hit::StationPages)
+        matches!(self, Hit::StationView | Hit::StationPages | Hit::TagThing(_) | Hit::TagMore(_))
+    }
+
+    /// The thing on the station's lane it is a button of, as a press on that finds it (`items`: what is on the station).
+    pub fn button_of(self, items: &[crate::station::shelf::Item]) -> Option<Hit> {
+        use crate::station::Thing;
+        match self {
+            Hit::PinThing(Thing::Item(id)) | Hit::TagThing(Thing::Item(id)) => items.iter().find(|item| item.id == id).map(|item| if item.copied { Hit::Copied(id) } else { Hit::Shelf(id) }),
+            Hit::PinThing(Thing::Recent(entry)) | Hit::TagThing(Thing::Recent(entry)) => Some(Hit::Recent(entry)),
+            _ => None,
+        }
+    }
+
+    /// The tag it is, where it is one (its choice over a page, or the button on that).
+    pub fn tag(self) -> Option<u32> {
+        match self {
+            Hit::Tab(tab) => tab.tag(),
+            Hit::TagMore(tag) => Some(tag),
+            _ => None,
+        }
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -405,8 +429,8 @@ pub enum List {
     Recent,
     Apps,
     Notes,
-    /// The tags of what is pinned of what was copied (their row, turned across by the wheel).
-    Tags,
+    /// What the things of the station's page shown are sorted by (their row, turned across by the wheel).
+    Choices,
     /// A note's words on its card stuck on the desktop, while it is not written in (written in, the box it is written
     /// in scrolls them).
     Words,
@@ -418,23 +442,83 @@ pub enum List {
 /// How many lists there are.
 const LISTS: usize = List::AiSources as usize + 1;
 
-/// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (each
-/// of the last two, those its filter takes).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+/// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately, each
+/// those its filter takes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Tab {
-    #[default]
-    Shelf,
+    Shelf(crate::station::shelf::Filter),
     Copies(crate::station::shelf::Filter),
     Recent(crate::station::recent::Filter),
+}
+
+impl Default for Tab {
+    fn default() -> Tab {
+        Tab::Shelf(Default::default())
+    }
 }
 
 impl Tab {
     /// Which page it is (whatever its filter shows of it).
     pub fn page(self) -> Tab {
         match self {
+            Tab::Shelf(_) => Tab::Shelf(Default::default()),
             Tab::Copies(_) => Tab::Copies(Default::default()),
             Tab::Recent(_) => Tab::Recent(Default::default()),
-            page => page,
+        }
+    }
+
+    /// Which page it is, as the settings tell the pages apart.
+    pub fn station_page(self) -> crate::settings::StationPage {
+        use crate::settings::StationPage;
+        match self {
+            Tab::Shelf(_) => StationPage::Shelf,
+            Tab::Copies(_) => StationPage::Copies,
+            Tab::Recent(_) => StationPage::Recent,
+        }
+    }
+
+    /// The page, showing what is pinned on it; or what is of the tag `tag`.
+    fn pinned(self) -> Tab {
+        match self {
+            Tab::Shelf(_) => Tab::Shelf(crate::station::shelf::Filter::Pinned),
+            Tab::Copies(_) => Tab::Copies(crate::station::shelf::Filter::Pinned),
+            Tab::Recent(_) => Tab::Recent(crate::station::recent::Filter::Pinned),
+        }
+    }
+
+    fn tagged(self, tag: u32) -> Tab {
+        match self {
+            Tab::Shelf(_) => Tab::Shelf(crate::station::shelf::Filter::Tagged(tag)),
+            Tab::Copies(_) => Tab::Copies(crate::station::shelf::Filter::Tagged(tag)),
+            Tab::Recent(_) => Tab::Recent(crate::station::recent::Filter::Tagged(tag)),
+        }
+    }
+
+    /// The tag whose things it shows, if one's.
+    pub fn tag(self) -> Option<u32> {
+        match self {
+            Tab::Shelf(crate::station::shelf::Filter::Tagged(tag)) | Tab::Copies(crate::station::shelf::Filter::Tagged(tag)) | Tab::Recent(crate::station::recent::Filter::Tagged(tag)) => Some(tag),
+            _ => None,
+        }
+    }
+
+    /// Which of the page's things it shows, as a number, each filter's its own (all of them, 0).
+    fn filter_number(self) -> u32 {
+        match self {
+            Tab::Shelf(filter) | Tab::Copies(filter) => filter.number(),
+            Tab::Recent(filter) => filter.number(),
+        }
+    }
+
+    /// The page shown where it is the one chosen: the station's, where it is one turned off; all of it, where what it was
+    /// to show of it is no longer there (see `Filter::among`).
+    pub fn there(self, shown: &crate::station::run::Shown) -> Tab {
+        match self {
+            Tab::Copies(_) if !shown.history => Tab::default(),
+            Tab::Recent(_) if !crate::station::recent::on() => Tab::default(),
+            Tab::Shelf(filter) => Tab::Shelf(filter.among(&shown.tags)),
+            Tab::Copies(filter) => Tab::Copies(filter.among(&shown.tags)),
+            Tab::Recent(filter) => Tab::Recent(filter.among(&shown.tags)),
         }
     }
 
@@ -446,14 +530,14 @@ impl Tab {
     /// Which page it is, as a number (told in a message: see `station::run::SHOW_PAGE`), and the page a number is.
     pub fn number(self) -> usize {
         match self {
-            Tab::Shelf => 0,
+            Tab::Shelf(_) => 0,
             Tab::Copies(_) => 1,
             Tab::Recent(_) => 2,
         }
     }
 
     pub fn numbered(number: usize) -> Option<Tab> {
-        [Tab::Shelf, Tab::Copies(Default::default()), Tab::Recent(Default::default())].get(number).copied()
+        [Tab::Shelf(Default::default()), Tab::Copies(Default::default()), Tab::Recent(Default::default())].get(number).copied()
     }
 }
 
@@ -589,12 +673,22 @@ impl Scrolls {
 }
 
 /// What each list shows, as far as one is scrolled for it alone (see `Scrolls::follow`): the station's things in their
-/// view, what was copied lately and the files come lately under the filters chosen on `tab`, the notes in their view.
+/// view, under the filter chosen on `tab`, what was copied lately and the files come lately under theirs, the choices of
+/// the page it is, the notes in their view.
 pub fn lists_show(tab: Tab) -> [u32; LISTS] {
+    use std::hash::{Hash, Hasher};
     let mut shows = [0; LISTS];
-    shows[List::Shelf as usize] = crate::station::run::shown().view as u32;
+    let shown = crate::station::run::shown();
+    let tab = tab.there(&shown);
+    shows[List::Shelf as usize] = {
+        let filter = if matches!(tab, Tab::Shelf(_)) { tab.filter_number() } else { 0 };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (shown.view as u32, filter).hash(&mut hasher);
+        hasher.finish() as u32
+    };
     shows[List::Copies as usize] = if let Tab::Copies(filter) = tab { filter.number() + 1 } else { 0 };
-    shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter as u32 + 1 } else { 0 };
+    shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter.number() + 1 } else { 0 };
+    shows[List::Choices as usize] = tab.number() as u32;
     shows[List::Notes as usize] = crate::notes::view() as u32;
     shows
 }
@@ -606,8 +700,8 @@ pub fn under(hits: &[HitBox], (x, y): (f32, f32)) -> impl Iterator<Item = &HitBo
 
 /// The wheel turned `delta` (a notch is 120, turned toward the reader below 0) over what is `under` the pointer (a
 /// thing on a list, then the list, its bar), or (`across`) the wheel turned across: the pages there turned, a page a
-/// notch (across, the way it turns), else the list there scrolled, `WHEEL_ROWS` rows a notch (one that lies across, the
-/// tags, by either). Whether one was.
+/// notch (across, the way it turns), else the list there scrolled, `WHEEL_ROWS` rows a notch (one that lies across, a
+/// page's choices, by either). Whether one was.
 pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> bool {
     let notches = delta as f32 / 120.0;
     let down = -notches * crate::panel::WHEEL_ROWS * TABLE_ROW;
@@ -621,7 +715,7 @@ pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> 
         return true;
     }
     match under.iter().find_map(|hit| hit.list()) {
-        Some((list, most)) if !across || list == List::Tags => {
+        Some((list, most)) if !across || list == List::Choices => {
             scrolls.turn(list, if across { -down } else { down }, most);
             true
         }
@@ -668,6 +762,36 @@ impl Thumb {
     pub fn scroll_at(&self, y: f32) -> f32 {
         ((y - self.held - self.top) / self.runs * self.most).clamp(0.0, self.most)
     }
+}
+
+/// The choices over the page of the station shown, as they were last drawn (see `show_choice`): the one lit, and all of
+/// them.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct ChoiceShown {
+    lit: Option<Tab>,
+    all: Vec<Tab>,
+}
+
+/// The room a choice brought into sight is kept from the ends of their row, where it fades.
+const CHOICE_CLEAR: f32 = 24.0;
+
+/// The choices over the page of the station shown, where they are more than fit in their row (as `hits` were last drawn):
+/// turned to the one just lit (`tab`'s), or to a tag just made, or just come to the page. Whether they are turned now, to
+/// be drawn on their way there.
+pub fn show_choice(scrolls: &mut Scrolls, shown: &mut ChoiceShown, hits: &[HitBox], tab: Tab) -> bool {
+    let row: Vec<(Tab, f32, f32)> = hits.iter().filter_map(|hit| if let Hit::Choice(tab, at, wide) = hit.4 { Some((tab, f32::from_bits(at), f32::from_bits(wide))) } else { None }).collect();
+    let all: Vec<Tab> = row.iter().map(|choice| choice.0).collect();
+    let was = std::mem::replace(shown, ChoiceShown { lit: Some(tab), all: all.clone() });
+    // (A page turned to: its lit choice, whatever is there.)
+    let same = was.all.first().is_some_and(|choice| choice.page() == tab.page());
+    let come = all.iter().copied().rfind(|choice| same && choice.tag().is_some() && !was.all.contains(choice));
+    let Some(wanted) = come.or_else(|| (was.lit != Some(tab)).then_some(tab)) else { return false };
+    let Some((room, most)) = hits.iter().find_map(|hit| if let Hit::List(List::Choices, most) = hit.4 { Some((hit.2, f32::from_bits(most))) } else { None }) else { return false };
+    let Some(&(_, at, wide)) = row.iter().find(|choice| choice.0 == wanted) else { return false };
+    let to = scrolls.to(List::Choices);
+    let turned = to.min(at - CHOICE_CLEAR).max(at + wide + CHOICE_CLEAR - room).clamp(0.0, most);
+    scrolls.turn(List::Choices, turned - to, most);
+    turned != to
 }
 
 /// Which note the notes turned through by pages show (see `keep_note`): its name and its place as last drawn, and the
@@ -866,12 +990,12 @@ enum Block {
     /// lately is a page of it, and the files come lately), and its buttons (how what is on it shows, while that is
     /// shown; the rest).
     Tabs { tab: Tab, count: usize, copies: bool, recent: bool, view: ShelfView },
-    /// What is on the station, the newest first, as `shows` lays it out in room `tall` high, scrolled through past
-    /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
-    /// dragged over it, to be dropped.
-    Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
-    /// What was copied lately (see `CopiesPage`), in room `tall` high, scrolled through past it.
-    Copies { page: CopiesPage, tall: f32 },
+    /// What is on the station, the newest first (as a page of it, as `page` has it), as `shows` lays it out in room `tall`
+    /// high, scrolled through past it; `said`, what it says instead of them (nothing on it), or over them (no room left);
+    /// `over`, something dragged over it, to be dropped.
+    Shelf { tiles: Vec<Tile>, page: LanePage, shows: Shows, tall: f32, said: Option<String>, over: bool },
+    /// What was copied lately, as `page` has it, in room `tall` high, scrolled through past it.
+    Copies { tiles: Vec<Tile>, page: LanePage, tall: f32 },
     /// The notes, the last written first, as `view` shows them, in room `tall` high (scrolled through past it); in a
     /// small lane, the last written alone.
     Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32 },
@@ -881,10 +1005,10 @@ enum Block {
     /// lane shows them; else one row of their pictures alone), and the place to add more.
     /// (`over`: something dragged over it from elsewhere, to be kept at hand as it is let go.)
     Apps { apps: Vec<(String, String)>, rows: usize, named: bool, over: bool },
-    /// The files come lately that `filter` takes, the newest first (those come together as one: see
-    /// `station::recent::listed`), as `view` shows them (a list under the day each came), in room `tall` high under the
-    /// filter's choices, scrolled through past it, and `nowhere`: where none can come (see `station::recent::nowhere`).
-    Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, view: ShelfView, tall: f32, nowhere: bool },
+    /// The files come lately, as `page` has them, the newest first (those come together as one: see
+    /// `station::recent::listed`; a list under the day each came), in room `tall` high, scrolled through past it, and
+    /// `nowhere`: where none can come (see `station::recent::nowhere`).
+    Recent { rows: Vec<Lately>, page: LanePage, tall: f32, nowhere: bool },
     /// A workbench lane in a shape of its own: what it holds, drawn in all the room it is given, in the shape that room
     /// is (see `bench_shape`).
     Bench(Bench),
@@ -904,15 +1028,78 @@ enum Block {
     Across(Vec<Vec<Lane>>),
 }
 
-/// What a page of what was copied lately shows: its things in their order (what is pinned first, where it is: see
-/// `groups`), the filter they are of (its choices over them), as `view` shows them, and the tags there are.
-#[derive(Clone, PartialEq, Hash, Debug)]
-pub struct CopiesPage {
-    rows: Vec<Tile>,
+/// How a page of the station's lane shows its things: which of them (`tab`), the choices over them (none: no row of
+/// them), what is pinned of them first (see `Groups`), as `view` shows them.
+#[derive(Clone, PartialEq, Hash, Debug, Default)]
+pub struct LanePage {
+    tab: Tab,
+    choices: Vec<Choice>,
     groups: Groups,
-    filter: crate::station::shelf::Filter,
     view: ShelfView,
-    tags: Vec<crate::station::shelf::Tag>,
+}
+
+/// A choice over a page: the page with what it shows of it, what it is called, and whether it is a tag.
+#[derive(Clone, PartialEq, Hash, Debug)]
+struct Choice {
+    tab: Tab,
+    name: String,
+    tag: bool,
+}
+
+impl LanePage {
+    /// The page `tab` as `view` shows it, the station holding what `shown` says and the files come lately being `files`,
+    /// its things in `groups`.
+    fn of(tab: Tab, groups: Groups, view: ShelfView, shown: &crate::station::run::Shown, files: &[crate::station::recent::Came], lang: Lang) -> LanePage {
+        LanePage { tab, choices: Choice::of(tab, shown, files, lang), groups, view }
+    }
+
+    /// The room its choices take over its things.
+    fn choices_tall(&self) -> f32 {
+        if self.choices.is_empty() { 0.0 } else { CHIP_H + 6.0 }
+    }
+}
+
+impl Choice {
+    /// The choices over the page `tab`: all of it, what is pinned on it, its tags, and its kinds of things. What is on the
+    /// station has none of them while nothing on it is pinned or tagged; the files come lately have what is pinned among
+    /// them while anything is.
+    fn of(tab: Tab, shown: &crate::station::run::Shown, files: &[crate::station::recent::Came], lang: Lang) -> Vec<Choice> {
+        use crate::station::{recent, shelf};
+        let here = |item: &&shelf::Item| item.copied == matches!(tab, Tab::Copies(_));
+        let recent_page = matches!(tab, Tab::Recent(_));
+        let pinned = if recent_page { files.iter().any(|came| came.marks.pinned) } else { shown.items.iter().filter(here).any(|item| item.pinned) };
+        let of = |tag: u32| if recent_page { files.iter().any(|came| came.marks.tags.contains(&tag)) } else { shown.items.iter().filter(here).any(|item| item.tags.contains(&tag)) };
+        if matches!(tab, Tab::Shelf(_)) && tab == tab.page() && !pinned && !shown.tags.iter().any(|tag| of(tag.id)) {
+            return Vec::new();
+        }
+        let choice = |tab: Tab, name: &str, tag: bool| Choice { tab, name: name.to_string(), tag };
+        let mut choices = vec![choice(tab.page(), lang.pick("全部", "All"), false)];
+        if pinned || tab == tab.pinned() || matches!(tab, Tab::Copies(_)) {
+            choices.push(choice(tab.pinned(), lang.pick("已固定", "Pinned"), false));
+        }
+        choices.extend(crate::station::tags_of(&shown.tags, of, tab.tag(), &shown.items, files).into_iter().map(|tag| choice(tab.tagged(tag.id), &tag.name, true)));
+        match tab {
+            Tab::Shelf(_) => {}
+            Tab::Copies(_) => choices.extend(shelf::Filter::KINDS.map(|kind| {
+                let name = match kind {
+                    shelf::Filter::Words => lang.pick("文字", "Text"),
+                    shelf::Filter::Pictures => lang.pick("图片", "Pictures"),
+                    _ => lang.pick("文件", "Files"),
+                };
+                choice(Tab::Copies(kind), name, false)
+            })),
+            Tab::Recent(_) => choices.extend(recent::Filter::KINDS.map(|kind| {
+                let name = match kind {
+                    recent::Filter::Downloads => lang.pick("下载", "Downloads"),
+                    recent::Filter::Screenshots => lang.pick("截图", "Screenshots"),
+                    recent::Filter::Documents => lang.pick("文档", "Documents"),
+                    _ => lang.pick("图片和视频", "Pictures"),
+                };
+                choice(Tab::Recent(kind), name, false)
+            })),
+        }
+        choices
+    }
 }
 
 /// How a page's things are in two: what is pinned first (`first` of them listed, of `pinned` in all, `folded` away or
@@ -924,10 +1111,17 @@ struct Groups {
     folded: bool,
 }
 
+impl Groups {
+    /// The groups of `listed`, what is pinned of it `folded` away or not.
+    fn of<T>(listed: &crate::station::shelf::Listed<T>, folded: bool) -> Groups {
+        Groups { first: listed.first.len(), pinned: listed.pinned, folded }
+    }
+}
+
 /// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
 #[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Bench {
-    /// The station's page shown: its things (each with what a press on it finds), how many, which page.
+    /// The station's page shown: its things (each with what a press on it finds), which page.
     Station { tiles: Vec<(Tile, Hit)>, tab: Tab },
     /// The notes, the last written first.
     Notes(Vec<NoteCard>),
@@ -1170,7 +1364,8 @@ pub struct StuckNote {
 
 /// A file come lately as its row shows it, or files come together (see `station::recent::listed`): what a press on it
 /// finds, the day it came (as the rows are grouped), its name, where it came from and how large it is, how long ago,
-/// its picture's file, and how many more files there are with it.
+/// its picture's file, and how many more files there are with it; whether it is pinned, and its tags. `dated`: when it
+/// came with the day said (see `text::day_time`), for where no day is over it.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Lately {
     entry: crate::station::recent::Entry,
@@ -1178,8 +1373,16 @@ pub struct Lately {
     label: String,
     about: String,
     when: String,
+    dated: String,
     path: std::path::PathBuf,
     more: usize,
+    pinned: bool,
+    tags: Vec<String>,
+}
+
+/// The names of `tags` (those there are, in their order) that `ids` are.
+fn tags_named(tags: &[crate::station::shelf::Tag], ids: &[u32]) -> Vec<String> {
+    tags.iter().filter(|tag| ids.contains(&tag.id)).map(|tag| tag.name.clone()).collect()
 }
 
 /// The folder `path` is in, by its last two names ("Documents\Work").
@@ -1192,7 +1395,8 @@ fn folder_named(path: &std::path::Path) -> String {
 }
 
 impl Lately {
-    fn of(came: &crate::station::recent::Came, lang: Lang, now: u64) -> Lately {
+    /// `came` as its row shows it, its tags of those there are (`tags`).
+    fn of(came: &crate::station::recent::Came, tags: &[crate::station::shelf::Tag], lang: Lang, now: u64) -> Lately {
         let label = came.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         // The folder it is in, and where it came from, where it says, and in which folder it is unless it is still in
         // Downloads.
@@ -1204,14 +1408,26 @@ impl Lately {
             Some(site) => format!("{folder} · {} {site}", lang.pick("来自", "from")),
             None => folder,
         };
-        Lately { entry: crate::station::recent::Entry::File(came.key), day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone(), more: 0 }
+        Lately {
+            entry: crate::station::recent::Entry::File(came.key),
+            day: text::day_of(came.came_ms, now, lang),
+            label,
+            about: format!("{from} · {}", text::bytes(came.bytes as f64)),
+            when: text::since(came.came_ms, now, lang),
+            dated: text::day_time(came.came_ms, now, lang),
+            path: came.path.clone(),
+            more: 0,
+            pinned: came.marks.pinned,
+            tags: tags_named(tags, &came.marks.tags),
+        }
     }
 
     /// The files come together `files` (the newest first, all in one folder), as `filter` shows them: how many, and
     /// in which folder (named, and where it is, with how large they are together), when the newest came, and its
-    /// picture.
-    fn together(files: &[&crate::station::recent::Came], filter: crate::station::recent::Filter, lang: Lang, now: u64) -> Lately {
+    /// picture; pinned where all of them are, and the tags all of them have.
+    fn together(files: &[&crate::station::recent::Came], filter: crate::station::recent::Filter, tags: &[crate::station::shelf::Tag], lang: Lang, now: u64) -> Lately {
         let newest = files[0];
+        let common: Vec<u32> = newest.marks.tags.iter().copied().filter(|tag| files.iter().all(|came| came.marks.tags.contains(tag))).collect();
         let name = newest.path.parent().and_then(|folder| folder.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let label = format!("{} {} · {name}", files.len(), lang.pick("个文件", "files"));
         let bytes: u64 = files.iter().map(|came| came.bytes).sum();
@@ -1221,22 +1437,43 @@ impl Lately {
             label,
             about: format!("{} · {}", folder_named(&newest.path), text::bytes(bytes as f64)),
             when: text::since(newest.came_ms, now, lang),
+            dated: text::day_time(newest.came_ms, now, lang),
             path: newest.path.clone(),
             more: files.len() - 1,
+            pinned: files.iter().all(|came| came.marks.pinned),
+            tags: tags_named(tags, &common),
         }
     }
 
-    /// As a card shows it: its picture, its name, and when it came under it.
-    fn tile(&self) -> Tile {
-        Tile { id: 0, label: self.label.clone(), about: self.when.clone(), face: Face::Picture { path: self.path.clone(), more: self.more }, pinned: false, badge: None }
+    /// As a card shows it: its picture, its name, and when it came under it. As a line (`line`) shows it: where it came
+    /// from under its name, and when it came at its end, its day said where none is over it (`dated`).
+    fn tile(&self, line: bool, dated: bool) -> Tile {
+        let when = if dated || self.pinned { &self.dated } else { &self.when };
+        let (about, when) = if line { (&self.about, Some(when.clone())) } else { (&self.when, None) };
+        Tile { id: 0, label: self.label.clone(), about: about.clone(), when, face: Face::Picture { path: self.path.clone(), more: self.more }, pinned: self.pinned, tags: self.tags.clone(), badge: None }
     }
 
-    /// The page's rows of `files` (newest first) that `filter` takes (see `station::recent::listed`).
-    fn rows(files: &[crate::station::recent::Came], filter: crate::station::recent::Filter, lang: Lang, now: u64) -> Vec<Lately> {
-        crate::station::recent::listed(files, filter).iter().map(|row| match row.as_slice() {
-            [came] => Lately::of(came, lang, now),
-            together => Lately::together(together, filter, lang, now),
-        }).collect()
+    /// `row`, found under `filter` (see `station::recent::page`).
+    fn row(row: &[&crate::station::recent::Came], filter: crate::station::recent::Filter, tags: &[crate::station::shelf::Tag], lang: Lang, now: u64) -> Lately {
+        match row {
+            [came] => Lately::of(came, tags, lang, now),
+            together => Lately::together(together, filter, tags, lang, now),
+        }
+    }
+
+    /// The page's rows of `files` (newest first) that `filter` takes, and how they are in groups, what is pinned of them
+    /// `folded` away or not (see `station::recent::page`).
+    fn page(files: &[crate::station::recent::Came], filter: crate::station::recent::Filter, folded: bool, tags: &[crate::station::shelf::Tag], lang: Lang, now: u64) -> (Vec<Lately>, Groups) {
+        let listed = crate::station::recent::page(files, filter, folded);
+        let rows = listed.first.iter().chain(&listed.rest).map(|(filter, row)| Lately::row(row, *filter, tags, lang, now)).collect();
+        (rows, Groups::of(&listed, folded))
+    }
+
+    /// What `entry` is as its row shows it, `files` being the files come lately (see `station::recent::files_of`).
+    fn entry(files: &[crate::station::recent::Came], entry: crate::station::recent::Entry, lang: Lang, now: u64) -> Option<Lately> {
+        let filter = if let crate::station::recent::Entry::Burst(filter, _) = entry { filter } else { Default::default() };
+        let row = crate::station::recent::files_of(files, entry);
+        (!row.is_empty()).then(|| Lately::row(&row, filter, &[], lang, now))
     }
 }
 
@@ -1262,9 +1499,8 @@ pub fn named(hits: &[HitBox], hit: Hit, lang: Lang) -> Option<String> {
         return None;
     }
     match hit {
-        Hit::Shelf(id) | Hit::Copied(id) => crate::station::run::shown().items.iter().find(|item| item.id == id).map(|item| Tile::of(item, &crate::station::folder::Folder::own(), lang, 0).label),
-        Hit::Recent(crate::station::recent::Entry::File(key)) => crate::station::recent::shown().iter().find(|came| came.key == key).map(|came| Lately::of(came, lang, 0).label),
-        Hit::Recent(entry @ crate::station::recent::Entry::Burst(filter, _)) => Lately::rows(&crate::station::recent::shown(), filter, lang, 0).into_iter().find(|row| row.entry == entry).map(|row| row.label),
+        Hit::Shelf(id) | Hit::Copied(id) => crate::station::run::shown().items.iter().find(|item| item.id == id).map(|item| Tile::of(item, &[], &crate::station::folder::Folder::own(), lang, 0).label),
+        Hit::Recent(entry) => Lately::entry(&crate::station::recent::shown(), entry, lang, 0).map(|row| row.label),
         Hit::App(number) => crate::station::apps::numbered(number).and_then(|app| crate::station::apps::named().into_iter().find(|(_, target)| *target == app.target)).map(|(name, _)| name),
         _ => None,
     }
@@ -1288,7 +1524,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
             let shown = crate::station::run::shown();
             let item = shown.items.iter().find(|item| item.id == id)?;
             let folder = crate::station::folder::Folder::own();
-            let tile = Tile::of(item, &folder, lang, now);
+            let tile = Tile::of(item, &[], &folder, lang, now);
             let (title, shows, pastes) = match &item.what {
                 // (A file gone from where it was, by the copy kept of it, where one is. Whether it is gone as last looked
                 // at, on a thread of its own, as its tile says: a drive slow to answer never holds the panel.)
@@ -1315,11 +1551,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
         }
         Hit::Recent(entry) => {
             let paths = crate::station::recent::paths_of(entry)?;
-            let recent = crate::station::recent::shown();
-            let row = match entry {
-                crate::station::recent::Entry::File(key) => Lately::of(recent.iter().find(|came| came.key == key)?, lang, now),
-                crate::station::recent::Entry::Burst(filter, _) => Lately::rows(&recent, filter, lang, now).into_iter().find(|row| row.entry == entry)?,
-            };
+            let row = Lately::entry(&crate::station::recent::shown(), entry, lang, now)?;
             let (title, about) = (row.label, row.about);
             Some(Item { key: hit.key(), title, about, shows: shows_files(paths.clone()), from, open: Some(Ask::Files(paths.clone(), FilesAct::Open)), copy: Some(Ask::Files(paths, FilesAct::Copy(Some(entry)))), pastes: false })
         }
@@ -1343,15 +1575,17 @@ pub enum Shows {
     Row,
 }
 
-/// A thing on the station as its tile shows it: its number, its name, what it is and when it came (said under it),
-/// its face, and whether it is pinned.
+/// A thing on the station as its tile shows it: its number, its name, what it is and when it came (said under it, its
+/// tags before that; in a line, when it came at its end, where it has that apart), its face, and whether it is pinned.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Tile {
     id: u64,
     label: String,
     about: String,
+    when: Option<String>,
     face: Face,
     pinned: bool,
+    tags: Vec<String>,
     /// The mark of the device nearby it came from (or comes from), where it did.
     badge: Option<Icon>,
 }
@@ -1373,8 +1607,8 @@ enum Face {
 }
 
 impl Tile {
-    /// `item` as its tile shows it (its own files in `folder`), `now` (ms since 1970).
-    fn of(item: &crate::station::shelf::Item, folder: &crate::station::folder::Folder, lang: Lang, now: u64) -> Tile {
+    /// `item` as its tile shows it (its tags of those there are, `tags`, its own files in `folder`), `now` (ms since 1970).
+    fn of(item: &crate::station::shelf::Item, tags: &[crate::station::shelf::Tag], folder: &crate::station::folder::Folder, lang: Lang, now: u64) -> Tile {
         use crate::station::shelf::What;
         let (label, kind, face) = match &item.what {
             What::Files { paths, kept } => {
@@ -1434,18 +1668,7 @@ impl Tile {
             }
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
-        Tile { id: item.id, label, about, face, pinned: item.pinned, badge: item.from.as_ref().map(|device| device_mark(device.kind.as_deref())) }
-    }
-
-    /// `item`, copied lately, as its page shows it (see `of`): its tags, of those there are (`tags`), said after when it
-    /// came.
-    fn copied(item: &crate::station::shelf::Item, tags: &[crate::station::shelf::Tag], folder: &crate::station::folder::Folder, lang: Lang, now: u64) -> Tile {
-        let mut tile = Tile::of(item, folder, lang, now);
-        let names: Vec<&str> = tags.iter().filter(|tag| item.tags.contains(&tag.id)).map(|tag| tag.name.as_str()).collect();
-        if !names.is_empty() {
-            tile.about = format!("{} · {}", tile.about, names.join(lang.pick("、", ", ")));
-        }
-        tile
+        Tile { id: item.id, label, about, when: None, face, pinned: item.pinned, tags: tags_named(tags, &item.tags), badge: item.from.as_ref().map(|device| device_mark(device.kind.as_deref())) }
     }
 
     /// What a device nearby is sending (`receiving`), as its tile shows it while it comes: named as its first file, how
@@ -1461,7 +1684,7 @@ impl Tile {
             [] => String::new(),
         };
         let about = format!("{} · {}%", lang.pick("正在接收", "Receiving"), (done * 100.0).floor());
-        Tile { id: 0, label, about, face: Face::Receiving { per_mille: (done * 1000.0) as u16 }, pinned: false, badge: Some(device_mark(receiving.from.kind.as_deref())) }
+        Tile { id: 0, label, about, when: None, face: Face::Receiving { per_mille: (done * 1000.0) as u16 }, pinned: false, tags: Vec::new(), badge: Some(device_mark(receiving.from.kind.as_deref())) }
     }
 }
 
@@ -2509,52 +2732,80 @@ fn tiles_across(width: f32) -> usize {
 /// lately, and with Recent files on, the files come lately) over the page `tab` (as far as there is one); else what is on it in a row
 /// under its name.
 fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
+    use crate::station::shelf::Filter;
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
     let now = crate::station::now_ms();
+    let tile = |item: &&crate::station::shelf::Item| Tile::of(item, &shown.tags, &folder, lang, now);
     // (What a device nearby is sending first, as it comes: where what it sends will be.)
-    let tiles: Vec<Tile> = shown.receiving.iter().map(|receiving| Tile::receiving(receiving, lang)).chain(put_on(&shown.items).map(|item| Tile::of(item, &folder, lang, now))).collect();
+    let receiving: Vec<Tile> = shown.receiving.iter().map(|receiving| Tile::receiving(receiving, lang)).collect();
+    let count = receiving.len() + put_on(&shown.items).count();
     use crate::station::keep::Refused;
     let said = if let Some(refused) = shown.refused {
         Some(match refused {
-            Refused::Full => lang.pick("空间已满：请取消一些固定，或在设置中调大上限", "No room left: unpin some, or allow more in the settings"),
+            Refused::Full => lang.pick("空间已满：请取消一些内容的固定和标签，或在设置中调大上限", "No room left: unpin and untag some, or allow more in the settings"),
             Refused::Unwritten => lang.pick("未能保存副本：请检查磁盘空间，并确认文件未被其他程序占用", "A copy could not be kept: check the disk's free space, and that no other program holds the file"),
         }.to_string())
-    } else if tiles.is_empty() {
-        Some(lang.pick("把文件、图片或文字拖到这里", "Drag files, pictures or text here").to_string())
     } else {
         None
     };
     if !full {
-        let count = if tiles.is_empty() { String::new() } else { tiles.len().to_string() };
-        return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
+        let tiles: Vec<Tile> = receiving.into_iter().chain(put_on(&shown.items).map(|item| tile(&item))).collect();
+        let said = said.or_else(|| tiles.is_empty().then(|| shelf_empty(Filter::All, lang).to_string()));
+        let count = if count == 0 { String::new() } else { count.to_string() };
+        return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, page: LanePage::default(), shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
     }
-    let copies = shown.history;
-    let tab = if !copies && matches!(tab, Tab::Copies(_)) { Tab::Shelf } else { tab };
-    let recent = crate::station::recent::on();
-    let tab = if !recent && matches!(tab, Tab::Recent(_)) { Tab::Shelf } else { tab };
+    let tab = tab.there(&shown);
     let view = match tab {
-        Tab::Shelf => shown.view,
+        Tab::Shelf(_) => shown.view,
         Tab::Copies(_) => shown.copies_view,
         Tab::Recent(_) => shown.recent_view,
     };
-    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies, recent, view }];
+    let folded = shown.folded.on(tab.station_page());
+    let files = crate::station::recent::shown();
+    let page = |groups: Groups| LanePage::of(tab, groups, view, &shown, &files, lang);
+    let mut blocks = vec![Block::Tabs { tab, count, copies: shown.history, recent: crate::station::recent::on(), view }];
     blocks.push(match tab {
-        Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
+        Tab::Shelf(filter) => {
+            let listed = crate::station::shelf::listed(&shown.items, false, filter, folded);
+            let groups = Groups::of(&listed, folded);
+            // (What is coming, after what is pinned, as it will be.)
+            let coming = receiving.into_iter().filter(|_| filter == Filter::All);
+            let tiles: Vec<Tile> = listed.first.iter().map(tile).chain(coming).chain(listed.rest.iter().map(tile)).collect();
+            let said = said.or_else(|| (tiles.is_empty() && groups.pinned == 0).then(|| shelf_empty(filter, lang).to_string()));
+            Block::Shelf { tiles, page: page(groups), shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over }
+        }
         Tab::Copies(filter) => {
-            let filter = filter.among(&shown.tags);
-            let listed = crate::station::shelf::copies(&shown.items, filter, shown.pins_folded);
-            let groups = Groups { first: listed.first.len(), pinned: listed.pinned, folded: shown.pins_folded };
-            let rows = listed.first.iter().chain(&listed.rest).map(|item| Tile::copied(item, &shown.tags, &folder, lang, now)).collect();
-            Block::Copies { page: CopiesPage { rows, groups, filter, view, tags: shown.tags.clone() }, tall: STATION_TALL }
+            let listed = crate::station::shelf::listed(&shown.items, true, filter, folded);
+            Block::Copies { tiles: listed.first.iter().chain(&listed.rest).map(tile).collect(), page: page(Groups::of(&listed, folded)), tall: STATION_TALL }
         }
         Tab::Recent(filter) => {
             // (Looked at: the journals read from now, the machine settled or not.)
             crate::settle::want(crate::settle::Work::Recent);
-            Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() }
+            let (rows, groups) = Lately::page(&files, filter, folded, &shown.tags, lang, now);
+            Block::Recent { rows, page: page(groups), tall: STATION_TALL, nowhere: crate::station::recent::nowhere() }
         }
     });
     blocks
+}
+
+/// What a page says with nothing pinned on it, and with nothing of the tag it shows.
+fn none_pinned(lang: Lang) -> &'static str {
+    lang.pick("固定的内容会出现在这里", "What you pin shows here")
+}
+
+fn none_tagged(lang: Lang) -> &'static str {
+    lang.pick("没有带这个标签的内容", "Nothing has this tag")
+}
+
+/// What the station's page says with nothing on it that `filter` takes.
+fn shelf_empty(filter: crate::station::shelf::Filter, lang: Lang) -> &'static str {
+    use crate::station::shelf::Filter;
+    match filter {
+        Filter::Pinned => none_pinned(lang),
+        Filter::Tagged(_) => none_tagged(lang),
+        _ => lang.pick("把文件、图片或文字拖到这里", "Drag files, pictures or text here"),
+    }
 }
 
 /// What was put on the station of `items` (the station's), the newest first.
@@ -2565,12 +2816,34 @@ fn put_on(items: &[crate::station::shelf::Item]) -> impl Iterator<Item = &crate:
 /// The things a page of the station's lane lists, in its order, each as a press on it finds it (where things are
 /// chosen together: see `station::select`).
 pub fn lane_order(page: Tab) -> Vec<Hit> {
+    use crate::station::{recent, shelf};
     let shown = crate::station::run::shown();
+    let page = page.there(&shown);
+    let folded = shown.folded.on(page.station_page());
+    let listed = |copied: bool, filter: shelf::Filter| {
+        let listed = shelf::listed(&shown.items, copied, filter, folded);
+        listed.first.into_iter().chain(listed.rest).map(move |item| if copied { Hit::Copied(item.id) } else { Hit::Shelf(item.id) }).collect()
+    };
     match page {
-        Tab::Shelf => put_on(&shown.items).map(|item| Hit::Shelf(item.id)).collect(),
-        Tab::Copies(filter) => copied_lately(&shown, filter).into_iter().map(|item| Hit::Copied(item.id)).collect(),
-        Tab::Recent(filter) => crate::station::recent::listed(&crate::station::recent::shown(), filter).iter().map(|row| Hit::Recent(crate::station::recent::Entry::of_row(row, filter))).collect(),
+        Tab::Shelf(filter) => listed(false, filter),
+        Tab::Copies(filter) => listed(true, filter),
+        Tab::Recent(filter) => {
+            let files = recent::shown();
+            let listed = recent::page(&files, filter, folded);
+            listed.first.iter().chain(&listed.rest).map(|(filter, row)| Hit::Recent(recent::Entry::of_row(row, *filter))).collect()
+        }
     }
+}
+
+/// The things on the station in a row, or a grid, of them all, in its order (see `lane_order`).
+pub fn row_order() -> Vec<Hit> {
+    put_on(&crate::station::run::shown().items).map(|item| Hit::Shelf(item.id)).collect()
+}
+
+/// Whether `hits` (as last drawn) show a page of the station's lane whole, under its head: what is on the station in its
+/// page's order (see `lane_order`), not in a row, or a grid, of it all (see `row_order`).
+pub fn lane_whole(hits: &[HitBox]) -> bool {
+    hits.iter().any(|hit| hit.4 == Hit::StationView)
 }
 
 /// Where in `hits` (as last drawn) the point (`x`, `y`) is on a list of things that may be chosen together (see
@@ -2590,12 +2863,6 @@ pub fn list_at(hits: &[HitBox], x: f32, y: f32) -> Option<Hit> {
         let (left, top, right, bottom) = things.fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(l, t, r, b), hit| (l.min(hit.0), t.min(hit.1), r.max(hit.0 + hit.2), b.max(hit.1 + hit.3)));
         x >= left && x < right && y >= top && y < bottom
     })
-}
-
-/// What was copied lately as its page under `filter` lists it, in its order (see `station::shelf::copies`).
-fn copied_lately(shown: &crate::station::run::Shown, filter: crate::station::shelf::Filter) -> Vec<&crate::station::shelf::Item> {
-    let listed = crate::station::shelf::copies(&shown.items, filter.among(&shown.tags), shown.pins_folded);
-    listed.first.into_iter().chain(listed.rest).collect()
 }
 
 /// The least a list at a lane's foot is shown in (a couple of rows; the rest scrolled to), as its lane is made
@@ -2686,16 +2953,16 @@ impl Hash for Block {
                 crate::station::thumbs::changes().hash(state);
             }
             // (A station's pages: the devices nearby drawn at their foot as something is dragged too, see `paint_strip`.)
-            Block::Recent { rows, filter, view, tall, nowhere } => {
-                (rows, filter, view, tall.to_bits(), nowhere).hash(state);
+            Block::Recent { rows, page, tall, nowhere } => {
+                (rows, page, tall.to_bits(), nowhere).hash(state);
                 (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
-            Block::Shelf { tiles, shows, tall, said, over } => {
-                (tiles, shows, tall.to_bits(), said, over).hash(state);
+            Block::Shelf { tiles, page, shows, tall, said, over } => {
+                (tiles, page, shows, tall.to_bits(), said, over).hash(state);
                 (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
-            Block::Copies { page, tall } => {
-                (page, tall.to_bits()).hash(state);
+            Block::Copies { tiles, page, tall } => {
+                (tiles, page, tall.to_bits()).hash(state);
                 (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
         }
@@ -4591,14 +4858,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, apps_tall(*rows, *named) + spare, *named, *over, hits);
             }
-            (Block::Recent { rows, filter, view, tall, nowhere }, Pass::Content) => {
-                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *view, *tall + spare, *nowhere, hits);
+            (Block::Recent { rows, page, tall, nowhere }, Pass::Content) => {
+                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, page, *tall + spare, *nowhere, hits);
             }
-            (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
-                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall + spare, said.as_deref(), *over, hits);
+            (Block::Shelf { tiles, page, shows, tall, said, over }, Pass::Content) => {
+                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, page, *shows, *tall + spare, said.as_deref(), *over, hits);
             }
-            (Block::Copies { page, tall }, Pass::Content) => {
-                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), page, *tall + spare, hits);
+            (Block::Copies { tiles, page, tall }, Pass::Content) => {
+                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, page, *tall + spare, hits);
             }
         }
         frame.key("");
@@ -4785,8 +5052,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let glass = theme.skin == Skin::Glass;
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
     let start = left - pad;
-    let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
     // (Each chosen again with the filter it has.)
+    let mut pages = vec![(Tab::default().again(tab), lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
     if copies {
         pages.push((Tab::Copies(Default::default()).again(tab), lang.pick("最近复制", "Copied"), String::new()));
     }
@@ -5048,22 +5315,18 @@ pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32
     frame.stroke_rounded(Fill::Down { top: py + 0.5, from: top, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, radius - 0.5, 1.0);
 }
 
-/// The choices whose marks slide (see `thumb::Dots::choose`): the station's pages, the notes' views, the recent files'
-/// filters.
+/// The choices whose marks slide (see `thumb::Dots::choose`): the station's pages, the notes' views, the choices over a
+/// page.
 pub const CHOICE_PAGE: usize = 0;
 pub const CHOICE_NOTES: usize = 1;
 pub const CHOICE_FILTER: usize = 2;
 
-/// What is chosen of the station's pages, of the notes' views and of the filter of the page shown (what was copied
-/// lately, or the files come lately), for their marks to slide (see `thumb::Dots::choose`).
+/// What is chosen of the station's pages, of the notes' views and of the choices over the page shown, for their marks to
+/// slide (see `thumb::Dots::choose`).
 pub fn choices(tab: Tab) -> Vec<(usize, Hit)> {
+    let tab = tab.there(&crate::station::run::shown());
     let mut chosen = vec![(CHOICE_PAGE, Hit::Tab(tab.page())), (CHOICE_NOTES, Hit::NotesShow(crate::notes::view()))];
-    match tab {
-        // (What is pinned, whatever tag of it: one choice.)
-        Tab::Copies(filter) => chosen.push((CHOICE_FILTER, Hit::Tab(Tab::Copies(filter.choice())))),
-        Tab::Recent(_) => chosen.push((CHOICE_FILTER, Hit::Tab(tab))),
-        Tab::Shelf => {}
-    }
+    chosen.push((CHOICE_FILTER, Hit::Tab(tab)));
     chosen
 }
 
@@ -5127,59 +5390,77 @@ fn shelf_places(shows: Shows, count: usize, width: f32, tall: f32) -> (Vec<Rect>
 }
 
 /// A heading among a page's things in two (see `Groups`): over what is pinned, under it where more is pinned than is
-/// listed there, over the rest.
+/// listed there, over the rest; over those of a day among the rest (see `Lately::day`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Heading {
     Pinned,
     More,
     Rest,
+    Day(&'static str),
 }
 
 impl Heading {
     /// What it is named by as things flow anew (see `morph`).
-    fn key(self) -> &'static str {
+    fn key(self) -> String {
         match self {
-            Heading::Pinned => "heading.pinned",
-            Heading::More => "heading.more",
-            Heading::Rest => "heading.rest",
+            Heading::Pinned => "heading.pinned".into(),
+            Heading::More => "heading.more".into(),
+            Heading::Rest => "heading.rest".into(),
+            Heading::Day(day) => format!("heading.{day}"),
         }
+    }
+
+    /// How tall it is.
+    fn tall(self) -> f32 {
+        if matches!(self, Heading::Day(_)) { DAY_ROW } else { HEADING }
     }
 }
 
-/// A heading's height, and the room a pin takes at the end of a line.
+/// A heading's height, and the side of a button at the end of a line.
 const HEADING: f32 = 24.0;
 const ROW_PIN: f32 = 26.0;
 
 /// Where each of a page's `count` things is laid out (see `shelf_places`), what is pinned of them first, apart (see
-/// `Groups`): each one's room, how tall they all are, and where its headings are.
-fn grouped_places(shows: Shows, count: usize, groups: Groups, width: f32, tall: f32) -> (Vec<Rect>, f32, Vec<(f32, Heading)>) {
-    if groups.pinned == 0 {
-        let (places, whole) = shelf_places(shows, count, width, tall);
-        return (places, whole, Vec::new());
-    }
-    let mut headings = vec![(0.0, Heading::Pinned)];
-    let mut y = HEADING;
+/// `Groups`), the rest under their days where they are in those (`days`: each one's day, in their order; none: in none):
+/// each one's room, how tall they all are, and where its headings are.
+fn grouped_places(shows: Shows, count: usize, groups: Groups, days: &[&'static str], width: f32, tall: f32) -> (Vec<Rect>, f32, Vec<(f32, Heading)>) {
     let mut places = Vec::with_capacity(count);
-    for (these, after) in [(groups.first, false), (count - groups.first, true)] {
-        if after && these > 0 {
-            headings.push((y, Heading::Rest));
-            y += HEADING;
-        }
+    let mut headings = Vec::new();
+    let mut y = 0.0;
+    let mut lay = |these: usize, y: &mut f32| {
         let (laid, high) = shelf_places(shows, these, width, tall);
-        places.extend(laid.into_iter().map(|place| Rect { y: y + place.y, ..place }));
-        y += high;
-        if !after && !groups.folded && groups.pinned > groups.first {
-            headings.push((y, Heading::More));
-            y += HEADING;
+        places.extend(laid.into_iter().map(|place| Rect { y: *y + place.y, ..place }));
+        *y += high;
+    };
+    let mut under = |heading: Heading, y: &mut f32| {
+        headings.push((*y, heading));
+        *y += heading.tall();
+    };
+    if groups.pinned > 0 {
+        under(Heading::Pinned, &mut y);
+        lay(groups.first, &mut y);
+        if !groups.folded && groups.pinned > groups.first {
+            under(Heading::More, &mut y);
+        }
+    }
+    let rest = count - groups.first;
+    if days.is_empty() {
+        if groups.pinned > 0 && rest > 0 {
+            under(Heading::Rest, &mut y);
+        }
+        lay(rest, &mut y);
+    } else {
+        for of_day in days.chunk_by(|one, next| one == next) {
+            under(Heading::Day(of_day[0]), &mut y);
+            lay(of_day.len(), &mut y);
         }
     }
     (places, y, headings)
 }
 
-/// A heading of a page's things in two from (`left`, `top`), `width` across: what it says, and where it is pressed.
-fn paint_heading(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), heading: Heading, groups: Groups, shows: Shows) -> Option<HitBox> {
-    use crate::station::shelf::Filter;
-    let (theme, lang) = (scene.theme, scene.lang);
+/// A heading of the things of a page (`page`) from (`left`, `top`), `width` across: what it says, and where it is pressed.
+fn paint_heading(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), heading: Heading, page: &LanePage, shows: Shows) -> Option<HitBox> {
+    let (theme, lang, groups) = (scene.theme, scene.lang, page.groups);
     let line = frame.line_in(theme.small, top, HEADING);
     // (No rounder than its words, at its edge, stand clear of.)
     let round = theme.control_radius.min(6.0);
@@ -5194,15 +5475,20 @@ fn paint_heading(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (lef
             frame.text(lang.pick("最近", "Recent"), theme.small, theme.text3, left, line, width, Align::Start);
             None
         }
+        Heading::Day(day) => {
+            frame.text(day, theme.small, theme.text3, left, frame.line_top(theme.small, top + DAY_ROW / 2.0 + 1.0), width, Align::Start);
+            None
+        }
         Heading::Pinned => {
-            let hit = plate(Hit::PinsHead);
-            let words = if scene.hover == Some(Hit::PinsHead) { theme.text } else { theme.text3 };
+            let head = Hit::PinsHead(page.tab.station_page());
+            let hit = plate(head);
+            let words = if scene.hover == Some(head) { theme.text } else { theme.text3 };
             frame.text(&format!("{} {}", lang.pick("已固定", "Pinned"), groups.pinned), theme.small, words, left, line, width - 20.0, Align::Start);
             frame.icon(if groups.folded { Icon::ChevronRight } else { Icon::ChevronDown }, Point { x: left + width - 7.0, y: top + HEADING / 2.0 }, 11.0, words);
             Some(hit)
         }
         Heading::More => {
-            let hit = plate(Hit::Tab(Tab::Copies(Filter::Pinned(None))));
+            let hit = plate(Hit::Tab(page.tab.pinned()));
             let said = match lang {
                 Lang::Zh => format!("查看全部 {} 项", groups.pinned),
                 Lang::En => format!("See all {}", groups.pinned),
@@ -5314,7 +5600,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                 let line = font.size * 1.28;
                 let room = w - 10.0;
                 // (Its first rows short of a pin in the corner, those that reach down beside it.)
-                let mark = pin_mark(tile, (x, y, w, h));
+                let mark = corner_button(tile, (x, y, w, h), 0);
                 let short = if tile.pinned { (((mark.1 + mark.3 - y - 5.0) / line).ceil() as usize, mark.0 - 3.0 - x - 5.0) } else { (0, room) };
                 for (at, row) in face_rows(frame, text, font, short, room, ((h - 10.0) / line) as usize).iter().enumerate() {
                     frame.text(row, font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
@@ -5346,7 +5632,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             frame.icon(badge, corner, 11.0, ink_on(ink.trace));
         }
         if tile.pinned {
-            paint_pin(frame, theme, ink, pin_mark(tile, (x, y, w, h)), true, false);
+            paint_button(frame, theme, corner_button(tile, (x, y, w, h), 0), Icon::Pin, Some(ink.trace), false);
         }
     }
 }
@@ -5379,7 +5665,7 @@ fn arrival_glow(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, clear
 pub(crate) fn paint_kept_face(frame: &dyn Canvas, theme: &Theme, id: u64, (x, y, w, h): (f32, f32, f32, f32), shows: f32, lang: Lang) -> Option<bool> {
     let shown = crate::station::run::shown();
     let item = shown.items.iter().find(|item| item.id == id)?;
-    let tile = Tile::of(item, &crate::station::folder::Folder::own(), lang, crate::station::now_ms());
+    let tile = Tile::of(item, &[], &crate::station::folder::Folder::own(), lang, crate::station::now_ms());
     let whole = match &tile.face {
         Face::Picture { path, .. } if shows_itself(path) => crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))).is_some(),
         _ => true,
@@ -5460,29 +5746,54 @@ fn shows_itself(path: &std::path::Path) -> bool {
     ["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "tif", "tiff", "avif", "jfif"].contains(&extension.as_str())
 }
 
+/// A page's choices over its things (see `paint_choices`) from (`left`, `top`), `width` across, its room `tall` high: the
+/// room they leave.
+fn under_choices(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), tall: f32, page: &LanePage, hits: &mut Vec<HitBox>) -> ((f32, f32, f32), f32) {
+    if page.choices.is_empty() {
+        return ((left, top, width), tall);
+    }
+    paint_choices(frame, scene, (left, top, width), page, hits);
+    let taken = page.choices_tall();
+    ((left, top + taken, width), tall - taken)
+}
+
+/// What a page says with none of its things to show: in the middle of the room from (`left`, `top`), `width` across and
+/// `tall` high, under `icon` (what is pinned's, or a tag's, where the page shows that).
+fn paint_none(frame: &dyn Canvas, theme: &Theme, (left, top, width): (f32, f32, f32), tall: f32, tab: Tab, icon: Icon, said: &str) {
+    let icon = if tab == tab.pinned() {
+        Icon::Pin
+    } else if tab.tag().is_some() {
+        Icon::Tag
+    } else {
+        icon
+    };
+    let middle = top + tall / 2.0;
+    frame.icon(icon, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
+    centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
+}
+
 /// What is on the station (see `Block::Shelf`) from (`left`, `top`), `width` across, in room `tall` high and scrolled
-/// through past it, as `shows` lays it out.
+/// through past it, as `shows` lays it out, under the choices over it where `page` has any.
 #[allow(clippy::too_many_arguments)]
-fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, said: Option<&str>, over: bool, hits: &mut Vec<HitBox>) {
+fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], page: &LanePage, shows: Shows, tall: f32, said: Option<&str>, over: bool, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     // Something dragged over it: where it goes, lit.
     if over {
         frame.fill_rounded(ink.trace.alpha(0.12), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0);
         frame.stroke_rounded(Fill::Solid(ink.trace.alpha(0.8)), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0, 1.5);
     }
-    if tiles.is_empty() {
-        hits.push(drop_area(left, top, width, tall));
-        // Nothing on it: where to drop, and what.
-        if !over {
-            frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), left, top, width, tall, 10.0, 1.0);
+    let (room, room_tall) = under_choices(frame, scene, (left, top, width), tall, page, hits);
+    if tiles.is_empty() && page.groups.pinned == 0 {
+        // Nothing on it: where to drop, and what. (Nothing of what is chosen of it: that said.)
+        if !over && page.tab == page.tab.page() {
+            frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), room.0, room.1, room.2, room_tall, 10.0, 1.0);
         }
-        let middle = top + tall / 2.0;
-        frame.icon(Icon::Inbox, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
-        centred(frame, said.unwrap_or_default(), theme.small, theme.text2, left, middle + 4.0, width);
+        paint_none(frame, theme, room, room_tall, page.tab, Icon::Inbox, said.unwrap_or_default());
+        hits.push(drop_area(left, top, width, tall));
         return;
     }
     let hit = |tile: &Tile, _| if matches!(tile.face, Face::Receiving { .. }) { Hit::Receiving } else { Hit::Shelf(tile.id) };
-    paint_tiles(frame, scene, ink, (left, top, width), tiles, Groups::default(), shows, tall, List::Shelf, &hit, hits);
+    paint_tiles(frame, scene, ink, room, tiles, page, &[], shows, room_tall, List::Shelf, &hit, hits);
     // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds the
     // first box it is in, a thing before the list it is on).
     hits.push(drop_area(left, top, width, tall));
@@ -5490,30 +5801,71 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     if let Some(said) = said {
         let wide = (frame.measure(said, theme.small) + 20.0).min(width);
         frame.fill_rounded(theme.signal, left + (width - wide) / 2.0, top + tall - 24.0, wide, 22.0, 11.0);
-        centred(frame, said, theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
+        centred(frame, &fitted(frame, said, theme.small, wide - 12.0), theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
     }
 }
 
-/// A page's things (`tiles`, each pressed as `hit` says, by it and its place) from (`left`, `top`), `width` across,
-/// laid out as `shows` says, what is pinned of them apart (see `Groups`), in room `tall` high, scrolled through past it
-/// (as `list`): a card each (its picture, its name and what it is under it; larger, two across), a line each, or (a
-/// small lane) one row of pictures, named. One copied lately is pinned from its line or its card, as the pointer is over
-/// it.
+/// A thing's tags, each on a small grey pill, and what it is after them, on the line of small words at `top`, in `room`
+/// from `x`: as many of them as the room holds, the first whatever it holds of it; what it is, where room enough for the
+/// first of it is left.
 #[allow(clippy::too_many_arguments)]
-fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], groups: Groups, shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
+fn paint_about(frame: &dyn Canvas, theme: &Theme, tile: &Tile, x: f32, top: f32, room: f32) {
+    let font = Font { size: theme.small.size - 1.0, ..theme.small };
+    let middle = top - frame.line_top(theme.small, 0.0);
+    let right = x + room;
+    let mut at = x;
+    for name in &tile.tags {
+        let left = right - at;
+        if at > x && left < PILL_LEAST {
+            break;
+        }
+        let name = fitted(frame, name, font, (PILL_MOST - 2.0 * PILL_PAD).min(left - 2.0 * PILL_PAD));
+        let wide = frame.measure(&name, font) + 2.0 * PILL_PAD;
+        if at > x && wide > left {
+            break;
+        }
+        frame.fill_rounded(theme.text.alpha(if theme.dark { 0.12 } else { 0.08 }), at, middle - PILL / 2.0, wide, PILL, theme.control_radius.min(PILL / 2.0));
+        frame.text(&name, font, theme.text2, at + PILL_PAD, frame.line_top(font, middle), wide, Align::Start);
+        at += wide + PILL_APART;
+    }
+    // (What it is begun where the first of it can be read: "18 字…", not "18…".)
+    let left = right - at;
+    let first = tile.about.split(" · ").next().unwrap_or_default();
+    let least = if first.len() < tile.about.len() { frame.measure(&format!("{first}…"), theme.small) } else { frame.measure(first, theme.small) };
+    if tile.tags.is_empty() || left >= least {
+        frame.text(&fitted(frame, &tile.about, theme.small, left), theme.small, theme.text3, at, top, left, Align::Start);
+    }
+}
+
+/// A tag's pill on a thing (see `paint_about`): how tall, the room round its name, the most it is wide, how far it is
+/// from what is after it; and the least room one is begun in.
+const PILL: f32 = 15.0;
+const PILL_PAD: f32 = 5.0;
+const PILL_MOST: f32 = 92.0;
+const PILL_APART: f32 = 4.0;
+const PILL_LEAST: f32 = 24.0;
+
+/// A page's things (`tiles`, each pressed as `hit` says, by it and its place) from (`left`, `top`), `width` across,
+/// laid out as `shows` says, what is pinned of them apart and the rest under their `days` (see `grouped_places`), in room
+/// `tall` high, scrolled through past it (as `list`): a card each (its picture, its name and what it is under it;
+/// larger, two across), a line each, or (a small lane) one row of pictures, named. Each is tagged and pinned from its
+/// buttons, shown as the pointer is over it (a pinned one's pin all the while).
+#[allow(clippy::too_many_arguments)]
+fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], page: &LanePage, days: &[&'static str], shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let (places, whole, headings) = grouped_places(shows, tiles.len(), groups, width, tall);
+    let (places, whole, headings) = grouped_places(shows, tiles.len(), page.groups, days, width, tall);
     let most = (whole - tall).max(0.0);
     let scroll = scene.scrolls.at(list).clamp(0.0, most);
+    let room = (left - 4.0, top, width + 8.0, tall);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     for (at, heading) in headings {
         let y = top + at - scroll;
-        if y + HEADING < top || y > top + tall {
+        if y + heading.tall() < top || y > top + tall {
             continue;
         }
-        frame.key(heading.key());
-        let hit = paint_heading(frame, scene, ink, (left, y, width), heading, groups, shows);
-        hits.extend(hit.and_then(|hit| shown_in(hit, (left - 4.0, top, width + 8.0, tall))));
+        frame.key(&heading.key());
+        let hit = paint_heading(frame, scene, ink, (left, y, width), heading, page, shows);
+        hits.extend(hit.and_then(|hit| shown_in(hit, room)));
     }
     for (at, (tile, place)) in tiles.iter().zip(&places).enumerate() {
         let (x, y) = (left + place.x, top + place.y - scroll);
@@ -5521,21 +5873,21 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             continue;
         }
         let pressed = hit(tile, at);
-        // (Copied lately: its pin, pressed apart from it.)
-        let pins = matches!(pressed, Hit::Copied(_)).then_some(Hit::PinCopy(tile.id));
-        let on_pin = pins.is_some() && scene.hover == pins;
+        // (Its buttons, pressed apart from it: its pin, and its tags.)
+        let buttons = crate::station::Thing::of(pressed).map(|thing| [(Hit::PinThing(thing), Icon::Pin), (Hit::TagThing(thing), Icon::Tag)]);
+        let on_button = buttons.is_some_and(|buttons| buttons.iter().any(|(button, _)| scene.hover == Some(*button)));
         // (Named, each, that it moves from where it was as they flow anew: see `morph`; and that what is carried off
         // the lane is drawn as it is here, see `carry`.)
         frame.key(&format!("tile.{pressed:?}"));
         let held = tile_held(pressed);
-        let lit = (scene.hover == Some(pressed) || on_pin) && held != Held::Away;
+        let lit = (scene.hover == Some(pressed) || on_button) && held != Held::Away;
         let chosen = scene.thumbs.chosen(pressed);
         let words = if lit || chosen { theme.text } else { theme.text2 };
         let copied = scene.thumbs.copied(pressed);
         let arriving = arriving(scene.thumbs.arrived(pressed));
         // Carried off it: the room it left, outlined (its picture's, or as a row, the row's), nothing of it there.
         if held == Held::Away {
-            let room = match shows {
+            let left_room = match shows {
                 Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                     let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                     (x, y, place.w, plate, face_round(theme, place.w.min(plate)))
@@ -5543,10 +5895,27 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 Shows::Row => (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE, face_round(theme, TILE_PICTURE)),
                 Shows::View(ShelfView::List) => (x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0)),
             };
-            held_room(frame, theme, Held::Away, (room.0, room.1, room.2, room.3), room.4);
-            hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
+            held_room(frame, theme, Held::Away, (left_room.0, left_room.1, left_room.2, left_room.3), left_room.4);
+            hits.extend(shown_in((x, y, place.w, place.h, pressed), room));
             continue;
         }
+        // Its buttons on its picture (in `face`), and the preview's shortcut at its foot, over what is drawn of it.
+        let on_face = |face: (f32, f32, f32, f32), hits: &mut Vec<HitBox>| {
+            if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+                hint_mark(frame, theme, says, said, (face.0 + face.2, face.1 + face.3, face.2));
+            }
+            for (at, (button, icon)) in buttons.iter().flatten().enumerate() {
+                let pin = *icon == Icon::Pin;
+                if !(lit || pin && tile.pinned) {
+                    continue;
+                }
+                let at = corner_button(tile, face, at);
+                if lit {
+                    paint_button(frame, theme, at, *icon, (pin && tile.pinned).then_some(ink.trace), scene.hover == Some(*button));
+                }
+                hits.extend(shown_in((at.0, at.1, at.2, at.3, *button), room));
+            }
+        };
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
@@ -5558,19 +5927,9 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
-                frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
+                paint_about(frame, theme, tile, x, y + plate + 5.0 + LINE, place.w);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + place.w / 2.0, y + plate / 2.0, place.w - 8.0));
-                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, hint_top(tile, pins.is_some(), (fy, fw, fh)), fw));
-                }
-                // (Shown where it is pinned, its mark there, and as the pointer is over its card.)
-                if let Some(pin) = pins.filter(|_| tile.pinned || lit) {
-                    let at = pin_mark(tile, (fx, fy, fw, fh));
-                    if lit {
-                        paint_pin(frame, theme, ink, at, tile.pinned, on_pin);
-                    }
-                    hits.extend(shown_in((at.0, at.1, at.2, at.3, pin), (left - 4.0, top, width + 8.0, tall)));
-                }
+                on_face((fx, fy, fw, fh), hits);
                 shown
             }
             Shows::Row => {
@@ -5582,9 +5941,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
-                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, hint_top(tile, false, (y, TILE_PICTURE, TILE_PICTURE)), TILE_W));
-                }
+                on_face((fx, fy, fw, fh), hits);
                 shown
             }
             Shows::View(ShelfView::List) => {
@@ -5593,34 +5950,37 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
                 arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
-                let room = width - LIST_PICTURE - 10.0 - if pins.is_some() { ROW_PIN + 4.0 } else if tile.pinned { 18.0 } else { 0.0 };
-                let shown = fitted(frame, &tile.label, theme.body, room);
-                frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
-                frame.text(&fitted(frame, &tile.about, theme.small, room), theme.small, theme.text3, x + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
+                // At its end: its buttons (a pinned one's pin, with the pointer not over it), and when it came, which
+                // gives way to them.
                 let mut right = x + width;
-                if let Some(pin) = pins {
-                    // (Shown where it is pinned, and as the pointer is over its line.)
-                    if tile.pinned || lit {
-                        let (px, py) = (x + width - ROW_PIN, y + (LIST_ROW - ROW_PIN) / 2.0);
-                        if on_pin {
-                            frame.fill_rounded(theme.hover, px, py, ROW_PIN, ROW_PIN, theme.control_radius.min(ROW_PIN / 2.0));
-                        }
-                        frame.icon(Icon::Pin, Point { x: px + ROW_PIN / 2.0, y: y + LIST_ROW / 2.0 }, 13.0, if tile.pinned { ink.trace } else { theme.text2 });
-                        hits.extend(shown_in((px, py, ROW_PIN, ROW_PIN, pin), (left - 4.0, top, width + 8.0, tall)));
-                        right -= ROW_PIN + 2.0;
+                for (button, icon) in buttons.iter().flatten() {
+                    let pin = *icon == Icon::Pin;
+                    if !(lit || pin && tile.pinned) {
+                        continue;
                     }
-                } else if tile.pinned {
-                    frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
-                    right -= 18.0;
+                    let (bx, by, on) = (right - ROW_PIN, y + (LIST_ROW - ROW_PIN) / 2.0, scene.hover == Some(*button));
+                    if on {
+                        frame.fill_rounded(theme.hover, bx, by, ROW_PIN, ROW_PIN, theme.control_radius.min(ROW_PIN / 2.0));
+                    }
+                    let mark = if pin && tile.pinned { ink.trace } else if on { theme.text } else { theme.text2 };
+                    frame.icon(*icon, Point { x: bx + ROW_PIN / 2.0, y: y + LIST_ROW / 2.0 }, 13.0, mark);
+                    hits.extend(shown_in((bx, by, ROW_PIN, ROW_PIN, *button), room));
+                    right -= ROW_PIN;
                 }
-                copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(right, y + LIST_ROW / 2.0));
-                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0 && pins.is_none()) {
-                    hint_mark(frame, theme, says, said, Mark::Right(right, y + LIST_ROW / 2.0));
+                if let Some(when) = tile.when.as_ref().filter(|_| !lit) {
+                    let wide = frame.measure(when, theme.small);
+                    frame.text(when, theme.small, theme.text3, right - wide, frame.line_in(theme.small, y, LIST_ROW), wide + 1.0, Align::Start);
+                    right -= wide;
                 }
+                let words_room = right - x - LIST_PICTURE - 10.0 - if right < x + width { 8.0 } else { 0.0 };
+                let shown = fitted(frame, &tile.label, theme.body, words_room);
+                frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, words_room, Align::Start);
+                paint_about(frame, theme, tile, x + LIST_PICTURE + 10.0, y + 4.0 + LINE, words_room);
+                copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(if lit { right } else { x + width }, y + LIST_ROW / 2.0));
                 shown
             }
         };
-        hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
+        hits.extend(shown_in((x, y, place.w, place.h, pressed), room));
         name_shown(hits, pressed, &tile.label, &shown);
     }
     frame.key("");
@@ -5632,165 +5992,126 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     scroll_bar(frame, theme, list, (left, top, width, tall), scroll, most, hits);
 }
 
-/// Recent files' page (see `Block::Recent`) from (`left`, `top`), `width` across, in room `tall` high: the filter's
-/// choices in a row, the chosen marked as its skin marks what is chosen; under them the files it takes, under the day
-/// each came, scrolled through (those come together a row, their count on its picture). With none, what comes here
-/// (`nowhere`: that no folder is chosen to list).
+/// Recent files' page (see `Block::Recent`) from (`left`, `top`), `width` across, in room `tall` high: its choices in a
+/// row, and under them the files chosen, under the day each came where they are lines (those come together one thing, their
+/// count on its picture). With none, what comes here (`nowhere`: that no folder is chosen to list).
 #[allow(clippy::too_many_arguments)]
-fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Lately], filter: crate::station::recent::Filter, view: ShelfView, tall: f32, nowhere: bool, hits: &mut Vec<HitBox>) {
+fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Lately], page: &LanePage, tall: f32, nowhere: bool, hits: &mut Vec<HitBox>) {
     use crate::station::recent::Filter;
-    let theme = scene.theme;
     let lang = scene.lang;
-    let choices = Filter::ALL.map(|choice| {
-        let name = match choice {
-            Filter::All => lang.pick("全部", "All"),
-            Filter::Downloads => lang.pick("下载", "Downloads"),
-            Filter::Screenshots => lang.pick("截图", "Screenshots"),
-            Filter::Documents => lang.pick("文档", "Documents"),
-            Filter::Pictures => lang.pick("图片和视频", "Pictures"),
+    let (room, tall) = under_choices(frame, scene, (left, top, width), tall, page, hits);
+    if rows.is_empty() && page.groups.pinned == 0 {
+        let said = match page.tab {
+            Tab::Recent(Filter::Pinned) => none_pinned(lang),
+            Tab::Recent(Filter::Tagged(_)) => none_tagged(lang),
+            _ if nowhere => lang.pick("尚未选择要列出的文件夹", "No folders are chosen to list"),
+            Tab::Recent(Filter::All) => lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save show here"),
+            _ => lang.pick("这一类没有新文件", "No new files of this kind"),
         };
-        (Tab::Recent(choice), name)
-    });
-    paint_filter(frame, scene, (left, top, width), &choices, Tab::Recent(filter), hits);
-    let list_top = top + CHIP_H + 6.0;
-    let list_tall = tall - CHIP_H - 6.0;
-    if rows.is_empty() {
-        let middle = list_top + list_tall / 2.0;
-        frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
-        let said = if nowhere {
-            lang.pick("尚未选择要列出的文件夹", "No folders are chosen to list")
-        } else if filter == Filter::All {
-            lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save show here")
-        } else {
-            lang.pick("这一类没有新文件", "No new files of this kind")
-        };
-        centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
+        paint_none(frame, scene.theme, room, tall, page.tab, Icon::File, said);
         return;
     }
-    // As cards: each its picture, its name, and when it came under it (the newest first).
-    if view != ShelfView::List {
-        let tiles: Vec<Tile> = rows.iter().map(Lately::tile).collect();
-        paint_tiles(frame, scene, ink, (left, list_top, width), &tiles, Groups::default(), Shows::View(view), list_tall, List::Recent, &|_, at| Hit::Recent(rows[at].entry), hits);
-        return;
-    }
-    // Each row's top (and each day's heading's, before its first row), from the list's top.
-    let mut places = Vec::with_capacity(rows.len());
-    let mut headings = Vec::new();
-    let mut y = 0.0;
-    let mut day = "";
-    for row in rows {
-        if row.day != day {
-            day = row.day;
-            headings.push((y, day));
-            y += DAY_ROW;
-        }
-        places.push(y);
-        y += LIST_ROW;
-    }
-    let whole = y;
-    let most = (whole - list_tall).max(0.0);
-    let scroll = scene.scrolls.at(List::Recent).clamp(0.0, most);
-    frame.clip(left - 4.0, list_top, width + 8.0, list_tall);
-    for (at, day) in headings {
-        let hy = list_top + at - scroll;
-        frame.text(day, theme.small, theme.text3, left, frame.line_top(theme.small, hy + DAY_ROW / 2.0 + 1.0), width, Align::Start);
-    }
-    for (row, at) in rows.iter().zip(places) {
-        let y = list_top + at - scroll;
-        if y + LIST_ROW < list_top || y > list_top + list_tall {
-            continue;
-        }
-        let pressed = Hit::Recent(row.entry);
-        // (Named, as a thing on the station is: see `paint_tiles`.)
-        frame.key(&format!("tile.{pressed:?}"));
-        let held = tile_held(pressed);
-        let round = plate_round(theme, face_round(theme, LIST_PICTURE), 4.0);
-        // Carried off it: the row it left, outlined.
-        if held == Held::Away {
-            held_room(frame, theme, Held::Away, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round);
-            hits.extend(shown_in((left, y, width, LIST_ROW, pressed), (left - 4.0, list_top, width + 8.0, list_tall)));
-            continue;
-        }
-        let lit = scene.hover == Some(pressed);
-        tile_plate(frame, theme, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round, lit, scene.thumbs.chosen(pressed));
-        let face = row.tile();
-        let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-        paint_face(frame, theme, ink, &face, fx, fy, fw, fh, 1.0);
-        let when_w = frame.measure(&row.when, theme.small);
-        let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
-        let shown = fitted(frame, &row.label, theme.body, room);
-        frame.text(&shown, theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
-        frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
-        frame.text(&row.when, theme.small, theme.text3, left + width - when_w, frame.line_in(theme.small, y, LIST_ROW), when_w + 1.0, Align::Start);
-        let copied = scene.thumbs.copied(pressed);
-        copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(left + width, y + LIST_ROW / 2.0));
-        if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-            hint_mark(frame, theme, says, said, Mark::Right(left + width, y + LIST_ROW / 2.0));
-        }
-        hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.entry)), (left - 4.0, list_top, width + 8.0, list_tall)));
-        name_shown(hits, Hit::Recent(row.entry), &row.label, &shown);
-    }
-    frame.key("");
-    frame.unclip();
-    // (After its rows: a press finds a row before the list it is on.)
-    if most > 0.0 {
-        hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
-    }
-    scroll_bar(frame, theme, List::Recent, (left, list_top, width, list_tall), scroll, most, hits);
+    // Lines under their days (what is pinned, and what is of a tag, told apart from the rest, in one list: each with its
+    // day said at its end).
+    let line = page.view == ShelfView::List;
+    let by_day = line && page.tab != page.tab.pinned() && page.tab.tag().is_none();
+    let days: Vec<&'static str> = if by_day { rows.iter().skip(page.groups.first).map(|row| row.day).collect() } else { Vec::new() };
+    let tiles: Vec<Tile> = rows.iter().map(|row| row.tile(line, !by_day)).collect();
+    paint_tiles(frame, scene, ink, room, &tiles, page, &days, Shows::View(page.view), tall, List::Recent, &|_, at| Hit::Recent(rows[at].entry), hits);
 }
 
-/// A page's filter (what was copied lately, the files come lately) at `top` from `left`, `width` across: its
-/// `choices` (each the page with that filter, and its name) in a row, `chosen` marked as the station's page over them
-/// is, sliding to it.
-fn paint_filter(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), choices: &[(Tab, &str)], chosen: Tab, hits: &mut Vec<HitBox>) {
+/// A page's choices (see `LanePage`) at `top` from `left`, `width` across: in a row, the one shown marked as the
+/// station's page over them is, sliding to it, a tag by its mark, the one shown of them with a button that opens its
+/// menu. More than fit, they are turned across by the wheel, fading out at the ends past which there are more.
+fn paint_choices(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), page: &LanePage, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    // The choices, all in the row: the room round their names narrowed where they do not fit, then their names
-    // shortened, each to a like share of it.
-    let gaps = 4.0 * (choices.len() - 1) as f32;
-    let words: f32 = choices.iter().map(|(_, name)| frame.measure(name, theme.small)).sum();
-    let pad = ((width - gaps - words) / (2.0 * choices.len() as f32)).clamp(4.0, CHIP_PAD);
-    let share = (width - gaps) / choices.len() as f32;
-    let shortened = words + 2.0 * pad * choices.len() as f32 + gaps > width;
-    let mut x = left;
-    let laid: Vec<(Tab, String, f32, f32)> = choices
-        .iter()
-        .map(|&(choice, name)| {
-            let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad).into_owned() } else { name.to_string() };
-            let wide = frame.measure(&name, theme.small) + 2.0 * pad;
-            let at = x;
-            x += wide + 4.0;
-            (choice, name, at, wide)
+    let (choices, chosen) = (&page.choices, page.tab);
+    // Each laid out, the room round their names narrowed where they do not fit, down to `CHIP_PAD_LEAST`.
+    let names: Vec<_> = choices.iter().map(|choice| fitted(frame, &choice.name, theme.small, CHIP_NAME)).collect();
+    let inner = |at: usize| {
+        let choice = &choices[at];
+        let mark = if choice.tag { CHOICE_MARK + CHOICE_MARK_GAP } else { 0.0 };
+        (mark, frame.measure(&names[at], theme.small), if choice.tag && choice.tab == chosen { CHIP_MORE } else { 0.0 })
+    };
+    let all: Vec<(f32, f32, f32)> = (0..choices.len()).map(inner).collect();
+    // (A tag's button as far in from its end as it is from its top and foot.)
+    let wide = |at: usize, pad: f32| {
+        let (mark, name, more) = all[at];
+        pad + mark + name + if more > 0.0 { CHOICE_MARK_GAP + more + (CHIP_H - CHIP_MORE) / 2.0 } else { pad }
+    };
+    let whole = |pad: f32| (0..choices.len()).map(|at| wide(at, pad)).sum::<f32>() + CHIP_APART * choices.len().saturating_sub(1) as f32;
+    let pads = choices.iter().enumerate().map(|(at, _)| if all[at].2 > 0.0 { 1.0 } else { 2.0 }).sum::<f32>();
+    let fits = CHIP_PAD.min((width - whole(0.0)) / pads);
+    let pad = if fits >= CHIP_PAD_LEAST { fits } else { CHIP_PAD };
+    let most = (whole(pad) - width).max(0.0);
+    let most = if most < 0.5 { 0.0 } else { most };
+    let scroll = scene.scrolls.at(List::Choices).clamp(0.0, most);
+    let mut at = 0.0;
+    let laid: Vec<(f32, f32)> = (0..choices.len())
+        .map(|one| {
+            let here = (at, wide(one, pad));
+            at += here.1 + CHIP_APART;
+            here
         })
         .collect();
+    let room = (left, top, width, CHIP_H);
+    if most > 0.0 {
+        frame.clip_fading(left - 2.0, top - 3.0, width + 4.0, CHIP_H + 6.0, (scroll.min(CHIP_FADE), (most - scroll).min(CHIP_FADE)));
+    }
     // The one chosen marked as the station's page over them is, sliding to it (glass's on a pill of its glass, Windows
     // 11's a bar of its accent under it, chart paper's underlined in ink: filled, they were a second way of choosing
     // under the first).
     {
-        let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
-        let at = |choice: Tab| laid.iter().position(|one| one.0 == choice);
+        let boxes: Vec<(f32, f32)> = laid.iter().map(|(at, wide)| (left + at - scroll, *wide)).collect();
+        let place = |tab: Tab| choices.iter().position(|one| one.tab == tab);
         let slid = slid_at(scene.thumbs.slid(CHOICE_FILTER, Hit::Tab(chosen)), |from| match from {
-            Hit::Tab(from) => at(from),
+            Hit::Tab(from) => place(from),
             _ => None,
         });
-        let marked = at(chosen).unwrap_or(0);
+        let marked = place(chosen).unwrap_or(0);
         if theme.skin == Skin::Glass {
-            let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(one.0)));
+            let hovered = choices.iter().position(|one| scene.hover == Some(Hit::Tab(one.tab)));
             glass_choice(frame, theme, (top, CHIP_H), &boxes, marked, slid, hovered);
         } else {
             let under = if theme.skin == Skin::Paper { top + CHIP_H - 2.0 } else { top + CHIP_H - 3.0 };
             choice_mark(frame, theme, &boxes, marked, slid, under, 14.0, 4.0);
         }
     }
-    for (choice, name, x, wide) in laid {
-        let is_chosen = choice == chosen;
-        let hit = Hit::Tab(choice);
-        let hovered = scene.hover == Some(hit);
+    for (one, choice) in choices.iter().enumerate() {
+        let ((at, wide), (mark, name_w, more)) = (laid[one], all[one]);
+        hits.push((left, top, 0.0, 0.0, Hit::Choice(choice.tab, at.to_bits(), wide.to_bits())));
+        let x = left + at - scroll;
+        if x + wide < left || x > left + width {
+            continue;
+        }
+        let is_chosen = choice.tab == chosen;
+        let hit = Hit::Tab(choice.tab);
+        let button = choice.tab.tag().filter(|_| more > 0.0).map(Hit::TagMore);
+        let on_button = button.is_some() && scene.hover == button;
+        let hovered = scene.hover == Some(hit) || on_button;
         if hovered && !is_chosen && theme.skin != Skin::Glass {
             frame.fill_rounded(theme.hover, x, top, wide, CHIP_H, theme.control_radius.min(CHIP_H / 2.0));
         }
         let words = if is_chosen || hovered { theme.text } else { theme.text2 };
-        centred(frame, &name, theme.small, words, x, frame.line_in(theme.small, top, CHIP_H), wide);
-        hits.push((x, top, wide, CHIP_H, hit));
+        if choice.tag {
+            frame.icon(Icon::Tag, Point { x: x + pad + CHOICE_MARK / 2.0, y: top + CHIP_H / 2.0 }, CHOICE_MARK, words.alpha(words.a * 0.8));
+        }
+        frame.text(&names[one], theme.small, words, x + pad + mark, frame.line_in(theme.small, top, CHIP_H), name_w + 1.0, Align::Start);
+        // (The button of its menu, a press on it apart from its own.)
+        if let Some(button) = button {
+            let side = (x + wide - (CHIP_H - CHIP_MORE) / 2.0 - CHIP_MORE, top + (CHIP_H - CHIP_MORE) / 2.0);
+            if on_button {
+                frame.fill_rounded(theme.hover, side.0, side.1, CHIP_MORE, CHIP_MORE, theme.control_radius.min(CHIP_MORE / 2.0));
+            }
+            frame.icon(Icon::Ellipsis, Point { x: side.0 + CHIP_MORE / 2.0, y: top + CHIP_H / 2.0 }, 13.0, if on_button { theme.text } else { theme.text2 });
+            hits.extend(shown_in((side.0, side.1, CHIP_MORE, CHIP_MORE, button), room));
+        }
+        hits.extend(shown_in((x, top, wide, CHIP_H, hit), room));
+    }
+    if most > 0.0 {
+        frame.unclip();
+        // (After them: a press finds one before the row it is in.)
+        hits.push((left, top, width, CHIP_H, Hit::List(List::Choices, most.to_bits())));
     }
 }
 
@@ -5834,20 +6155,20 @@ impl Hint {
     }
 }
 
-/// Where on a thing's picture (x, y, width, height) its pin's plate is (the same: see `paint_pin`): in its top right
-/// corner, beside its device's mark where it has one.
-fn pin_mark(tile: &Tile, (x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+/// Where on a thing's picture (x, y, width, height) its button's plate is (see `paint_button`), the `at`th from its top
+/// right corner: beside its device's mark where it has one, the first its pin's.
+fn corner_button(tile: &Tile, (x, y, w, h): (f32, f32, f32, f32), at: usize) -> (f32, f32, f32, f32) {
     let (side, inset) = match w.min(h) {
         small if small < 64.0 => (18.0, 3.0),
         small if small < 84.0 => (20.0, 5.0),
         _ => (22.0, HINT_INSET),
     };
-    (x + w - inset - side - if tile.badge.is_some() { 12.0 } else { 0.0 }, y + inset, side, side)
+    (x + w - inset - side - if tile.badge.is_some() { 12.0 } else { 0.0 } - at as f32 * (side + 4.0), y + inset, side, side)
 }
 
-/// A pin on a thing's picture, on a plate of the skin's menus' sheet as round as its buttons are (glass's a circle): in the
-/// lane's ink where it is `pinned`, lit with the pointer `on` it (where it is pressed).
-fn paint_pin(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), pinned: bool, on: bool) {
+/// A button on a thing's picture, `icon` on a plate of the skin's menus' sheet as round as its buttons are (glass's a
+/// circle): in `ink` where it is on (its pin, pinned), lit with the pointer `on` it (where it is pressed).
+fn paint_button(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32, f32), icon: Icon, ink: Option<Color>, on: bool) {
     let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
     let radius = theme.control_radius.min(h / 2.0);
     frame.fill_rounded(colours.sheet, x, y, w, h, radius);
@@ -5855,8 +6176,8 @@ fn paint_pin(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, (x, y, w
         frame.fill_rounded(colours.text.alpha(0.08), x, y, w, h, radius);
     }
     frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, w, h, radius, 1.0);
-    let mark = if pinned { ink.trace } else if on { colours.text } else { colours.text.alpha(colours.text.a * 0.75) };
-    frame.icon(Icon::Pin, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
+    let mark = ink.unwrap_or(if on { colours.text } else { colours.text.alpha(colours.text.a * 0.75) });
+    frame.icon(icon, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
 }
 
 /// How round the plate the preview's shortcut is said on (`tall`) is: as the skin's menus are, no rounder than 8.
@@ -5869,20 +6190,13 @@ fn corner_marked(tile: &Tile, small: f32) -> bool {
     small >= 40.0 && (tile.pinned || tile.badge.is_some())
 }
 
-/// Where the preview's shortcut is said from, on a thing's picture from `y` down, `w` by `h` (see `hint_mark`): its
-/// top, or, its top corner marked or its pin there as the pointer is on it (`pins`), so far down that it is said at its
-/// foot.
-fn hint_top(tile: &Tile, pins: bool, (y, w, h): (f32, f32, f32)) -> f32 {
-    if pins || corner_marked(tile, w.min(h)) { y + h - HINT_TALL - 2.0 * HINT_INSET } else { y }
-}
-
 const HINT_TALL: f32 = 20.0;
 const HINT_INSET: f32 = 6.0;
 
 /// The preview's shortcut said on a thing (`says`), as shown as `shown`: a small plate in the skin's sheet, as its
-/// menus' are, at the top right corner of its picture (`Mark::Centre`'s x and y taken as that corner, its room as the
-/// picture's width) or at the end of its row; settling down into place as it comes in.
-fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark) {
+/// menus' are, at the bottom right corner of its picture (there, `room` wide: its buttons are at its top); settling into
+/// place as it comes in.
+fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, (right, bottom, room): (f32, f32, f32)) {
     const TALL: f32 = HINT_TALL;
     const PAD: f32 = 7.0;
     const INSET: f32 = HINT_INSET;
@@ -5890,12 +6204,9 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark
     let font = Font { size: theme.small.size.min(11.5), weight: 600.0, ..theme.small };
     let wide = PAD + frame.measure(says, font) + PAD;
     let drop = (1.0 - shown) * 2.0;
-    let (left, top) = match at {
-        // (Where the picture is narrower than what is said, over its middle.)
-        Mark::Centre(right, top, room) if wide + 2.0 * INSET <= room => (right - INSET - wide, top + INSET - drop),
-        Mark::Centre(right, top, room) => (right - room / 2.0 - wide / 2.0, top + INSET - drop),
-        Mark::Right(right, middle) => (right - wide, middle - TALL / 2.0 - drop),
-    };
+    // (Where the picture is narrower than what is said, under its middle.)
+    let left = if wide + 2.0 * INSET <= room { right - INSET - wide } else { right - room / 2.0 - wide / 2.0 };
+    let top = bottom - INSET - TALL + drop;
     let radius = mark_round(theme, &colours, TALL);
     let faded = |color: Color| color.alpha(color.a * shown);
     frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
@@ -5950,9 +6261,18 @@ pub fn arrived() -> Option<(std::time::Instant, Vec<Hit>)> {
     Some((at, ids.into_iter().map(Hit::Shelf).collect()))
 }
 
-/// A page's filter's choices: their height and the room round each name. A day's heading over its files.
+/// A page's choices: their height, the room round each name (and the least it is narrowed to, for them all to fit), the
+/// most a name takes, how far apart they are, and how far in the ends of their row fade. A tag's mark before its name, and
+/// the button of its menu after it. A day's heading over its files.
 const CHIP_H: f32 = 22.0;
 const CHIP_PAD: f32 = 9.0;
+const CHIP_PAD_LEAST: f32 = 4.0;
+const CHIP_NAME: f32 = 110.0;
+const CHIP_APART: f32 = 4.0;
+const CHIP_FADE: f32 = 18.0;
+const CHOICE_MARK: f32 = 12.0;
+const CHOICE_MARK_GAP: f32 = 4.0;
+const CHIP_MORE: f32 = 18.0;
 const DAY_ROW: f32 = 22.0;
 
 /// `hit` as much of it as shows in a list's room (`x`, `y`, `w`, `h`, what it is drawn clipped to): none where none of
@@ -6002,103 +6322,25 @@ fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, y: 
 
 pub(crate) use super::canvas::fitted;
 
-/// What was copied lately (see `CopiesPage`) from (`left`, `top`), `width` across, in room `tall` high: the filter's
-/// choices in a row (with what is pinned, its tags under them), and under them those of it the filter takes (what each
-/// is, its first words, and what and when under them), pressed to be copied again, what is pinned of all of it first.
-fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, head, width): (f32, f32, f32), page: &CopiesPage, tall: f32, hits: &mut Vec<HitBox>) {
+/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: its choices in
+/// a row, and under them those of it chosen (what each is, its first words, and what and when under them), pressed to be
+/// copied again, what is pinned of all of it first.
+#[allow(clippy::too_many_arguments)]
+fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], page: &LanePage, tall: f32, hits: &mut Vec<HitBox>) {
     use crate::station::shelf::Filter;
-    let theme = scene.theme;
     let lang = scene.lang;
-    let choices = Filter::ALL.map(|choice| {
-        let name = match choice {
-            Filter::All => lang.pick("全部", "All"),
-            Filter::Pinned(_) => lang.pick("已固定", "Pinned"),
-            Filter::Words => lang.pick("文字", "Text"),
-            Filter::Pictures => lang.pick("图片", "Pictures"),
-            Filter::Files => lang.pick("文件", "Files"),
-        };
-        (Tab::Copies(choice), name)
-    });
-    paint_filter(frame, scene, (left, head, width), &choices, Tab::Copies(page.filter.choice()), hits);
-    let mut top = head + CHIP_H + 6.0;
-    let mut tall = tall - CHIP_H - 6.0;
-    if let Filter::Pinned(tag) = page.filter {
-        paint_tags(frame, scene, ink, (left, top, width), &page.tags, tag, hits);
-        top += TAG_H + 6.0;
-        tall -= TAG_H + 6.0;
-    }
-    if page.rows.is_empty() && page.groups.pinned == 0 {
-        let middle = top + tall / 2.0;
-        frame.icon(if matches!(page.filter, Filter::Pinned(_)) { Icon::Pin } else { Icon::Clipboard }, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
-        let said = match page.filter {
-            Filter::All => lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"),
-            Filter::Pinned(None) => lang.pick("固定的内容会出现在这里", "What you pin shows here"),
-            Filter::Pinned(Some(_)) => lang.pick("没有带这个标签的内容", "Nothing has this tag"),
+    let (room, tall) = under_choices(frame, scene, (left, top, width), tall, page, hits);
+    if tiles.is_empty() && page.groups.pinned == 0 {
+        let said = match page.tab {
+            Tab::Copies(Filter::All) => lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"),
+            Tab::Copies(Filter::Pinned) => none_pinned(lang),
+            Tab::Copies(Filter::Tagged(_)) => none_tagged(lang),
             _ => lang.pick("这一类没有复制的内容", "Nothing of this kind was copied"),
         };
-        centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
+        paint_none(frame, scene.theme, room, tall, page.tab, Icon::Clipboard, said);
         return;
     }
-    paint_tiles(frame, scene, ink, (left, top, width), &page.rows, page.groups, Shows::View(page.view), tall, List::Copies, &|tile, _| Hit::Copied(tile.id), hits);
-}
-
-/// A tag's height in their row, the room round its name, and the most its name takes.
-const TAG_H: f32 = 24.0;
-const TAG_PAD: f32 = 9.0;
-const TAG_NAME: f32 = 110.0;
-
-/// The tags of what is pinned in a row at `top` from `left`, `width` across (turned across by the wheel where they are
-/// more than fit): all of it, then each of `tags`, the one chosen (`chosen`) marked; a new one made after them (at the
-/// row's end, where they are more than fit).
-fn paint_tags(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tags: &[crate::station::shelf::Tag], chosen: Option<u32>, hits: &mut Vec<HitBox>) {
-    use crate::station::shelf::Filter;
-    const APART: f32 = 5.0;
-    let theme = scene.theme;
-    let round = theme.control_radius.min(TAG_H / 2.0);
-    let mut x = 0.0;
-    let laid: Vec<(Option<u32>, String, f32, f32)> = std::iter::once((None, scene.lang.pick("全部", "All")))
-        .chain(tags.iter().map(|tag| (Some(tag.id), tag.name.as_str())))
-        .map(|(tag, name)| {
-            let name = fitted(frame, name, theme.small, TAG_NAME).into_owned();
-            let wide = frame.measure(&name, theme.small) + 2.0 * TAG_PAD;
-            let at = x;
-            x += wide + APART;
-            (tag, name, at, wide)
-        })
-        .collect();
-    let fits = x + TAG_H <= width;
-    let room = if fits { width } else { width - TAG_H - APART };
-    let most = if fits { 0.0 } else { (x - APART - room).max(0.0) };
-    let scroll = scene.scrolls.at(List::Tags).clamp(0.0, most);
-    frame.clip(left, top - 1.0, room, TAG_H + 2.0);
-    for (tag, name, at, wide) in laid {
-        let x = left + at - scroll;
-        if x + wide < left || x > left + room {
-            continue;
-        }
-        let hit = Hit::Tab(Tab::Copies(Filter::Pinned(tag)));
-        let (marked, lit) = (tag == chosen, scene.hover == Some(hit));
-        if marked {
-            frame.fill_rounded(ink.trace.alpha(0.16), x, top, wide, TAG_H, round);
-        } else if lit {
-            frame.fill_rounded(theme.hover, x, top, wide, TAG_H, round);
-        }
-        let edge = if marked { ink.trace.alpha(0.55) } else { theme.text3.alpha(theme.text3.a * 0.4) };
-        frame.stroke_rounded(Fill::Solid(edge), x + 0.5, top + 0.5, wide - 1.0, TAG_H - 1.0, (round - 0.5).max(0.0), 1.0);
-        centred(frame, &name, theme.small, if marked || lit { theme.text } else { theme.text2 }, x, frame.line_in(theme.small, top, TAG_H), wide);
-        hits.extend(shown_in((x, top, wide, TAG_H, hit), (left, top, room, TAG_H)));
-    }
-    frame.unclip();
-    // (After them: a press finds one before the row it is in.)
-    if most > 0.0 {
-        hits.push((left, top, room, TAG_H, Hit::List(List::Tags, most.to_bits())));
-    }
-    let add = left + if fits { x } else { width - TAG_H };
-    if scene.hover == Some(Hit::NewTag) {
-        frame.fill_rounded(theme.hover, add, top, TAG_H, TAG_H, round);
-    }
-    frame.icon(Icon::Add, Point { x: add + TAG_H / 2.0, y: top + TAG_H / 2.0 }, 13.0, theme.text2);
-    hits.push((add, top, TAG_H, TAG_H, Hit::NewTag));
+    paint_tiles(frame, scene, ink, room, tiles, page, &[], Shows::View(page.view), tall, List::Copies, &|tile, _| Hit::Copied(tile.id), hits);
 }
 
 /// The widths of the process table's four measures: a share, a size, a
@@ -6419,15 +6661,16 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
         "station" => {
             let shown = crate::station::run::shown();
             let folder = crate::station::folder::Folder::own();
-            let tab = match scene.tab {
-                Tab::Copies(_) if !shown.history => Tab::Shelf,
-                Tab::Recent(_) if !crate::station::recent::on() => Tab::Shelf,
-                tab => tab,
-            };
+            let tab = scene.tab.there(&shown);
+            let folded = shown.folded.on(tab.station_page());
+            let tile = |item: &crate::station::shelf::Item| Tile::of(item, &[], &folder, lang, now);
             let tiles: Vec<(Tile, Hit)> = match tab {
-                Tab::Shelf => shown.items.iter().rev().filter(|item| !item.copied).map(|item| (Tile::of(item, &folder, lang, now), Hit::Shelf(item.id))).collect(),
-                Tab::Copies(filter) => copied_lately(&shown, filter).into_iter().map(|item| (Tile::of(item, &folder, lang, now), Hit::Copied(item.id))).collect(),
-                Tab::Recent(filter) => Lately::rows(&crate::station::recent::shown(), filter, lang, now).iter().map(|row| (row.tile(), Hit::Recent(row.entry))).collect(),
+                Tab::Shelf(_) => put_on(&shown.items).map(|item| (tile(item), Hit::Shelf(item.id))).collect(),
+                Tab::Copies(filter) => {
+                    let listed = crate::station::shelf::listed(&shown.items, true, filter, folded);
+                    listed.first.into_iter().chain(listed.rest).map(|item| (tile(item), Hit::Copied(item.id))).collect()
+                }
+                Tab::Recent(filter) => Lately::page(&crate::station::recent::shown(), filter, folded, &[], lang, now).0.iter().map(|row| (row.tile(false, false), Hit::Recent(row.entry))).collect(),
             };
             Bench::Station { tiles, tab }
         }
@@ -6733,7 +6976,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let mut room = (x, y, w, h);
             if h >= 150.0 && w >= 110.0 {
                 let name = match tab {
-                    Tab::Shelf => scene.lang.pick("中转站", "Station"),
+                    Tab::Shelf(_) => scene.lang.pick("中转站", "Station"),
                     Tab::Copies(_) => scene.lang.pick("最近复制", "Copied"),
                     Tab::Recent(_) => scene.lang.pick("最近文件", "Recent"),
                 };
@@ -6754,7 +6997,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             }
             let grid = Grid::in_room(room, 60.0, true);
             let list = match tab {
-                Tab::Shelf => List::Shelf,
+                Tab::Shelf(_) => List::Shelf,
                 Tab::Copies(_) => List::Copies,
                 Tab::Recent(_) => List::Recent,
             };
@@ -7088,9 +7331,14 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
 #[cfg(test)]
 pub(crate) mod tests {
 
-    /// A page of what was copied lately showing `rows`, nothing of them apart.
-    fn copies_page(rows: &[Tile], filter: crate::station::shelf::Filter, view: ShelfView) -> CopiesPage {
-        CopiesPage { rows: rows.to_vec(), groups: Groups::default(), filter, view, tags: Vec::new() }
+    /// What was copied lately as `view` shows it, all of it, nothing of it apart.
+    fn copies_page(view: ShelfView) -> LanePage {
+        LanePage::of(Tab::Copies(Default::default()), Groups::default(), view, &Default::default(), &[], Lang::Zh)
+    }
+
+    /// The files come lately as `view` shows them, all of them, nothing of them apart.
+    fn recent_page(view: ShelfView) -> LanePage {
+        LanePage::of(Tab::Recent(Default::default()), Groups::default(), view, &Default::default(), &[], Lang::Zh)
     }
 
     /// What is kept at hand shown by pictures alone, tagged, on the glass dark and light, at a lane's size and the rail's,
@@ -7236,9 +7484,9 @@ otepad.exe", "Notepad"),
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
-                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes = vec![
-                    Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
+                    Lane { id: "station".into(), blocks: station_lane(true, Tab::default(), Lang::Zh), ink: theme.ink("station") },
                     Lane { id: "apps".into(), blocks: apps_lane(true, false, &theme, Lang::Zh), ink: theme.ink("apps") },
                 ];
                 for (column, side) in sides.iter().enumerate() {
@@ -7292,7 +7540,7 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(Some(4200.0), None, None))]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let made = |ids: &[&str]| -> Vec<Lane> { ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect() };
                     let bench = made(&["search", "time", "station", "notes", "apps"]);
                     let readings = made(&["cpu", "memory"]);
@@ -7357,7 +7605,7 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(Some(4200.0), None, None))]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     // Each widget: its lanes, its shape, its size, where it is, and how far its notes are turned (pages).
                     type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32), f32);
                     let mut widgets: Vec<Widget> = Vec::new();
@@ -7441,7 +7689,7 @@ otepad.exe", "Notepad"),
                 let (info, prefs) = (info(), Prefs::default());
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
-                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true), ("ai:qwen", true), ("ai:deepseek", false), ("ai:glm", false), ("ai:kimi", false), ("ai:minimax", false)]
                     .into_iter()
                     .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, Some(open)).unwrap(), ink: theme.ink(id) })
@@ -7520,7 +7768,7 @@ otepad.exe", "Notepad"),
                     let info = info();
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let lane_at = |detail: Detail| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| source == ai::Source::Codex, &theme).unwrap(), ink: theme.ink(AI_LANE) };
                     let full = lane_at(Detail::Full);
                     // (And as a top edge's panel lays it out across, Codex opened.)
@@ -7667,7 +7915,7 @@ otepad.exe", "Notepad"),
         let info = info();
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lane_at = |detail: Detail, opened: Option<ai::Source>| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| Some(source) == opened, &theme).unwrap(), ink: theme.ink(AI_LANE) };
         let dock = ai::dock_size(true, 4, true);
         let down = ai::dock_size(false, 4, true);
@@ -7737,7 +7985,7 @@ otepad.exe", "Notepad"),
         let (info, prefs) = (info(), Prefs::default());
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let (usage, now) = (ai::tests::lanes::accounts(), ai::tests::lanes::NOON);
         let held = Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai);
         let mut blocks: Vec<Block> = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:deepseek", "ai:glm", "ai:kimi", "ai:minimax"]
@@ -7831,7 +8079,7 @@ otepad.exe", "Notepad"),
         let info = info();
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let hits = paint(&Nothing, &scene, &[across], &layout, Pass::Content);
         let heads: Vec<(f32, f32, f32)> = [ai::Source::Claude, ai::Source::Codex].map(|source| hits.iter().find(|hit| hit.4 == Hit::Ai(source)).map(|hit| (hit.0, hit.1, hit.2)).unwrap()).to_vec();
         let lane = layout.lanes()[0];
@@ -7856,7 +8104,7 @@ otepad.exe", "Notepad"),
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let prefs = Prefs::default();
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let rich = ai::Rich::default();
@@ -7899,7 +8147,7 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
         let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
         let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Across), |_| false, &theme).unwrap();
         let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
@@ -7977,7 +8225,7 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
         let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
         let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
         let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
@@ -8125,7 +8373,7 @@ otepad.exe", "Notepad"),
         assert_eq!(dock.slots.len(), 3);
         let titles: Vec<String> = dock.slots.iter().map(|slot| slot.source.name(Lang::Zh).to_string()).collect();
         let drawn = |size: (f32, f32), scrolls: Scrolls| {
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let said = Said::default();
             let mut hits = Vec::new();
             ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
@@ -8216,7 +8464,7 @@ otepad.exe", "Notepad"),
         // (Drawn under its keys, "ai:today", and as its figure where none of the sources' is the same.)
         let today_in = |keys: &[String]| keys.iter().any(|key| key.starts_with("ai:today"));
         assert!(!dock.slots.iter().any(|slot| slot.figure == figure));
-        let scene = |prefs, scrolls| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |prefs, scrolls| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         // Its docks, each as large as it is sized for: one spot fewer, no "Today" among them.
         for across in [true, false] {
             let room = ai::dock_size(across, dock.slots.len(), false);
@@ -8278,7 +8526,7 @@ otepad.exe", "Notepad"),
                 for slot in &mut dock.slots {
                     slot.label = lang.pick("每周剩余", "Weekly left").into();
                 }
-                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 for w in (60..=420).step_by(20) {
                     for h in (40..=320).step_by(20) {
                         let (w, h) = (w as f32, h as f32);
@@ -8436,7 +8684,7 @@ otepad.exe", "Notepad"),
             let shown = ["ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
             Prefs::resolve(&serde_json::json!({ "ai": shown, "aiLeft": left }), &[]).holding(crate::settings::Part::Ai)
         };
-        let scene = |prefs| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |prefs| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         // Codex's windows: five hours 62% used, 0.6 of it gone by; a week 95% used; a day started again, none used.
         let windows = |prefs: &Prefs| match ai::lane_of("ai:codex", prefs, Lang::Zh, Some(&usage), now, Some(false)).unwrap().as_slice() {
             [_, Block::Ai(block @ ai::AiBlock::Windows(windows))] => (block.clone(), windows.clone()),
@@ -8488,7 +8736,7 @@ otepad.exe", "Notepad"),
         let (info, prefs) = (info(), Prefs::default());
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
@@ -8528,7 +8776,7 @@ otepad.exe", "Notepad"),
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 225, length: 225, seekable: true }], ink: theme.ink("time") };
             let (w, h) = (COLUMN_WIDTH, lane.height(&theme) + 16.0);
             let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
@@ -8579,7 +8827,7 @@ otepad.exe", "Notepad"),
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::Note(crate::notes::number_of("c.md"))), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Note(crate::notes::number_of("c.md"))), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for (column, view) in views.iter().enumerate() {
                 let mut blocks = notes_lane(true, Lang::Zh);
                 if let Some(Block::Notes { view: shown, .. }) = blocks.last_mut() {
@@ -8620,7 +8868,7 @@ otepad.exe", "Notepad"),
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let file_at = file;
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = || vec![
             item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
             item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
@@ -8637,7 +8885,7 @@ otepad.exe", "Notepad"),
         crate::station::thumbs::start(|| {});
         {
             use crate::station::recent::{Came, Kind};
-            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { key: crate::station::recent::Key { drive: 'C', file }, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string), from: None };
+            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came::of(crate::station::recent::Key { drive: 'C', file }, file_at(name), now - ago_min * 60_000, bytes, kind).downloaded_from(site);
             let mut files = vec![
                 came(1, "docs/images/banner-zh.webp", 3, 182_000, Kind::Screenshot, None),
                 came(2, "Cargo.toml", 25, 6_100_000, Kind::Archive, Some("github.com")),
@@ -8648,7 +8896,9 @@ otepad.exe", "Notepad"),
             // Pictures copied into one folder together, a second apart.
             let names = ["banner-zh.webp", "desktop-zh.webp", "looks-zh.webp", "music.webp", "widgets-zh.webp", "workbench-zh.webp"];
             for (at, name) in names.iter().enumerate() {
-                files.push(Came { came_ms: now - 40 * 60_000 + at as u64 * 1_000, ..came(20 + at as u128, &format!("docs/images/{name}"), 0, 300_000, Kind::Picture, None) });
+                let mut came = came(20 + at as u128, &format!("docs/images/{name}"), 0, 300_000, Kind::Picture, None);
+                came.came_ms = now - 40 * 60_000 + at as u64 * 1_000;
+                files.push(came);
             }
             files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
             crate::station::recent::pretend(files);
@@ -8668,7 +8918,7 @@ otepad.exe", "Notepad"),
                     let tab = match column {
                         3 => Tab::Copies(Default::default()),
                         4 | 5 => Tab::Recent(Default::default()),
-                        _ => Tab::Shelf,
+                        _ => Tab::default(),
                     };
                     let ground = match skin {
                         Skin::Paper => theme.paper,
@@ -8722,7 +8972,7 @@ otepad.exe", "Notepad"),
         }
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = || vec![
             item(1, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, 400),
             item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
@@ -8771,8 +9021,8 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: hovered(column), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-                    let lane = Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: hovered(column), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let lane = Lane { id: "station".into(), blocks: station_lane(true, Tab::default(), Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
                     paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
                 }
@@ -8795,9 +9045,9 @@ otepad.exe", "Notepad"),
         use std::hash::{DefaultHasher, Hash, Hasher};
         let _pretending = crate::pretending();
         let pages = [
-            Block::Shelf { tiles: Vec::new(), shows: Shows::Row, tall: 100.0, said: None, over: false },
-            Block::Copies { page: copies_page(&[], Default::default(), ShelfView::Cards), tall: 100.0 },
-            Block::Recent { rows: Vec::new(), filter: Default::default(), view: ShelfView::Cards, tall: 100.0, nowhere: false },
+            Block::Shelf { tiles: Vec::new(), page: LanePage::default(), shows: Shows::Row, tall: 100.0, said: None, over: false },
+            Block::Copies { tiles: Vec::new(), page: copies_page(ShelfView::Cards), tall: 100.0 },
+            Block::Recent { rows: Vec::new(), page: recent_page(ShelfView::Cards), tall: 100.0, nowhere: false },
         ];
         let hashed = |block: &Block| {
             let mut hasher = DefaultHasher::new();
@@ -8836,7 +9086,7 @@ otepad.exe", "Notepad"),
             crate::folders::pretend(folders.to_vec());
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["storage".to_string()]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let lane = Lane { id: "storage".into(), blocks: lane(&scene, "storage", Detail::Full)?, ink: theme.ink("storage") };
             let (width, tall) = (COLUMN_WIDTH, lane.height(&theme));
             let mut hits = Vec::new();
@@ -8922,7 +9172,7 @@ otepad.exe", "Notepad"),
                         crate::station::run::pretend_folders_over(*over);
                         let seen = Seen::of(history);
                         let hover = hover.map(|at| Hit::Folder(crate::folders::number_of(&told[at].path)));
-                        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                         let Some(blocks) = lane(&scene, "storage", Detail::Full) else { continue };
                         let lane = Lane { id: "storage".into(), blocks, ink: theme.ink("storage") };
                         let tall = lane.height(&theme);
@@ -8932,7 +9182,7 @@ otepad.exe", "Notepad"),
                     // Its cards: over a week, and since less; not there.
                     crate::folders::pretend(folders());
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let mut top = y;
                     for (at, x) in [(2, 4.0), (5, 4.0), (1, 5.0)] {
                         let x = x * (lane_w + 36.0) + 24.0;
@@ -8975,7 +9225,8 @@ otepad.exe", "Notepad"),
         }
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, ago_min: u64, tags: &[u32], pinned: bool| Item { id, what, added_ms: now - ago_min * 60_000, pinned, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: if pinned { now - (ago_min / 2) * 60_000 } else { 0 }, tags: tags.to_vec() };
+        let item = |id: u64, what: What, ago_min: u64, tags: &[u32], pinned: bool| Item { id, what, added_ms: now - ago_min * 60_000, pinned, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: if pinned { now - (ago_min / 2) * 60_000 } else { 0 }, tags: tags.to_vec(), held: false, freed_ms: 0 };
+        let put = |id: u64, what: What, ago_min: u64, tags: &[u32], pinned: bool| Item { copied: false, ..item(id, what, ago_min, tags, pinned) };
         let text = |text: &str| What::Text { text: text.into() };
         let items = || vec![
             item(1, text("您好，收到了，今天下班前给您答复。"), 9000, &[1], true),
@@ -8986,22 +9237,49 @@ otepad.exe", "Notepad"),
             item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, 50, &[], false),
             item(11, What::Link { url: "https://github.com/lulu-loopp/glance/releases".into() }, 30, &[], false),
             item(12, text("会议改到周四下午三点"), 9, &[], false),
-            item(13, text("二楼小会议室"), 2, &[], false),
+            item(13, text("二楼小会议室"), 2, &[3], false),
+            put(20, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, 400, &[3], true),
+            put(21, text("会议改到周四下午三点\n地点：二楼小会议室"), 180, &[], false),
+            put(22, What::Link { url: "https://github.com/lulu-loopp/glance/releases".into() }, 60, &[1, 3], false),
+            put(23, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, 1, &[], false),
         ];
+        {
+            use crate::station::recent::{Came, Key, Kind, Marks};
+            let came = |at: u128, name: &str, ago_min: u64, kind: Kind, pinned: bool, tags: &[u32]| Came::of(Key { drive: 'C', file: at }, file(name), now - ago_min * 60_000, 64_000, kind).marked(Marks { pinned, tags: tags.to_vec(), freed_ms: 0 });
+            crate::station::recent::pretend(vec![
+                came(1, "docs/images/banner-zh.webp", 3, Kind::Screenshot, false, &[]),
+                came(2, "Cargo.toml", 25, Kind::Archive, false, &[2]),
+                came(3, "README.zh-CN.md", 70, Kind::Document, true, &[1, 3]),
+                came(4, "README.md", 26 * 60, Kind::Document, false, &[]),
+                came(5, "icons/128x128@2x.png", 5 * 24 * 60, Kind::Picture, true, &[]),
+            ]);
+        }
+        let recent = |at: u128| crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: at });
         let tags = |names: &[&str]| names.iter().enumerate().map(|(at, name)| Tag { id: at as u32 + 1, name: (*name).into() }).collect::<Vec<_>>();
         let few = || tags(&["常用回复", "命令", "项目"]);
         let many = || tags(&["常用回复", "命令", "项目", "地址", "发票抬头", "代码片段"]);
         crate::station::thumbs::start(|| {});
+        use crate::settings::{PinsFolded, StationPage};
+        use crate::station::{recent::Filter as Lately, Thing};
+        let open = PinsFolded::default;
+        let folded = || {
+            let mut folded = PinsFolded::default();
+            folded.turn(StationPage::Copies);
+            folded
+        };
         let columns = [
-            (Tab::Copies(Filter::All), ShelfView::List, few(), false, Some(Hit::Copied(12)), 0.0),
-            (Tab::Copies(Filter::All), ShelfView::List, few(), true, Some(Hit::PinsHead), 0.0),
-            (Tab::Copies(Filter::All), ShelfView::Cards, few(), false, Some(Hit::Copied(13)), 0.0),
-            (Tab::Copies(Filter::All), ShelfView::Large, few(), false, Some(Hit::Copied(4)), 0.0),
-            (Tab::Copies(Filter::Words), ShelfView::Large, few(), false, Some(Hit::PinCopy(13)), 0.0),
-            (Tab::Copies(Filter::Pinned(None)), ShelfView::List, few(), false, Some(Hit::PinCopy(4)), 0.0),
-            (Tab::Copies(Filter::Pinned(Some(2))), ShelfView::List, few(), false, Some(Hit::NewTag), 0.0),
-            (Tab::Copies(Filter::Pinned(Some(4))), ShelfView::List, many(), false, None, 60.0),
-            (Tab::Copies(Filter::Words), ShelfView::List, few(), false, None, 0.0),
+            (Tab::Copies(Filter::All), ShelfView::List, few(), open(), Some(Hit::Copied(12)), 0.0),
+            (Tab::Copies(Filter::All), ShelfView::List, few(), folded(), Some(Hit::PinsHead(StationPage::Copies)), 0.0),
+            (Tab::Copies(Filter::All), ShelfView::Cards, few(), open(), Some(Hit::Copied(13)), 0.0),
+            (Tab::Copies(Filter::All), ShelfView::Large, few(), open(), Some(Hit::PinThing(Thing::Item(4))), 0.0),
+            (Tab::Copies(Filter::Pinned), ShelfView::List, few(), open(), Some(Hit::TagThing(Thing::Item(4))), 0.0),
+            (Tab::Copies(Filter::Tagged(2)), ShelfView::List, many(), open(), Some(Hit::TagMore(2)), 60.0),
+            (Tab::Shelf(Filter::All), ShelfView::Cards, few(), open(), Some(Hit::Shelf(22)), 0.0),
+            (Tab::Shelf(Filter::All), ShelfView::List, few(), open(), Some(Hit::Shelf(20)), 0.0),
+            (Tab::Shelf(Filter::Tagged(2)), ShelfView::List, few(), open(), None, 0.0),
+            (Tab::Recent(Lately::All), ShelfView::List, few(), open(), Some(Hit::Recent(recent(2))), 0.0),
+            (Tab::Recent(Lately::All), ShelfView::Cards, few(), open(), Some(Hit::PinThing(Thing::Recent(recent(5)))), 0.0),
+            (Tab::Recent(Lately::Tagged(1)), ShelfView::List, few(), open(), None, 0.0),
         ];
         let (lane_w, lane_h) = (COLUMN_WIDTH, 430.0);
         let out = std::env::var("GLANCE_SHOTS").map_or_else(|_| std::path::PathBuf::from(format!("{}/target", env!("CARGO_MANIFEST_DIR"))), std::path::PathBuf::from);
@@ -9025,9 +9303,9 @@ otepad.exe", "Notepad"),
                     for (column, (tab, view, tags, folded, hover, across)) in columns.iter().enumerate() {
                         let x = column as f32 * (lane_w + 24.0) + 12.0;
                         crate::station::run::pretend(items(), *view);
-                        crate::station::run::pretend_tags(tags.clone(), *folded);
+                        crate::station::run::pretend_tags(tags.clone(), folded.clone());
                         let mut scrolls = Scrolls::default();
-                        scrolls.set(List::Tags, *across);
+                        scrolls.set(List::Choices, *across);
                         frame.fill_rounded(ground, x, y, lane_w, lane_h, theme.radius);
                         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: *tab, hover: *hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, *tab, Lang::Zh), ink: theme.ink("station") };
@@ -9044,87 +9322,220 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// What is pinned of what was copied is laid out first, apart: its heading, the first of it, the way to all of it
-    /// where there is more, then the rest under theirs. Folded away only the headings are left of it, and with nothing
-    /// pinned nothing is apart.
+    /// What is pinned of a page is laid out first, apart: its heading, the first of it, the way to all of it where there
+    /// is more, then the rest under theirs, or, in days, under those. Folded away only the headings are left of it, and
+    /// with nothing pinned nothing is apart.
     #[test]
     fn what_is_pinned_is_laid_out_first() {
         let list = Shows::View(ShelfView::List);
         let (plain, whole) = shelf_places(list, 5, 324.0, 300.0);
-        assert_eq!(grouped_places(list, 5, Groups::default(), 324.0, 300.0), (plain, whole, Vec::new()));
-        let (places, whole, headings) = grouped_places(list, 5, Groups { first: 3, pinned: 4, folded: false }, 324.0, 300.0);
+        assert_eq!(grouped_places(list, 5, Groups::default(), &[], 324.0, 300.0), (plain, whole, Vec::new()));
+        let (places, whole, headings) = grouped_places(list, 5, Groups { first: 3, pinned: 4, folded: false }, &[], 324.0, 300.0);
         assert_eq!(headings.iter().map(|one| one.1).collect::<Vec<_>>(), [Heading::Pinned, Heading::More, Heading::Rest]);
         let under = |at: usize| places[at].y + places[at].h;
         assert_eq!(headings[0].0, 0.0);
         assert!(places[0].y >= HEADING && headings[1].0 >= under(2) && headings[2].0 >= headings[1].0 + HEADING && places[3].y >= headings[2].0 + HEADING && whole >= under(4));
         // (All of it listed: no way to the rest of it.)
-        let (_, _, headings) = grouped_places(list, 5, Groups { first: 3, pinned: 3, folded: false }, 324.0, 300.0);
+        let (_, _, headings) = grouped_places(list, 5, Groups { first: 3, pinned: 3, folded: false }, &[], 324.0, 300.0);
         assert_eq!(headings.iter().map(|one| one.1).collect::<Vec<_>>(), [Heading::Pinned, Heading::Rest]);
-        let (places, _, headings) = grouped_places(list, 2, Groups { first: 0, pinned: 4, folded: true }, 324.0, 300.0);
+        let (places, _, headings) = grouped_places(list, 2, Groups { first: 0, pinned: 4, folded: true }, &[], 324.0, 300.0);
         assert_eq!(headings, [(0.0, Heading::Pinned), (HEADING, Heading::Rest)]);
         assert_eq!(places[0].y, 2.0 * HEADING + shelf_places(list, 1, 324.0, 300.0).0[0].y);
+        // In days: each day over its own, none over what is pinned.
+        let (places, whole, headings) = grouped_places(list, 4, Groups { first: 1, pinned: 1, folded: false }, &["今天", "今天", "昨天"], 324.0, 300.0);
+        assert_eq!(headings.iter().map(|one| one.1).collect::<Vec<_>>(), [Heading::Pinned, Heading::Day("今天"), Heading::Day("昨天")]);
+        assert!(headings[1].0 >= places[0].y + places[0].h && places[1].y >= headings[1].0 + DAY_ROW && headings[2].0 >= places[2].y + places[2].h && places[3].y >= headings[2].0 + DAY_ROW && whole >= places[3].y + places[3].h);
+        let (_, _, headings) = grouped_places(list, 2, Groups::default(), &["今天", "昨天"], 324.0, 300.0);
+        assert_eq!(headings.iter().map(|one| one.1).collect::<Vec<_>>(), [Heading::Day("今天"), Heading::Day("昨天")]);
     }
 
-    /// What was copied lately is pinned by its pin, on its line and on its card alike: there where it is pinned, and as
-    /// the pointer is over it (or the pin itself), pressed before it.
+    /// What is on any page of the lane is pinned and tagged by its buttons, on its line and on its card alike: both there
+    /// as the pointer is over it (or over one of them), a pinned one's pin always, pressed before the thing and within it.
+    /// A right click on one is on the thing.
     #[test]
-    fn what_was_copied_lately_is_pinned_by_its_pin() {
+    fn a_thing_is_pinned_and_tagged_by_its_buttons() {
+        use crate::station::{recent::{Entry, Key}, shelf::{Item, What}, Thing};
         let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Glass, true), [Arc::new(sample(None, None, None))]);
         let seen = Seen::of(&history);
-        let scene = |hover| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let item = |id: u64, pinned: bool| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: "a".into() }, added_ms: id, pinned, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let scene = |hover| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let items = |copied: bool| [1, 2, 3].map(|id: u64| Item { id, what: What::Text { text: "a".into() }, added_ms: id, pinned: id == 1, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 });
+        let entry = |file: u128| Entry::File(Key { drive: 'C', file });
         let folder = crate::station::folder::Folder::own();
-        let rows: Vec<Tile> = [item(1, true), item(2, false), item(3, false)].iter().map(|item| Tile::copied(item, &[], &folder, Lang::Zh, 0)).collect();
-        let pins = |hover, view| {
-            let mut hits = Vec::new();
-            paint_copies(&Nothing, &scene(hover), theme.ink("station"), (0.0, 0.0, 324.0), &copies_page(&rows, Default::default(), view), STATION_TALL, &mut hits);
-            for (at, hit) in hits.iter().enumerate() {
-                if let Hit::PinCopy(id) = hit.4 {
-                    let line = hits.iter().position(|one| one.4 == Hit::Copied(id)).unwrap();
-                    assert!(at < line, "it is pressed before its pin");
-                    let (pin, all) = (hits[at], hits[line]);
-                    assert!(pin.0 >= all.0 && pin.1 >= all.1 && pin.0 + pin.2 <= all.0 + all.2 && pin.1 + pin.3 <= all.1 + all.3, "{view:?}");
-                }
+        let ink = theme.ink("station");
+        for page in [Tab::default(), Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
+            let hit = |id: u64| match page {
+                Tab::Shelf(_) => Hit::Shelf(id),
+                Tab::Copies(_) => Hit::Copied(id),
+                Tab::Recent(_) => Hit::Recent(entry(id as u128)),
+            };
+            let thing = |id: u64| Thing::of(hit(id)).unwrap();
+            let held = items(page == Tab::Copies(Default::default()));
+            for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
+                let buttons = |hover: Option<Hit>| {
+                    let mut hits = Vec::new();
+                    let tiles: Vec<Tile> = held.iter().map(|item| Tile::of(item, &[], &folder, Lang::Zh, 0)).collect();
+                    match page {
+                        Tab::Shelf(_) => paint_shelf(&Nothing, &scene(hover), ink, (0.0, 0.0, 324.0), &tiles, &LanePage::default(), Shows::View(view), STATION_TALL, None, false, &mut hits),
+                        Tab::Copies(_) => paint_copies(&Nothing, &scene(hover), ink, (0.0, 0.0, 324.0), &tiles, &copies_page(view), STATION_TALL, &mut hits),
+                        Tab::Recent(_) => {
+                            let rows: Vec<Lately> = (1..=3).map(|file| Lately { entry: entry(file), day: "今天", label: "a".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: file == 1, tags: Vec::new() }).collect();
+                            paint_recent(&Nothing, &scene(hover), ink, (0.0, 0.0, 324.0), &rows, &recent_page(view), STATION_TALL, false, &mut hits);
+                        }
+                    }
+                    let mut found = Vec::new();
+                    for (at, button) in hits.iter().enumerate().filter(|(_, one)| matches!(one.4, Hit::PinThing(_) | Hit::TagThing(_))) {
+                        let of = button.4.button_of(&held).unwrap();
+                        let line = hits.iter().position(|one| one.4 == of).unwrap();
+                        assert!(at < line, "{page:?} {view:?}: the thing is pressed before its button");
+                        let all = hits[line];
+                        assert!(button.0 >= all.0 && button.1 >= all.1 && button.0 + button.2 <= all.0 + all.2 + 4.0 && button.1 + button.3 <= all.1 + all.3, "{page:?} {view:?}: {button:?} out of {all:?}");
+                        found.push(button.4);
+                    }
+                    found
+                };
+                assert_eq!(buttons(None), [Hit::PinThing(thing(1))], "{page:?} {view:?}");
+                assert_eq!(buttons(Some(hit(2))), [Hit::PinThing(thing(1)), Hit::PinThing(thing(2)), Hit::TagThing(thing(2))], "{page:?} {view:?}");
+                assert_eq!(buttons(Some(Hit::TagThing(thing(3)))), [Hit::PinThing(thing(1)), Hit::PinThing(thing(3)), Hit::TagThing(thing(3))], "{page:?} {view:?}");
+                assert_eq!(buttons(Some(Hit::PinThing(thing(1)))), [Hit::PinThing(thing(1)), Hit::TagThing(thing(1))], "{page:?} {view:?}");
             }
-            hits.iter().filter_map(|hit| if let Hit::PinCopy(id) = hit.4 { Some(id) } else { None }).collect::<Vec<_>>()
-        };
-        for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
-            assert_eq!(pins(None, view), [1], "{view:?}");
-            assert_eq!(pins(Some(Hit::Copied(2)), view), [1, 2], "{view:?}");
-            assert_eq!(pins(Some(Hit::PinCopy(3)), view), [1, 3], "{view:?}");
         }
     }
 
-    /// The tags what is pinned is sorted by stand in a row under the filters there alone, each pressed to show what is
-    /// of it, a new one made after them: at the row's end, the tags turned across, where they are more than fit.
+    /// The choices over a page: what is on the station has none while nothing there is pinned or tagged (nor shown by
+    /// either), what was copied always has what is pinned among them, the files come lately while anything is. Its tags
+    /// are those its own things have, and one nothing has anywhere, on every page.
     #[test]
-    fn what_is_pinned_is_sorted_by_its_tags() {
-        use crate::station::shelf::{Filter, Tag};
-        let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Glass, true), [Arc::new(sample(None, None, None))]);
+    fn a_page_has_its_own_choices() {
+        use crate::station::{recent::{self, Came, Key, Kind, Marks}, run::Shown, shelf::{Filter, Item, Tag, What}};
+        let item = |id: u64, copied: bool, pinned: bool, tags: &[u32]| Item { id, what: What::Text { text: "a".into() }, added_ms: id, pinned, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: tags.to_vec(), held: false, freed_ms: 0 };
+        let came = |pinned: bool, tags: &[u32]| Came::of(Key { drive: 'C', file: 1 }, "C:/a.txt".into(), 1, 1, Kind::Document).marked(Marks { pinned, tags: tags.to_vec(), freed_ms: 0 });
+        let tags = |ids: &[u32]| ids.iter().map(|id| Tag { id: *id, name: format!("标签{id}") }).collect::<Vec<_>>();
+        let names = |tab: Tab, shown: &Shown, files: &[Came]| Choice::of(tab, shown, files, Lang::Zh).into_iter().map(|choice| choice.name).collect::<Vec<_>>();
+        let none = Shown { items: vec![item(1, false, false, &[]), item(2, true, false, &[])], ..Default::default() };
+        assert!(names(Tab::default(), &none, &[came(false, &[])]).is_empty());
+        assert_eq!(names(Tab::Copies(Filter::All), &none, &[]), ["全部", "已固定", "文字", "图片", "文件"]);
+        assert_eq!(names(Tab::Recent(recent::Filter::All), &none, &[came(false, &[])]), ["全部", "下载", "截图", "文档", "图片和视频"]);
+        // (What it shows, whatever is there: the way back from it.)
+        assert_eq!(names(Tab::Shelf(Filter::Pinned), &none, &[]), ["全部", "已固定"]);
+        assert_eq!(names(Tab::Recent(recent::Filter::Pinned), &none, &[]), ["全部", "已固定", "下载", "截图", "文档", "图片和视频"]);
+        let some = Shown { items: vec![item(1, false, false, &[1]), item(2, true, false, &[2, 1])], tags: tags(&[1, 2, 3, 4]), ..Default::default() };
+        let files = [came(true, &[3])];
+        assert_eq!(names(Tab::default(), &some, &files), ["全部", "标签1", "标签4"]);
+        assert_eq!(names(Tab::Copies(Filter::All), &some, &files), ["全部", "已固定", "标签1", "标签2", "标签4", "文字", "图片", "文件"]);
+        assert_eq!(names(Tab::Recent(recent::Filter::All), &some, &files), ["全部", "已固定", "标签3", "标签4", "下载", "截图", "文档", "图片和视频"]);
+        assert_eq!(names(Tab::Shelf(Filter::Tagged(2)), &some, &files), ["全部", "标签1", "标签2", "标签4"]);
+        let pinned = Shown { items: vec![item(1, false, true, &[])], ..Default::default() };
+        assert_eq!(names(Tab::default(), &pinned, &[]), ["全部", "已固定"]);
+    }
+
+    /// A page's choices more than fit are turned across by the wheel, fading at the ends past which there are more. The
+    /// tag shown has the button of its menu, pressed apart from it and within it, no other has.
+    #[test]
+    fn choices_more_than_fit_are_turned_across() {
+        use crate::station::{run::Shown, shelf::{Filter, Item, Tag, What}};
+        use crate::ui::morph::{Op, Recorder};
+        let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Paper, true), [Arc::new(sample(None, None, None))]);
         let seen = Seen::of(&history);
-        let hits = |filter: Filter, tags: u32, across: f32| {
+        let drawn = |filter: Filter, tags: u32, across: f32| {
             let mut scrolls = Scrolls::default();
-            scrolls.set(List::Tags, across);
+            scrolls.set(List::Choices, across);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Copies(filter), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-            let page = CopiesPage { tags: (1..=tags).map(|id| Tag { id, name: format!("标签名称{id}") }).collect(), ..copies_page(&[], filter, ShelfView::List) };
-            let mut hits = Vec::new();
-            paint_copies(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &page, STATION_TALL, &mut hits);
+            let items = vec![Item { id: 1, what: What::Text { text: "a".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: (1..=tags).collect(), held: false, freed_ms: 0 }];
+            let shown = Shown { items, tags: (1..=tags).map(|id| Tag { id, name: format!("标签名称{id}") }).collect(), ..Default::default() };
+            let page = LanePage::of(Tab::Copies(filter), Groups::default(), ShelfView::List, &shown, &[], Lang::Zh);
+            let (recorder, mut hits) = (Recorder::new(&Nothing, 1.0, (0.0, 0.0)), Vec::new());
+            paint_choices(&recorder, &scene, (0.0, 0.0, 324.0), &page, &mut hits);
+            let fades = recorder.parts().into_iter().flat_map(|part| part.ops).find_map(|op| if let Op::Clip { fades, .. } = op { Some(fades) } else { None });
+            (hits, fades)
+        };
+        let tagged = |hits: &[HitBox]| hits.iter().filter_map(|hit| if let Hit::Tab(Tab::Copies(Filter::Tagged(tag))) = hit.4 { Some(tag) } else { None }).collect::<Vec<_>>();
+        let turns = |hits: &[HitBox]| hits.iter().any(|hit| matches!(hit.4, Hit::List(List::Choices, _)));
+        let (few, fades) = drawn(Filter::All, 0, 0.0);
+        assert!(!turns(&few) && fades.is_none() && few.iter().all(|hit| hit.4.tag().is_none()));
+        let (many, fades) = drawn(Filter::Tagged(1), 12, 0.0);
+        assert!(turns(&many) && tagged(&many).contains(&1) && !tagged(&many).contains(&12));
+        assert_eq!(fades, Some((0.0, CHIP_FADE)));
+        assert!(many.iter().all(|hit| hit.0 >= 0.0 && hit.0 + hit.2 <= 324.0), "{many:?}");
+        let buttons: Vec<&HitBox> = many.iter().filter(|hit| matches!(hit.4, Hit::TagMore(_))).collect();
+        assert_eq!(buttons.iter().map(|hit| hit.4).collect::<Vec<_>>(), [Hit::TagMore(1)]);
+        let (at, chip) = many.iter().enumerate().find(|(_, hit)| hit.4 == Hit::Tab(Tab::Copies(Filter::Tagged(1)))).unwrap();
+        assert!(many.iter().position(|hit| hit.4 == Hit::TagMore(1)).unwrap() < at);
+        let button = buttons[0];
+        assert!(button.0 > chip.0 && button.0 + button.2 < chip.0 + chip.2 && button.1 > chip.1 && button.1 + button.3 < chip.1 + chip.3 && button.2 == button.3);
+        // (As far in from its end as from its top.)
+        assert_eq!(chip.0 + chip.2 - button.0 - button.2, button.1 - chip.1);
+        let (middle, fades) = drawn(Filter::Tagged(1), 12, 200.0);
+        assert_eq!(fades, Some((CHIP_FADE, CHIP_FADE)));
+        assert!(turns(&middle));
+        let (turned, fades) = drawn(Filter::All, 12, 9_000.0);
+        assert_eq!(fades, Some((CHIP_FADE, 0.0)));
+        assert!(turned.iter().any(|hit| hit.4 == Hit::Tab(Tab::Copies(Filter::Files))) && !tagged(&turned).contains(&1));
+    }
+
+    /// A choice just lit, and a tag just made, out of sight in their row: turned to, whole and clear of where the row
+    /// fades. One in sight already, and a tag there since another page was shown, turn nothing.
+    #[test]
+    fn a_choice_just_come_is_brought_into_sight() {
+        use crate::station::shelf::Filter;
+        let row = |tags: &[u32]| -> Vec<HitBox> {
+            let tabs = [Tab::Copies(Filter::All), Tab::Copies(Filter::Pinned)].into_iter().chain(tags.iter().map(|tag| Tab::Copies(Filter::Tagged(*tag)))).chain([Tab::Copies(Filter::Files)]);
+            let mut hits: Vec<HitBox> = tabs.enumerate().map(|(at, tab)| (0.0, 0.0, 0.0, 0.0, Hit::Choice(tab, (at as f32 * 60.0).to_bits(), 56.0f32.to_bits()))).collect();
+            let most = (hits.len() as f32 * 60.0 - 4.0 - 200.0).max(0.0);
+            hits.push((0.0, 0.0, 200.0, CHIP_H, Hit::List(List::Choices, most.to_bits())));
             hits
         };
-        let tagged = |hits: &[HitBox]| hits.iter().filter_map(|hit| if let Hit::Tab(Tab::Copies(Filter::Pinned(Some(tag)))) = hit.4 { Some(tag) } else { None }).collect::<Vec<_>>();
-        let all = hits(Filter::All, 2, 0.0);
-        assert!(tagged(&all).is_empty() && all.iter().all(|hit| hit.4 != Hit::NewTag));
-        let few = hits(Filter::Pinned(None), 2, 0.0);
-        assert_eq!(tagged(&few), [1, 2]);
-        let end = |hits: &[HitBox]| hits.iter().find(|hit| hit.4 == Hit::NewTag).map(|hit| (hit.0, hit.0 + hit.2)).unwrap();
-        assert!(end(&few).1 < 324.0 && few.iter().all(|hit| !matches!(hit.4, Hit::List(List::Tags, _))));
-        let many = hits(Filter::Pinned(Some(1)), 12, 0.0);
-        assert_eq!(end(&many).1, 324.0);
-        assert!(many.iter().any(|hit| matches!(hit.4, Hit::List(List::Tags, _))));
-        assert!(tagged(&many).contains(&1) && !tagged(&many).contains(&12));
-        assert!(many.iter().filter(|hit| matches!(hit.4, Hit::Tab(Tab::Copies(Filter::Pinned(_)))) && hit.1 > CHIP_H).all(|hit| hit.0 + hit.2 <= end(&many).0));
-        let turned = hits(Filter::Pinned(Some(1)), 12, 9_000.0);
-        assert!(tagged(&turned).contains(&12) && !tagged(&turned).contains(&1));
+        let (mut scrolls, mut shown) = (Scrolls::default(), ChoiceShown::default());
+        let all = Tab::Copies(Filter::All);
+        assert!(!show_choice(&mut scrolls, &mut shown, &row(&[1, 2, 3]), all));
+        assert_eq!(scrolls.to(List::Choices), 0.0);
+        // One made (the fifth tag, from 360 to 416): shown, clear of the fade, though another is lit.
+        assert!(show_choice(&mut scrolls, &mut shown, &row(&[1, 2, 3, 4, 5]), all));
+        assert_eq!(scrolls.to(List::Choices), 416.0 + CHOICE_CLEAR - 200.0);
+        // (Once: turned away from by the wheel, it is not turned to again.)
+        scrolls.turn(List::Choices, -9_000.0, 9_000.0);
+        assert!(!show_choice(&mut scrolls, &mut shown, &row(&[1, 2, 3, 4, 5]), all));
+        assert_eq!(scrolls.to(List::Choices), 0.0);
+        // One lit at the row's end: to its end.
+        assert!(show_choice(&mut scrolls, &mut shown, &row(&[1, 2, 3, 4, 5]), Tab::Copies(Filter::Files)));
+        assert_eq!(scrolls.to(List::Choices), 8.0 * 60.0 - 4.0 - 200.0);
+        // Back to the first: to its beginning.
+        assert!(show_choice(&mut scrolls, &mut shown, &row(&[1, 2, 3, 4, 5]), all));
+        assert_eq!(scrolls.to(List::Choices), 0.0);
+        // Another page's tags, there as it is turned to: none is turned to.
+        let mut other = ChoiceShown { lit: Some(Tab::default()), all: vec![Tab::default()] };
+        assert!(!show_choice(&mut scrolls, &mut other, &row(&[1, 2, 3, 4, 5]), all));
+    }
+
+    /// A thing's tags stand before what it is under its name, each on its pill, as many as its room holds, the first
+    /// always, what it is after them where there is room for it.
+    #[test]
+    fn a_thing_s_tags_stand_before_what_it_is() {
+        use crate::ui::morph::{Op, Recorder};
+        let theme = Theme::new(Skin::Paper, false);
+        let said = |tags: &[&str], room: f32| {
+            let tile = Tile { id: 1, label: "a".into(), about: "18 字 · 昨天".into(), when: None, face: Face::Link, pinned: false, tags: tags.iter().map(|tag| tag.to_string()).collect(), badge: None };
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            paint_about(&recorder, &theme, &tile, 10.0, 0.0, room);
+            let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
+            let pills = ops.iter().filter(|op| matches!(op, Op::Rounded { .. })).count();
+            for op in &ops {
+                if let Op::Rounded { x, w, .. } = op {
+                    assert!(*x >= 10.0 && x + w <= 10.0 + room + 0.01, "{op:?}");
+                }
+            }
+            (pills, ops.iter().filter_map(|op| if let Op::Text { text, .. } = op { Some(text.to_string()) } else { None }).collect::<Vec<_>>())
+        };
+        let about = "18 字 · 昨天".to_string();
+        assert_eq!(said(&[], 200.0), (0, vec![about.clone()]));
+        assert_eq!(said(&["命令", "项目"], 200.0), (2, vec!["命令".to_string(), "项目".to_string(), about]));
+        // (Room for a figure alone of it: none of it. For "18 字", that.)
+        let pills = said(&["命令"], 200.0).1.len();
+        assert_eq!(pills, 2);
+        let least = (20..200).find(|room| said(&["命令"], *room as f32).1.len() == 2).unwrap();
+        let begun = said(&["命令"], least as f32).1[1].clone();
+        assert!(begun.starts_with("18 字"), "{begun}");
+        let (pills, words) = said(&["一个很长很长的标签名称", "项目"], 60.0);
+        assert!(pills == 1 && !words.contains(&"项目".to_string()), "{words:?}");
     }
 
     /// Things chosen together on the station's lane in each skin, light and dark (a row each): on the station as cards
@@ -9146,7 +9557,7 @@ otepad.exe", "Notepad"),
         }
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = || vec![
             item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
             item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
@@ -9160,13 +9571,13 @@ otepad.exe", "Notepad"),
             item(6, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, false, 1),
         ];
         crate::station::thumbs::start(|| {});
-        let came = |at: u128, name: &str, ago_min: u64, kind: Kind| Came { key: Key { drive: 'C', file: at }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 64_000, kind, downloaded: false, site: None, from: None };
+        let came = |at: u128, name: &str, ago_min: u64, kind: Kind| Came::of(Key { drive: 'C', file: at }, file(name), now - ago_min * 60_000, 64_000, kind);
         crate::station::recent::pretend(vec![came(1, "docs/images/banner-zh.webp", 3, Kind::Screenshot), came(2, "Cargo.toml", 25, Kind::Archive), came(3, "README.zh-CN.md", 70, Kind::Document), came(4, "README.md", 200, Kind::Document)]);
         let recent = |at: u128| Hit::Recent(Entry::File(Key { drive: 'C', file: at }));
         // Each column: the page, how it shows, what is chosen on it, what is under the pointer, the last two, carried.
         let columns = [
-            (Tab::Shelf, ShelfView::Cards, vec![Hit::Shelf(2), Hit::Shelf(3), Hit::Shelf(4)], Some(Hit::Shelf(3))),
-            (Tab::Shelf, ShelfView::List, vec![Hit::Shelf(4), Hit::Shelf(2)], Some(Hit::Shelf(5))),
+            (Tab::default(), ShelfView::Cards, vec![Hit::Shelf(2), Hit::Shelf(3), Hit::Shelf(4)], Some(Hit::Shelf(3))),
+            (Tab::default(), ShelfView::List, vec![Hit::Shelf(4), Hit::Shelf(2)], Some(Hit::Shelf(5))),
             (Tab::Copies(Default::default()), ShelfView::List, vec![Hit::Copied(11), Hit::Copied(12), Hit::Copied(13)], Some(Hit::Copied(12))),
             (Tab::Recent(Default::default()), ShelfView::List, vec![recent(2), recent(3)], Some(recent(1))),
         ];
@@ -9208,7 +9619,7 @@ otepad.exe", "Notepad"),
                     for (at, (view, together, count)) in carried.iter().enumerate() {
                         let x = (columns.len() + at) as f32 * (lane_w + 24.0) + 12.0;
                         crate::station::run::pretend(items(), *view);
-                        let tab = if matches!(together[0], Hit::Copied(_)) { Tab::Copies(Default::default()) } else { Tab::Shelf };
+                        let tab = if matches!(together[0], Hit::Copied(_)) { Tab::Copies(Default::default()) } else { Tab::default() };
                         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                         let mut hits = Vec::new();
@@ -9366,7 +9777,7 @@ otepad.exe", "Notepad"),
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -9376,7 +9787,7 @@ otepad.exe", "Notepad"),
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
-        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -9389,7 +9800,7 @@ otepad.exe", "Notepad"),
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -9414,7 +9825,7 @@ otepad.exe", "Notepad"),
     #[test]
     fn a_gpu_asleep_says_so() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Arc<Sample>], lang| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Arc<Sample>], lang| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let asleep = || {
             let mut read = sample(Some(1350.0), None, None);
@@ -9437,7 +9848,7 @@ otepad.exe", "Notepad"),
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -9455,7 +9866,7 @@ otepad.exe", "Notepad"),
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { music_apart: false, hint: None, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene_two = Scene { music_apart: false, hint: None, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
@@ -9480,7 +9891,7 @@ otepad.exe", "Notepad"),
         let running = || with(WslSample::Running { distros: Some(vec!["Ubuntu".into()]), cpu: Some(3.0), used: Some(1 << 30), total: Some(1 << 33), gpu: None }, DockerSample::Running { context: "default".into(), containers: Vec::new() });
         let stopped = || with(WslSample::Stopped, DockerSample::Stopped { context: "default".into() });
         let shown = |seen: &'static Seen, history: &'static [Arc<Sample>]| {
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             lanes(&scene).into_iter().map(|lane| lane.id).filter(|id| id == "wsl" || id == "docker").collect::<Vec<_>>()
         };
         let seen_of = |history: &'static [Arc<Sample>]| -> &'static Seen { Box::leak(Box::new(Seen::of(history))) };
@@ -9513,7 +9924,7 @@ otepad.exe", "Notepad"),
             s
         };
         let cpu_fans = |prefs: &Prefs, history: &'static [Arc<Sample>]| {
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
         };
         let prefs = Prefs::default();
@@ -9540,10 +9951,10 @@ otepad.exe", "Notepad"),
         use crate::station::shelf::{Item, What};
         let folder = crate::station::folder::Folder::at(std::path::PathBuf::from("C:/station"));
         let now = 1_760_800_000_000;
-        let item = |what: What| Item { id: 1, what, added_ms: now - 5 * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
-        let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &folder, Lang::En, now);
+        let item = |what: What| Item { id: 1, what, added_ms: now - 5 * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
+        let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &[], &folder, Lang::En, now);
         assert_eq!((link.label.as_str(), &link.face, link.about.as_str()), ("example.com/a/b?c", &Face::Link, "Link · 5 min ago"));
-        let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &folder, Lang::Zh, now);
+        let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &[], &folder, Lang::Zh, now);
         assert_eq!((files.label.as_str(), files.about.as_str()), ("report.pdf", "2 个文件 · 5 分钟前"));
         assert!(matches!(files.face, Face::Picture { more: 1, .. }));
         let text = Tile::of(&item(What::Text { text: "one
@@ -9553,7 +9964,7 @@ three
 four
 five
 six
-seven".into() }), &folder, Lang::Zh, now);
+seven".into() }), &[], &folder, Lang::Zh, now);
         assert_eq!((text.label.as_str(), text.about.as_str()), ("one two three four five six seven", "27 字 · 5 分钟前"));
         assert_eq!(text.face, Face::Text("one
  two 
@@ -9888,7 +10299,7 @@ seven".into()));
         let seen = Seen::of(history);
         let drawn = |settings_open: bool| {
             let settings_lit = settings_open.then_some(1.0);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit };
             let icons = Icons(Default::default(), Default::default());
             panel_button(&icons, &scene, Hit::Settings, 0.0, 0.0);
             (icons.0.into_inner(), icons.1.get())
@@ -9907,7 +10318,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let drawn = |done: f32| {
             let glide = Glide { done, was: "the line before".into() };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Lyric { line: "the line sung".into(), under: String::new(), said: false, glide }], ink: theme.ink("time") };
@@ -9931,7 +10342,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
         let saved = |id: u64, name: &str| crate::station::shelf::Item {
             id,
@@ -9944,14 +10355,16 @@ seven".into()));
             from: None,
             used_ms: 0,
             tags: Vec::new(),
+            held: false,
+            freed_ms: 0,
         };
         let held = vec![saved(1, long), saved(2, "a.md")];
         crate::station::run::pretend(held.clone(), ShelfView::Cards);
         let folder = crate::station::folder::Folder::own();
-        let tiles: Vec<Tile> = held.iter().map(|item| Tile::of(item, &folder, Lang::En, 0)).collect();
+        let tiles: Vec<Tile> = held.iter().map(|item| Tile::of(item, &[], &folder, Lang::En, 0)).collect();
         for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
             let mut hits = Vec::new();
-            paint_shelf(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &tiles, shows, STATION_TALL, None, false, &mut hits);
+            paint_shelf(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &tiles, &LanePage::default(), shows, STATION_TALL, None, false, &mut hits);
             assert_eq!(named(&hits, Hit::Shelf(1), Lang::En).as_deref(), Some(long), "{shows:?}");
             assert_eq!(named(&hits, Hit::Shelf(2), Lang::En), None, "{shows:?}");
             let (x, y, w, h, _) = *hits.iter().find(|hit| hit.4 == Hit::Shelf(1)).unwrap();
@@ -9970,7 +10383,7 @@ seven".into()));
     #[test]
     fn a_pages_things_are_in_its_order() {
         use crate::station::shelf::{Filter, Item, What};
-        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let words = |text: &str| What::Text { text: text.into() };
         let items = vec![
             item(1, words("a"), false),
@@ -9979,10 +10392,22 @@ seven".into()));
             item(4, What::Picture { file: "4.png".into() }, true),
             item(5, words("c"), false),
         ];
-        crate::station::run::pretend(items, crate::settings::ShelfView::Cards);
-        assert_eq!(lane_order(Tab::Shelf), [Hit::Shelf(5), Hit::Shelf(1)]);
+        crate::station::run::pretend(items.clone(), crate::settings::ShelfView::Cards);
+        assert_eq!(lane_order(Tab::default()), [Hit::Shelf(5), Hit::Shelf(1)]);
         assert_eq!(lane_order(Tab::Copies(Filter::All)), [Hit::Copied(4), Hit::Copied(3), Hit::Copied(2)]);
         assert_eq!(lane_order(Tab::Copies(Filter::Words)), [Hit::Copied(3), Hit::Copied(2)]);
+        // (What is pinned first, on its page alone. In a row of all that is on the station, as it came.)
+        let pinned = |id: u64, copied: bool, at: bool, tags: &[u32]| Item { pinned: at, tags: tags.to_vec(), ..item(id, words("d"), copied) };
+        crate::station::run::pretend(vec![pinned(1, false, true, &[]), pinned(2, true, true, &[]), pinned(3, false, false, &[7]), pinned(4, true, false, &[7]), pinned(5, false, false, &[])], crate::settings::ShelfView::Cards);
+        crate::station::run::pretend_tags(vec![crate::station::shelf::Tag { id: 7, name: "项目".into() }], Default::default());
+        assert_eq!(lane_order(Tab::default()), [Hit::Shelf(1), Hit::Shelf(5), Hit::Shelf(3)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::All)), [Hit::Copied(2), Hit::Copied(4)]);
+        assert_eq!(lane_order(Tab::Shelf(Filter::Pinned)), [Hit::Shelf(1)]);
+        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(7))), [Hit::Shelf(3)]);
+        // (A tag there is no more: all of the page.)
+        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(8))), lane_order(Tab::default()));
+        assert_eq!(row_order(), [Hit::Shelf(5), Hit::Shelf(3), Hit::Shelf(1)]);
+        crate::station::run::pretend(items, crate::settings::ShelfView::Cards);
         crate::station::run::pretend_copied(vec![crate::station::run::Copied::Item(2), crate::station::run::Copied::Item(5)]);
         assert_eq!(copied().map(|(_, hits)| hits), Some(vec![Hit::Shelf(2), Hit::Copied(2), Hit::Shelf(5), Hit::Copied(5)]));
     }
@@ -9992,7 +10417,7 @@ seven".into()));
     #[test]
     fn the_list_under_the_pointer_is_found_by_its_room() {
         let hits: Vec<HitBox> = vec![
-            (0.0, 0.0, 300.0, 30.0, Hit::Tab(Tab::Shelf)),
+            (0.0, 0.0, 300.0, 30.0, Hit::Tab(Tab::default())),
             (10.0, 40.0, 60.0, 60.0, Hit::Shelf(1)),
             (80.0, 40.0, 60.0, 60.0, Hit::Shelf(2)),
             (10.0, 110.0, 60.0, 60.0, Hit::Shelf(3)),
@@ -10015,30 +10440,31 @@ seven".into()));
     fn files_come_together_are_one_row() {
         use crate::station::recent::{Came, Entry, Filter, Key, Kind};
         let now = 1_760_800_000_000;
-        let came = |file: u128, path: &str, ago_s: u64, kind: Kind| Came { key: Key { drive: 'D', file }, path: std::path::PathBuf::from(path), came_ms: now - ago_s * 1000, bytes: 1_000_000, kind, downloaded: false, site: None, from: None };
+        let came = |file: u128, path: &str, ago_s: u64, kind: Kind| Came::of(Key { drive: 'D', file }, std::path::PathBuf::from(path), now - ago_s * 1000, 1_000_000, kind);
         let mut files: Vec<Came> = (1..=6).map(|file| came(file, &format!(r"D:\Phone\DCIM\{file}.jpg"), 600 - file as u64, Kind::Picture)).collect();
         files.push(came(9, r"D:\Documents\a.pdf", 60, Kind::Document));
         files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
-        let rows = Lately::rows(&files, Filter::All, Lang::En, now);
+        let (rows, groups) = Lately::page(&files, Filter::All, false, &[], Lang::En, now);
+        assert_eq!(groups, Groups::default());
         assert_eq!(rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(), ["a.pdf", "6 files · DCIM"]);
         let together = &rows[1];
         assert_eq!((together.entry, together.more, together.path.clone()), (Entry::Burst(Filter::All, Key { drive: 'D', file: 6 }), 5, std::path::PathBuf::from(r"D:\Phone\DCIM\6.jpg")));
         assert_eq!(together.about, format!(r"Phone\DCIM · {}", text::bytes(6_000_000.0)));
         assert_eq!(together.when, text::since(now - 594_000, now, Lang::En));
-        assert_eq!(Lately::rows(&files, Filter::All, Lang::Zh, now)[1].label, "6 个文件 · DCIM");
+        assert_eq!(Lately::page(&files, Filter::All, false, &[], Lang::Zh, now).0[1].label, "6 个文件 · DCIM");
         assert_eq!(rows[0].entry, Entry::File(Key { drive: 'D', file: 9 }));
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         for view in [ShelfView::List, ShelfView::Cards] {
             let mut hits = Vec::new();
-            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, Filter::All, view, STATION_TALL, false, &mut hits);
+            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, &recent_page(view), STATION_TALL, false, &mut hits);
             let found: Vec<Hit> = hits.iter().map(|hit| hit.4).filter(|hit| matches!(hit, Hit::Recent(_))).collect();
             assert_eq!(found, [Hit::Recent(rows[0].entry), Hit::Recent(together.entry)], "{view:?}");
         }
-        assert_eq!(rows[1].tile().face, Face::Picture { path: std::path::PathBuf::from(r"D:\Phone\DCIM\6.jpg"), more: 5 });
+        assert_eq!(rows[1].tile(false, false).face, Face::Picture { path: std::path::PathBuf::from(r"D:\Phone\DCIM\6.jpg"), more: 5 });
     }
 
     /// On a station, a list of what was copied, Recent files, long enough to scroll: a press on a thing finds the
@@ -10049,23 +10475,23 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
-        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None };
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None };
         let first = |hits: &[HitBox], x: f32, y: f32| hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4);
         let many: Vec<Tile> = (1..=40).map(tile).collect();
         for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large)] {
             let mut hits = Vec::new();
-            paint_shelf(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, shows, STATION_TALL, None, false, &mut hits);
+            paint_shelf(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, &LanePage::default(), shows, STATION_TALL, None, false, &mut hits);
             assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Shelf(1)), "{shows:?}");
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &copies_page(&many, Default::default(), ShelfView::List), STATION_TALL, &mut hits);
+        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, &copies_page(ShelfView::List), STATION_TALL, &mut hits);
         let row = hits.iter().find(|hit| hit.4 == Hit::Copied(1)).copied().unwrap();
         assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Copied(1)));
-        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }).collect();
         let mut hits = Vec::new();
-        paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
+        paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, &recent_page(ShelfView::List), STATION_TALL, false, &mut hits);
         let row = hits.iter().find(|hit| hit.4 == Hit::Recent(crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: 1 }))).copied().unwrap();
         assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: 1 }))));
     }
@@ -10085,9 +10511,9 @@ seven".into()));
         for _ in 0..200 {
             scrolls.ease(1.0, 0.1);
         }
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
-        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None };
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None };
         let many: Vec<Tile> = (1..=40).map(tile).collect();
         let within = |hits: &[HitBox], top: f32, tall: f32, what: &str| {
             for hit in hits.iter().filter(|hit| matches!(hit.4, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_) | Hit::Note(_) | Hit::App(_) | Hit::AddApp)) {
@@ -10097,15 +10523,15 @@ seven".into()));
         let (top, width) = (100.0, 320.0);
         for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large)] {
             let mut hits = Vec::new();
-            paint_shelf(&Nothing, &scene, ink, (0.0, top, width), &many, shows, STATION_TALL, None, false, &mut hits);
+            paint_shelf(&Nothing, &scene, ink, (0.0, top, width), &many, &LanePage::default(), shows, STATION_TALL, None, false, &mut hits);
             within(&hits, top, STATION_TALL, &format!("{shows:?}"));
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &copies_page(&many, Default::default(), ShelfView::List), STATION_TALL, &mut hits);
+        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, &copies_page(ShelfView::List), STATION_TALL, &mut hits);
         within(&hits, top, STATION_TALL, "copies");
-        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }).collect();
         let mut hits = Vec::new();
-        paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
+        paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, &recent_page(ShelfView::List), STATION_TALL, false, &mut hits);
         within(&hits, top + CHIP_H + 6.0, STATION_TALL - CHIP_H - 6.0, "recent");
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         for view in [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List] {
@@ -10139,8 +10565,8 @@ seven".into()));
             // Something dragged over a page's tab shows that page there; over the menu of the pages, the station's.
             use crate::station::run::Lands;
             let pages = |hits: &[HitBox]| -> Vec<Lands> { hits.iter().filter_map(|hit| hit.4.lands()).filter(|lands| matches!(lands, Lands::Pages(_))).collect() };
-            assert_eq!(pages(&wide), [Lands::Pages(Tab::Shelf), Lands::Pages(Tab::Copies(Default::default())), Lands::Pages(Tab::Recent(Default::default()))], "{skin:?}");
-            assert_eq!(pages(&narrow), [Lands::Pages(Tab::Shelf)], "{skin:?}");
+            assert_eq!(pages(&wide), [Lands::Pages(Tab::default()), Lands::Pages(Tab::Copies(Default::default())), Lands::Pages(Tab::Recent(Default::default()))], "{skin:?}");
+            assert_eq!(pages(&narrow), [Lands::Pages(Tab::default())], "{skin:?}");
         }
     }
 
@@ -10152,7 +10578,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let heights: Vec<f32> = heights(&scene).iter().map(|(_, h)| h[0]).collect();
         let designed = Layout::with_columns(heights.clone(), 1, &theme).giving(gives(&scene));
         assert!(designed.least_height() < designed.height());
@@ -10272,7 +10698,7 @@ seven".into()));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let theme = Theme::new(Skin::Glass, false);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let apps: Vec<(String, String)> = ["C:/pressed-a.exe", "C:/pressed-b.exe"].iter().map(|target| (target.to_string(), target.to_string())).collect();
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
@@ -10370,7 +10796,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..4], &ids[4..], &ids[..]] {
                 for w in [40.0, 56.0, 80.0, 130.0, 200.0, 420.0] {
                     for h in [40.0, 56.0, 80.0, 130.0, 260.0, 500.0] {
@@ -10400,7 +10826,7 @@ seven".into()));
     #[test]
     fn the_station_s_menu_button_is_found_first() {
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
-            for tab in [Tab::Shelf, Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
+            for tab in [Tab::default(), Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
                 let theme = Theme::new(skin, false);
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
@@ -10434,7 +10860,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
         let layout = Layout::with_columns(vec![heights[0].max(600.0)], 1, &theme).with_rail(1, RailSide::Start, RAIL_LEAST);
@@ -10459,7 +10885,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         for named in [false, true] {
             crate::station::apps::pretend_named(named);
             let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
@@ -10500,7 +10926,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let apps = crate::station::apps::named();
         let said_on = |hits: &[HitBox]| apps.iter().map(|(_, target)| named(hits, Hit::App(crate::station::apps::number_of(target)), Lang::En)).collect::<Vec<_>>();
         for named_under in [false, true] {
@@ -10529,7 +10955,7 @@ seven".into()));
         let apps: Vec<(String, String)> = (0..4).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let order: Vec<String> = apps.iter().map(|(_, target)| target.clone()).collect();
         let still: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(super::super::thumb::Dots::new()));
-        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene(still), (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         let at_rest: Vec<(f32, f32)> = (0..4).map(|at| hits.iter().find(|hit| hit.4 == Hit::App(crate::station::apps::number_of(&format!("C:/{at}.exe")))).map(|hit| (hit.0, hit.1)).unwrap()).collect();
@@ -10558,7 +10984,7 @@ seven".into()));
         let seen = Seen::of(history);
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let pressed = |scrolls: Scrolls| {
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let mut hits = Vec::new();
             paint_notes(&Nothing, &scene, (0.0, 0.0, 320.0), &notes, crate::settings::NotesView::Deck, NOTES_TALL, &mut hits);
             hits.iter().filter_map(|hit| if let Hit::Note(at) = hit.4 { Some(at) } else { None }).collect::<Vec<_>>()
@@ -10591,7 +11017,7 @@ seven".into()));
             // (Dressed as a widget dresses it: no room round its lane, its page all of it.)
             let mut theme = Theme::new(skin, false);
             (theme.pad_x, theme.pad_top, theme.pad_bottom, theme.outer) = (0.0, 0.0, 0.0, (0.0, 0.0, 0.0));
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for (w, h) in [STUCK_NOTE, (300.0, 520.0), STUCK_NOTE_LEAST] {
                 let lane = Lane { id: format!("{STUCK_NOTE_LANE}a.md"), blocks: vec![stuck_note(&note, Lang::Zh, 60_000)], ink: theme.ink("notes") };
                 let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
@@ -10636,7 +11062,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let card = |held| NoteCard { number: 1, title: "Title".into(), lines: vec!["line".into()], when: "now".into(), colour: Default::default(), held };
         let room = (10.0, 20.0, 170.0, 104.0);
         type Paint = fn(&dyn Canvas, &Scene, &NoteCard, (f32, f32, f32, f32), bool);
@@ -10668,15 +11094,15 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
         // (Its own number: none other drawn meanwhile is held so.)
         let id = 0x5EED_0001;
         let hit = Hit::Shelf(id);
-        let tiles = [Tile { id, label: "Held".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
+        let tiles = [Tile { id, label: "Held".into(), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }];
         let drawn = || {
             let (reach, mut hits) = (Reach::default(), Vec::new());
-            paint_shelf(&reach, &scene, ink, (0.0, 0.0, 324.0), &tiles, Shows::View(ShelfView::Cards), STATION_TALL, None, false, &mut hits);
+            paint_shelf(&reach, &scene, ink, (0.0, 0.0, 324.0), &tiles, &LanePage::default(), Shows::View(ShelfView::Cards), STATION_TALL, None, false, &mut hits);
             (reach.reach.get().unwrap(), reach.said.take(), hits.iter().any(|one| one.4 == hit))
         };
         let (whole, said, pressed_there) = drawn();
@@ -10699,10 +11125,10 @@ seven".into()));
         assert_eq!(rested, whole);
         // A file come lately, carried off its row.
         let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'Q', file: id as u128 });
-        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }];
+        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }];
         let lately = || {
             let (reach, mut hits) = (Reach::default(), Vec::new());
-            paint_recent(&reach, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
+            paint_recent(&reach, &scene, ink, (0.0, 0.0, 324.0), &rows, &recent_page(ShelfView::List), STATION_TALL, false, &mut hits);
             (reach.said.take(), hits.iter().any(|one| one.4 == Hit::Recent(entry)))
         };
         assert!(lately().0.contains(&"Lately".to_string()));
@@ -10722,9 +11148,9 @@ seven".into()));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let (one, two) = (0x5EED_0021, 0x5EED_0022);
-        let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
+        let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }];
         let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'Q', file: one as u128 });
-        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }];
+        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }];
         let dots = |hits: Vec<Hit>| -> &'static super::super::thumb::Dots<Hit> {
             let mut dots = super::super::thumb::Dots::new();
             dots.mark_chosen(hits);
@@ -10735,7 +11161,7 @@ seven".into()));
         for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
             for dark in [true, false] {
                 let theme = Theme::new(skin, dark);
-                let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let scene = &scene;
                 let ink = theme.ink("station");
                 let mark = match skin {
@@ -10749,14 +11175,14 @@ seven".into()));
                     recorder.parts().into_iter().flat_map(|part| part.ops).filter(|op| matches!(op, Op::Rounded { color, .. } if *color == mark)).count()
                 };
                 for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
-                    let shelf = |thumbs| move |frame: &dyn Canvas| paint_shelf(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, shows, STATION_TALL, None, false, &mut Vec::new());
+                    let shelf = |thumbs| move |frame: &dyn Canvas| paint_shelf(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, &LanePage::default(), shows, STATION_TALL, None, false, &mut Vec::new());
                     let unmarked = marked(&shelf(none));
                     assert_eq!(marked(&shelf(on_shelf)), unmarked + 2, "{skin:?} {dark} {shows:?}");
                     // Drawn at rest (as what is carried off is lifted, see `render::record_tile`), not marked.
                     assert_eq!(marked(&shelf(&RESTING)), unmarked, "{skin:?} {dark} {shows:?}");
                 }
-                let copies = |thumbs| move |frame: &dyn Canvas| paint_copies(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), &copies_page(tiles, Default::default(), ShelfView::List), STATION_TALL, &mut Vec::new());
-                let recent = |thumbs| move |frame: &dyn Canvas| paint_recent(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut Vec::new());
+                let copies = |thumbs| move |frame: &dyn Canvas| paint_copies(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, &copies_page(ShelfView::List), STATION_TALL, &mut Vec::new());
+                let recent = |thumbs| move |frame: &dyn Canvas| paint_recent(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), rows, &recent_page(ShelfView::List), STATION_TALL, false, &mut Vec::new());
                 let unmarked = (marked(&copies(none)), marked(&recent(none)));
                 assert_eq!((marked(&copies(in_lists)), marked(&recent(in_lists))), (unmarked.0 + 1, unmarked.1 + 1), "{skin:?} {dark}");
             }
@@ -10773,16 +11199,16 @@ seven".into()));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let ids: Vec<u64> = (0..4).map(|at| 0x5EED_0031 + at).collect();
-        let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false, badge: None }).collect();
+        let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }).collect();
         let mut dots = super::super::thumb::Dots::new();
         dots.mark_chosen(ids.iter().map(|&id| Hit::Shelf(id)).collect());
         let width = COLUMN_WIDTH - 32.0;
         for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
             let theme = Theme::new(skin, false);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &dots, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &dots, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for view in [ShelfView::Cards, ShelfView::Large] {
                 let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
-                paint_shelf(&recorder, &scene, theme.ink("station"), (0.0, 0.0, width), &tiles, Shows::View(view), STATION_TALL, None, false, &mut Vec::new());
+                paint_shelf(&recorder, &scene, theme.ink("station"), (0.0, 0.0, width), &tiles, &LanePage::default(), Shows::View(view), STATION_TALL, None, false, &mut Vec::new());
                 let parts = recorder.parts();
                 let marks: Vec<(f32, f32, f32, f32)> = ids
                     .iter()
@@ -10830,9 +11256,11 @@ seven".into()));
             from: None,
             used_ms: 0,
             tags: Vec::new(),
+            held: false,
+            freed_ms: 0,
         };
         let shown = crate::station::run::Shown { items: vec![item.clone()], receiving: Some(receiving.clone()), ..Default::default() };
-        let blocks = crate::station::run::as_was(Arc::new(shown), || station_lane(true, Tab::Shelf, Lang::Zh));
+        let blocks = crate::station::run::as_was(Arc::new(shown), || station_lane(true, Tab::default(), Lang::Zh));
         let Some(Block::Shelf { tiles, .. }) = blocks.get(1) else { panic!("the station's page is not its second block") };
         assert_eq!(tiles.len(), 2);
         assert_eq!((tiles[0].label.as_str(), tiles[0].about.as_str()), ("IMG_1.jpg", "正在接收 · 37%"));
@@ -10857,7 +11285,7 @@ seven".into()));
             from: Some(crate::station::shelf::Device { alias: "Office PC".into(), kind: Some("desktop".into()), fingerprint: "CD".into() }),
             ..item.clone()
         };
-        let tile = Tile::of(&came, &crate::station::folder::Folder::own(), Lang::Zh, 0);
+        let tile = Tile::of(&came, &[], &crate::station::folder::Folder::own(), Lang::Zh, 0);
         assert_eq!((tile.label.as_str(), tile.badge), ("a.jpg", Some(Icon::Monitor)));
         assert!(tile.about.starts_with("文件 · 来自 Office PC"), "{}", tile.about);
     }
@@ -10926,12 +11354,12 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let id = 0x5EED_0031;
-        let rows = [Tile { id, label: "Copied".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
+        let rows = [Tile { id, label: "Copied".into(), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }];
         let drawn = || {
             let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
-            paint_copies(&recorder, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &copies_page(&rows, Default::default(), ShelfView::List), STATION_TALL, &mut Vec::new());
+            paint_copies(&recorder, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, &copies_page(ShelfView::List), STATION_TALL, &mut Vec::new());
             recorder.parts().into_iter().find(|part| part.key.as_deref() == Some(format!("tile.{:?}", Hit::Copied(id)).as_str()))
         };
         let said = |part: &crate::ui::morph::Part| part.ops.iter().any(|op| matches!(op, crate::ui::morph::Op::Text { text, .. } if text == "Copied"));
@@ -10994,7 +11422,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 3725, length: 3725, seekable: true }], ink: theme.ink("time") };
             let (reach, mut hits) = (Reach::default(), Vec::new());
             paint_lane(&reach, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 200.0 }, 0.0, Pass::Content, &mut hits);
@@ -11016,7 +11444,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
         let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
@@ -11065,7 +11493,7 @@ seven".into()));
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
-                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
                 let lane = Lane { id: "ai:today".into(), blocks: ai::today_card(Lang::Zh, None), ink: theme.ink("ai:today") };
                 let layout = Layout::with_columns(vec![lane.height(&theme)], 1, &theme);
                 let area = layout.lanes()[0];
@@ -11116,10 +11544,10 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let mut hits = Vec::new();
-            paint_tabs(&Nothing, &scene, (0.0, 0.0, width), Tab::Shelf, 128, true, true, ShelfView::Cards, &mut hits);
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, width), Tab::default(), 128, true, true, ShelfView::Cards, &mut hits);
             let buttons: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::StationView)).copied().collect();
             assert_eq!(buttons.len(), 1, "{skin:?}");
             for tab in hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))) {
@@ -11128,17 +11556,17 @@ seven".into()));
                 }
             }
             let mut hits = Vec::new();
-            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), &[], Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
+            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), &[], &recent_page(ShelfView::List), STATION_TALL, false, &mut hits);
             let chips: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(Tab::Recent(_)))).copied().collect();
             assert_eq!(chips.len(), 5, "{skin:?}");
             assert!(chips.iter().all(|chip| chip.0 + chip.2 <= width + 0.01), "{skin:?}: {chips:?}");
-            // And Recently copied's four, in Chinese too, in a lane as narrow as a workbench's gets.
+            // And Recently copied's five, in Chinese too, in a lane as narrow as a workbench's gets.
             for (lang, wide) in [(Lang::En, width), (Lang::Zh, width), (Lang::Zh, LANE_LEAST)] {
                 let scene = Scene { lang, ..scene };
                 let mut hits = Vec::new();
-                paint_copies(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, wide), &copies_page(&[], Default::default(), ShelfView::List), STATION_TALL, &mut hits);
+                paint_copies(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, wide), &[], &copies_page(ShelfView::List), STATION_TALL, &mut hits);
                 let chips: Vec<Tab> = hits.iter().filter_map(|hit| if let Hit::Tab(tab) = hit.4 { Some(tab) } else { None }).collect();
-                assert_eq!(chips, crate::station::shelf::Filter::ALL.map(Tab::Copies), "{skin:?} {}", lang.pick("zh", "en"));
+                assert_eq!(chips, { use crate::station::shelf::Filter; [Filter::All, Filter::Pinned].into_iter().chain(Filter::KINDS).map(Tab::Copies).collect::<Vec<_>>() }, "{skin:?} {}", lang.pick("zh", "en"));
                 assert!(hits.iter().all(|chip| chip.0 + chip.2 <= wide + 0.01), "{skin:?} {}: {hits:?}", lang.pick("zh", "en"));
             }
         }
@@ -11152,7 +11580,7 @@ seven".into()));
         crate::station::thumbs::start(|| {});
         let here = std::env::current_exe().unwrap();
         let gone = std::env::temp_dir().join("glance-no-such-file.png");
-        let item = |paths: Vec<std::path::PathBuf>, kept: Vec<String>| Item { id: 1, what: What::Files { paths, kept }, added_ms: 0, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |paths: Vec<std::path::PathBuf>, kept: Vec<String>| Item { id: 1, what: What::Files { paths, kept }, added_ms: 0, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let folder = crate::station::folder::Folder::own();
         let about = |item: &Item| {
             // (Looked at on a thread of its own: asked till it answers.)
@@ -11163,7 +11591,7 @@ seven".into()));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Tile::of(item, &folder, Lang::Zh, 0).about
+            Tile::of(item, &[], &folder, Lang::Zh, 0).about
         };
         assert!(about(&item(vec![gone.clone()], Vec::new())).starts_with("文件已不存在 · "));
         assert!(about(&item(vec![gone.clone(), gone.clone()], Vec::new())).starts_with("2 个文件已不存在 · "));
@@ -11177,7 +11605,7 @@ seven".into()));
     #[test]
     fn recently_copied_shows_what_its_filter_takes() {
         use crate::station::shelf::{Filter, Item, What};
-        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Picture { file: "2.png".into() }, true),
@@ -11185,8 +11613,9 @@ seven".into()));
             item(4, What::Text { text: "put by hand".into() }, false),
             item(5, What::Files { paths: vec![std::path::PathBuf::from(r"C:\a.txt")], kept: Vec::new() }, true),
         ];
-        let held = crate::station::run::Shown { items, ..Default::default() };
-        let ids = |filter: Filter| copied_lately(&held, filter).into_iter().map(|item| item.id).collect::<Vec<_>>();
+        let held = crate::station::run::Shown { items: items.clone(), ..Default::default() };
+        crate::station::run::pretend(items, ShelfView::List);
+        let ids = |filter: Filter| crate::station::shelf::listed(&held.items, true, filter, false).rest.into_iter().map(|item| item.id).collect::<Vec<_>>();
         assert_eq!(ids(Filter::All), [5, 3, 2, 1]);
         assert_eq!(ids(Filter::Words), [3, 1]);
         assert_eq!(ids(Filter::Pictures), [2]);
@@ -11209,7 +11638,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
             let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let across = ((width / APP_CELL_W) as usize).max(1);
             // As many as fill the first row but the place to add more: it on the same row; one more: on a second.
@@ -11234,7 +11663,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let apps: Vec<(String, String)> = (0..40).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let lane = Lane { id: "apps".into(), blocks: vec![head("Quick launch", "", "", false), Block::Apps { apps: apps.clone(), rows: apps_rows(apps.len(), &theme), named: true, over: false }], ink: theme.ink("apps") };
         let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>();
@@ -11309,24 +11738,24 @@ seven".into()));
         for list in [List::Processes, List::Shelf, List::Copies, List::Recent, List::Apps] {
             scrolls.set(list, scroll);
         }
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let mut lists = Vec::new();
         let processes = vec![Lane { id: "processes".into(), blocks: lane(&scene, "processes", Detail::Full).unwrap(), ink: theme.ink("processes") }];
         let layout = Layout::with_columns(vec![processes[0].height(&theme)], 1, &theme);
         lists.push(("processes".to_string(), List::Processes, paint(&Nothing, &scene, &processes, &layout, Pass::Content)));
         let ink = theme.ink("station");
-        let tiles: Vec<Tile> = (1..=40).map(|id| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None }).collect();
-        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
+        let tiles: Vec<Tile> = (1..=40).map(|id| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, when: None, tags: Vec::new(), badge: None }).collect();
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }).collect();
         let room = (0.0, 100.0, 320.0);
         for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
             let mut hits = Vec::new();
-            paint_shelf(&Nothing, &scene, ink, room, &tiles, Shows::View(view), STATION_TALL, None, false, &mut hits);
+            paint_shelf(&Nothing, &scene, ink, room, &tiles, &LanePage::default(), Shows::View(view), STATION_TALL, None, false, &mut hits);
             lists.push((format!("station {view:?}"), List::Shelf, hits));
             let mut hits = Vec::new();
-            paint_copies(&Nothing, &scene, ink, room, &copies_page(&tiles, Default::default(), view), STATION_TALL, &mut hits);
+            paint_copies(&Nothing, &scene, ink, room, &tiles, &copies_page(view), STATION_TALL, &mut hits);
             lists.push((format!("copied {view:?}"), List::Copies, hits));
             let mut hits = Vec::new();
-            paint_recent(&Nothing, &scene, ink, room, &rows, Default::default(), view, STATION_TALL, false, &mut hits);
+            paint_recent(&Nothing, &scene, ink, room, &rows, &recent_page(view), STATION_TALL, false, &mut hits);
             lists.push((format!("recent {view:?}"), List::Recent, hits));
         }
         let apps: Vec<(String, String)> = (0..40).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
