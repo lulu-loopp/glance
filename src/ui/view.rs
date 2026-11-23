@@ -5837,19 +5837,19 @@ impl Hint {
 /// Where on a thing's picture (x, y, width, height) its pin's plate is (the same: see `paint_pin`): in its top right
 /// corner, beside its device's mark where it has one.
 fn pin_mark(tile: &Tile, (x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
-    let (wide, high, inset) = match w.min(h) {
-        small if small < 64.0 => (18.0, 18.0, 3.0),
-        small if small < 84.0 => (20.0, 20.0, 5.0),
-        _ => (24.0, 22.0, HINT_INSET),
+    let (side, inset) = match w.min(h) {
+        small if small < 64.0 => (18.0, 3.0),
+        small if small < 84.0 => (20.0, 5.0),
+        _ => (22.0, HINT_INSET),
     };
-    (x + w - inset - wide - if tile.badge.is_some() { 12.0 } else { 0.0 }, y + inset, wide, high)
+    (x + w - inset - side - if tile.badge.is_some() { 12.0 } else { 0.0 }, y + inset, side, side)
 }
 
-/// A pin on a thing's picture, on a plate as the preview's shortcut is said on (see `hint_mark`): in the lane's ink where
-/// it is `pinned`, lit with the pointer `on` it (where it is pressed).
+/// A pin on a thing's picture, on a plate of the skin's menus' sheet as round as its buttons are (glass's a circle): in the
+/// lane's ink where it is `pinned`, lit with the pointer `on` it (where it is pressed).
 fn paint_pin(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), pinned: bool, on: bool) {
     let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
-    let radius = mark_round(theme, &colours, h);
+    let radius = theme.control_radius.min(h / 2.0);
     frame.fill_rounded(colours.sheet, x, y, w, h, radius);
     if on {
         frame.fill_rounded(colours.text.alpha(0.08), x, y, w, h, radius);
@@ -5859,7 +5859,7 @@ fn paint_pin(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, (x, y, w
     frame.icon(Icon::Pin, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
 }
 
-/// How round a plate `tall` on a thing's picture is: as the skin's menus are, no rounder than 8.
+/// How round the plate the preview's shortcut is said on (`tall`) is: as the skin's menus are, no rounder than 8.
 fn mark_round(theme: &Theme, colours: &super::menu::Colours, tall: f32) -> f32 {
     colours.radius.min(8.0).min(tall / 2.0).min(theme.control_radius.max(4.0))
 }
