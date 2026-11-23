@@ -940,9 +940,10 @@ impl Scene<'_> {
 }
 
 /// One line of a chart: its reading in a sample, if the sample has it.
-type Series = Box<dyn Fn(&Sample) -> Option<f64>>;
+type Series = std::rc::Rc<dyn Fn(&Sample) -> Option<f64>>;
 
 /// A chart: series read from samples, drawn against a full scale.
+#[derive(Clone)]
 struct Plot {
     series: Vec<Series>,
     max: f64,
@@ -965,6 +966,7 @@ pub enum Pass {
     Plots,
 }
 
+#[derive(Clone)]
 enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
     /// A head whose second words are the first of `dates` there is room for (the fullest first).
@@ -3058,6 +3060,7 @@ impl Shape {
     }
 }
 
+#[derive(Clone)]
 pub struct Lane {
     /// Its module's (what names its parts, see `morph`).
     id: String,
@@ -3403,7 +3406,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, had_temp && temp.is_some_and(|t| t > hot_temp)),
-                readout(s.cpu, Box::new(|s| s.cpu.map(f64::from))),
+                readout(s.cpu, std::rc::Rc::new(|s| s.cpu.map(f64::from))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.seen.threads;
@@ -3439,7 +3442,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let usage = reading.and_then(|g| g.usage);
             let mut blocks = vec![
                 head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(usage, Box::new(move |s| s.gpus.get(index)?.usage.map(f64::from))),
+                readout(usage, std::rc::Rc::new(move |s| s.gpus.get(index)?.usage.map(f64::from))),
             ];
             if on("vram") {
                 let used = reading.and_then(|g| g.mem_used);
@@ -3527,14 +3530,14 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     figure: format!("{percent:.0}"),
                     unit: "%",
                     hot: percent > hot_load,
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64))),
+                    plot: chart.then(|| Plot::new(scene, vec![std::rc::Rc::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64))),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
         }
         "network" => {
             let bits = prefs.network.bits;
-            let plot = Plot::new(scene, vec![Box::new(|s| s.net_down), Box::new(|s| s.net_up)], None, None);
+            let plot = Plot::new(scene, vec![std::rc::Rc::new(|s| s.net_down), std::rc::Rc::new(|s| s.net_up)], None, None);
             let scale = plot.max;
             let mut facts = Vec::new();
             let adapter = s.network.as_ref();
@@ -3584,7 +3587,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             ]
         }
         "disk" => {
-            let plot = Plot::new(scene, vec![Box::new(|s| s.disk_read), Box::new(|s| s.disk_write)], None, None);
+            let plot = Plot::new(scene, vec![std::rc::Rc::new(|s| s.disk_read), std::rc::Rc::new(|s| s.disk_write)], None, None);
             let scale = plot.max;
             let drives: &[(u32, String)] = if on("drives") { &scene.seen.drives } else { &[] };
             let temp = |id: u32| s.drive_temps.iter().find(|d| d.id == id).map(|d| d.celsius);
@@ -3771,7 +3774,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     figure: shown(game.and_then(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, pid).and_then(|g| g.fps).map(f64::from))], scale, None)),
+                    plot: chart.then(|| Plot::new(scene, vec![std::rc::Rc::new(move |s| same_game(s, pid).and_then(|g| g.fps).map(f64::from))], scale, None)),
                 },
             ];
             if !full {
@@ -3780,7 +3783,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if full && frametimes {
                 // Full scale: two frames at the screen's rate, or the longest
                 // frame on screen, if longer, rounded up.
-                let series: Series = Box::new(move |s| same_game(s, pid).and_then(|g| g.longest_ms).map(f64::from));
+                let series: Series = std::rc::Rc::new(move |s| same_game(s, pid).and_then(|g| g.longest_ms).map(f64::from));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
                 blocks.push(Block::Trace {
@@ -3833,7 +3836,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     figure: shown(battery, |b| b.percent.to_string()),
                     unit: "%",
                     hot: battery.is_some_and(|b| !b.plugged && b.percent <= 20),
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
+                    plot: chart.then(|| Plot::new(scene, vec![std::rc::Rc::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
                 Block::Facts { rows: facts, gap: 8.0 },
             ]
@@ -3900,7 +3903,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             };
             // Its processors in the figure (named, as the lane is not theirs
             // alone), its memory and its GPU charted under them.
-            let mut figure = readout(cpu, Box::new(|s| match &s.wsl {
+            let mut figure = readout(cpu, std::rc::Rc::new(|s| match &s.wsl {
                 Some(crate::reading::WslSample::Running { cpu, .. }) => cpu.map(f64::from),
                 _ => None,
             }));
@@ -3911,7 +3914,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("memory") {
                 let both = used.zip(total);
                 let value = shown(both, |(used, total)| text::usage(used, total));
-                let series: Series = Box::new(|s| match &s.wsl {
+                let series: Series = std::rc::Rc::new(|s| match &s.wsl {
                     Some(crate::reading::WslSample::Running { used: Some(used), total: Some(total), .. }) => Some(*used as f64 / (*total).max(1) as f64 * 100.0),
                     _ => None,
                 });
@@ -3933,7 +3936,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 let value = shown(gpu, text::percent);
                 let hot = gpu.is_some_and(|gpu| gpu > hot_load);
                 if chart {
-                    let series: Series = Box::new(|s| match &s.wsl {
+                    let series: Series = std::rc::Rc::new(|s| match &s.wsl {
                         Some(crate::reading::WslSample::Running { gpu, .. }) => gpu.map(f64::from),
                         _ => None,
                     });
@@ -4395,7 +4398,9 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
         // The rail's lane (quick launch's) along the edge, its own way.
         if let Some((_, side)) = rail.filter(|(rail, _)| *rail == at) {
             if pass == Pass::Content {
+                frame.scope(&lane.id);
                 paint_rail(frame, scene, lane, *area, side, &mut hits);
+                frame.unscope();
             }
             continue;
         }
@@ -4403,19 +4408,25 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
         // Chart paper rules each lane off below; the last rule in a column
         // also sets off the bar.
         if pass == Pass::Content && theme.ruled {
+            frame.scope(&format!("{}.rule", lane.id));
             frame.fill(theme.rule, area.x, area.y + area.h - 1.0, area.w, 1.0);
+            frame.unscope();
         }
     }
     if pass == Pass::Content {
         if theme.ruled {
+            frame.scope("columns");
             for column in 1..layout.columns {
                 let x = layout.column_x(column);
                 frame.fill(theme.rule, x, 0.0, 1.0, layout.lanes_height);
             }
+            frame.unscope();
         }
         // (None where it has no room: a widget of the workbench's lanes.)
         if rail.is_none() && layout.bar().h > 0.0 {
+            frame.scope("bar");
             paint_bar(frame, scene, layout, &mut hits);
+            frame.unscope();
         }
     }
     hits
@@ -4482,6 +4493,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     // theirs alike (see `morph`): the CPU's figure is "cpu.value" in both.
     let id = &lane.id;
     let name = |part: &str| frame.key(&format!("{id}.{part}"));
+    // (What of it is drawn unnamed is its own: see `Canvas::scope`.)
+    frame.scope(id);
     let mut kinds: Vec<String> = Vec::new();
     // (The AI component's: each source's blocks in its ink from its head on, named by it.)
     let (mut ink, mut source) = (ink, None);
@@ -4525,6 +4538,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind.clone());
         let part = |what: &str| name(&format!("{kind}{nth}.{what}"));
+        // (What of it is not named otherwise, as a whole: see `Canvas::scope`.)
+        frame.scope(&format!("{kind}{nth}"));
         let charted = matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. });
         let height = block.height() + if charted { taller } else { 0.0 };
         match (block, pass) {
@@ -4902,6 +4917,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             }
         }
         frame.key("");
+        frame.unscope();
         y += height;
     }
     // While something is dragged off a station and a while after: the devices nearby at its foot, over what it shows.
@@ -4911,6 +4927,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             hits.splice(first..first, boxes);
         }
     }
+    frame.unscope();
 }
 
 /// Its room round the devices, the line naming what it is, and each device's (DIPs: see `paint_strip`): how narrow
@@ -10100,6 +10117,43 @@ seven".into()));
         assert_eq!(face_rows(&Nothing, "ab\naaaaaaaabbbb", font, (2, 37.0), 61.0, 3), ["ab", "aaaaaa", "aabbbb"]);
         assert_eq!(face_rows(&Nothing, "ab\naaaaaaaabbbb", font, (2, 37.0), 61.0, 2), ["ab", "aaaaa…"]);
         assert!(face_rows(&Nothing, "abc", font, (0, 61.0), 61.0, 0).is_empty());
+    }
+
+    /// A thing on the station pinned, the panel turning from how it was drawn into how it is: everything it draws is
+    /// named (a part drawn unnamed is told from no other, and fades out as its like fades in: the whole panel dimmed
+    /// as it turned, the volume's row too), the lanes above the station drawn as they are all the way, the thing pinned
+    /// on its way from where it was to where it goes.
+    #[test]
+    fn a_panel_turning_as_a_thing_is_pinned_moves_it_and_leaves_the_rest_as_it_is() {
+        use crate::station::shelf::{Item, What};
+        use crate::ui::morph::{Op, Part, Recorder};
+        let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Glass, true), [Arc::new(sample(None, None, None))]);
+        let seen = Seen::of(&history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let items = |pinned: bool| (1..=4u64).map(|id| Item { id, what: What::Text { text: format!("text {id}") }, added_ms: id, pinned: id == 2 && pinned, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 }).collect::<Vec<_>>();
+        let drawn = |pinned: bool| {
+            crate::station::run::pretend(items(pinned), ShelfView::Cards);
+            let lanes: Vec<Lane> = crate::ui::prefs::WORKBENCH.iter().filter_map(|id| Some(Lane { blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id), id: id.to_string() })).collect();
+            let layout = Layout::with_columns(lanes.iter().map(|lane| lane.height(&theme)).collect(), 1, &theme);
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            paint(&recorder, &scene, &lanes, &layout, Pass::Content);
+            paint(&recorder, &scene, &lanes, &layout, Pass::Plots);
+            recorder.parts()
+        };
+        let (from, to) = (drawn(false), drawn(true));
+        assert!(from.iter().chain(&to).all(|part| part.key.is_some()), "unnamed: {:?}", to.iter().filter(|part| part.key.is_none()).map(|part| &part.ops).collect::<Vec<_>>());
+        let mid = crate::ui::morph::between(&from, &to, 0.5);
+        let above = |part: &&Part| part.key.as_deref().is_some_and(|key| key.starts_with("search") || key.starts_with("time"));
+        assert!(to.iter().filter(above).count() > 1);
+        assert_eq!(mid.iter().filter(above).collect::<Vec<_>>(), to.iter().filter(above).collect::<Vec<_>>(), "the lanes above the station as they are");
+        let first_text = |parts: &[Part]| {
+            let tile = parts.iter().find(|part| part.key.as_deref() == Some(&tile_key(Hit::Shelf(2)))).expect("the thing pinned drawn");
+            tile.ops.iter().find_map(|op| if let Op::Text { x, y, .. } = op { Some((*x, *y)) } else { None }).unwrap()
+        };
+        let (was, goes, on_its_way) = (first_text(&from), first_text(&to), first_text(&mid));
+        assert_ne!(was, goes, "pinned: put elsewhere");
+        let between = |a: f32, b: f32, m: f32| (a.min(b)..=a.max(b)).contains(&m);
+        assert!(between(was.0, goes.0, on_its_way.0) && between(was.1, goes.1, on_its_way.1) && on_its_way != goes, "{was:?} {on_its_way:?} {goes:?}");
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.

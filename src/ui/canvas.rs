@@ -379,4 +379,10 @@ pub trait Canvas {
     /// Names what is drawn from here on (`""`: nothing), for a canvas that
     /// tells one drawing's parts from another's (see `morph`).
     fn key(&self, _key: &str) {}
+    /// Names what is drawn from here on that `key` does not name as a part of `name`, within the scope it is drawn in
+    /// till `unscope`: for a canvas that tells one drawing's parts from another's (see `morph`), nothing of a drawing
+    /// unnamed (a part with no name is not told from another's, and fades out as its like fades in).
+    fn scope(&self, _name: &str) {}
+    /// Ends the scope begun last (see `scope`).
+    fn unscope(&self) {}
 }

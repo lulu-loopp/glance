@@ -1340,9 +1340,11 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
     // What is on its station otherwise than it was drawn (something came from a device nearby, or begins to, or was put
     // on it or taken off): turning from how it was drawn.
     let station_now = crate::station::Drawn::now();
-    if let Some(was) = readings.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !crate::panel::reduced_motion()) {
+    if let Some((was, old_lanes, old)) = readings.station_was.replace((station_now.clone(), picture.lanes.to_vec(), shown.clone())).filter(|(was, ..)| station_now.moved_from(was) && !crate::panel::reduced_motion()) {
         if readings.morph.is_none() {
-            readings.morph = Some((now, Before::Drawn(was.as_was(|| render::record(frame, scene, picture.lanes, &shown.layout, picture.small, 1.0, picture.at)))));
+            // (Drawn as it was then: its lanes as they were, laid out as they were.)
+            let small = old.small.map(|small| (small, old.size));
+            readings.morph = Some((now, Before::Drawn(was.as_was(|| render::record(frame, scene, &old_lanes, &old.layout, small, 1.0, picture.at)))));
         }
     }
     let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
@@ -1406,9 +1408,9 @@ struct Readings {
     morph_layer: Layer,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
-    /// What its station showed as it was last drawn: changed since, it turns from how that was drawn (as the panel
-    /// does: see `Panel::station_was`).
-    station_was: Option<crate::station::Drawn>,
+    /// What its station showed as it was last drawn, with the lanes it was drawn with and how they were laid out:
+    /// changed since, it turns from how that was drawn (as the panel does: see `Panel::station_was`).
+    station_was: Option<(crate::station::Drawn, Vec<view::Lane>, Shown)>,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,

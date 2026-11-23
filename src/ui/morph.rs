@@ -353,6 +353,16 @@ impl Op {
                     line: lerp(*al, *bl, t),
                 }]
             }
+            (Op::Shadow { color: ac, x: ax, y: ay, w: aw, h: ah, radius: ar, blur: ab, drop: ad }, Op::Shadow { color: bc, x: bx, y: by, w: bw, h: bh, radius: br, blur: bb, drop: bd }) => vec![Op::Shadow {
+                color: lerp_color(*ac, *bc, t),
+                x: lerp(*ax, *bx, t),
+                y: lerp(*ay, *by, t),
+                w: lerp(*aw, *bw, t),
+                h: lerp(*ah, *bh, t),
+                radius: lerp(*ar, *br, t),
+                blur: lerp(*ab, *bb, t),
+                drop: lerp(*ad, *bd, t),
+            }],
             // (The same pane each way, over the same things: they move between with it.)
             (Op::Frosted { x: ax, y: ay, w: aw, h: ah, radius: ar, blur: ab, below: abelow }, Op::Frosted { x: bx, y: by, w: bw, h: bh, radius: br, blur: bb, below: bbelow }) if abelow.len() == bbelow.len() => {
                 let below = abelow.iter().zip(bbelow).map(|(a, b)| a.between(b, t)).collect::<Option<Vec<Vec<Op>>>>()?.concat();
@@ -487,18 +497,21 @@ pub fn ease(t: f32) -> f32 {
 
 /// A canvas that draws nothing but records what is drawn on it, by the
 /// names it is told (see `Canvas::key`), scaled by `scale` and moved by
-/// `at`; it measures with `measure`.
+/// `at`; it measures with `measure`. What is drawn unnamed is named by the
+/// scope it is drawn in (see `Canvas::scope`).
 pub struct Recorder<'a> {
     measure: &'a dyn Canvas,
     scale: f32,
     at: (f32, f32),
     key: RefCell<Option<String>>,
+    /// The scopes it is drawn in, each named whole (within those it is in).
+    scopes: RefCell<Vec<String>>,
     parts: RefCell<Vec<Part>>,
 }
 
 impl<'a> Recorder<'a> {
     pub fn new(measure: &'a dyn Canvas, scale: f32, at: (f32, f32)) -> Self {
-        Recorder { measure, scale, at, key: RefCell::new(None), parts: RefCell::new(Vec::new()) }
+        Recorder { measure, scale, at, key: RefCell::new(None), scopes: RefCell::new(Vec::new()), parts: RefCell::new(Vec::new()) }
     }
 
     /// What was drawn: each name's things together, as one part, where the
@@ -510,7 +523,7 @@ impl<'a> Recorder<'a> {
     fn push(&self, op: Op) {
         let map = Map { from: Bounds { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, to: Bounds { x: self.at.0, y: self.at.1, w: self.scale, h: self.scale }, sizes: self.scale };
         let op = op.mapped(&map);
-        let key = self.key.borrow().clone();
+        let key = self.key.borrow().clone().or_else(|| self.scopes.borrow().last().cloned());
         let mut parts = self.parts.borrow_mut();
         match key.as_ref().and_then(|key| parts.iter_mut().find(|part| part.key.as_ref() == Some(key))) {
             Some(part) => part.ops.push(op),
@@ -599,8 +612,9 @@ impl Canvas for Recorder<'_> {
     }
 
     fn frosted(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, below: &dyn Fn(&dyn Canvas)) {
-        // (What is under recorded where it is drawn, unmoved: moved with the pane, as it is pushed.)
-        let under = Recorder::new(self.measure, 1.0, (0.0, 0.0));
+        // (What is under recorded where it is drawn, unmoved: moved with the pane, as it is pushed. Put on pixels as
+        // this is.)
+        let under = Recorder::new(self, 1.0, (0.0, 0.0));
         below(&under);
         let below = under.parts().into_iter().flat_map(|part| part.ops).collect();
         self.push(Op::Frosted { x, y, w, h, radius, blur, below });
@@ -622,6 +636,14 @@ impl Canvas for Recorder<'_> {
         self.measure.pixels_per_dip() * self.scale
     }
 
+    /// As the canvas it is played on puts the box on pixels, where that is in what is recorded: what is drawn from it
+    /// (words centred in a box, a track's parts) played back where it is drawn as it is.
+    fn on_pixels(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let ((at_x, at_y), scale) = (self.at, self.scale);
+        let (x, y, w, h) = self.measure.on_pixels(at_x + x * scale, at_y + y * scale, w * scale, h * scale);
+        ((x - at_x) / scale, (y - at_y) / scale, w / scale, h / scale)
+    }
+
     fn picture_within(&self, picture: &Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
         let at = Bounds { x: at.0, y: at.1, w: at.2, h: at.3 };
         self.push(Op::Picture { picture: picture.clone(), at, within: Bounds { x: within.0, y: within.1, w: within.2, h: within.3 }, radius: within.4, opacity });
@@ -629,6 +651,19 @@ impl Canvas for Recorder<'_> {
 
     fn key(&self, key: &str) {
         *self.key.borrow_mut() = (!key.is_empty()).then(|| key.to_string());
+    }
+
+    fn scope(&self, name: &str) {
+        let mut scopes = self.scopes.borrow_mut();
+        let whole = match scopes.last() {
+            Some(within) => format!("{within}/{name}"),
+            None => name.to_string(),
+        };
+        scopes.push(whole);
+    }
+
+    fn unscope(&self) {
+        self.scopes.borrow_mut().pop();
     }
 }
 
@@ -638,6 +673,44 @@ mod tests {
     use crate::ui::canvas::Family;
 
     const INK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+
+    /// Measures text as so many DIPs a byte, its pixels one and a half DIPs (a 150% screen): what is put on pixels is.
+    struct Measure;
+    impl Canvas for Measure {
+        fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
+        fn markdown(&self, _: &str, _: Font, _: Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
+        fn measure(&self, text: &str, _: Font) -> f32 {
+            text.len() as f32
+        }
+        fn baseline(&self, _: Font) -> (f32, f32) {
+            (10.0, 2.0)
+        }
+        fn ink(&self, _: &str, _: Font) -> (f32, f32) {
+            (2.0, 10.0)
+        }
+        fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+        fn unclip(&self) {}
+        fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_circle(&self, _: Color, _: Point, _: f32) {}
+        fn stroke(&self, _: &[Point], _: Color, _: f32) {}
+        fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
+        fn fill_shape(&self, _: &[Point], _: Fill) {}
+        fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
+        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+        fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
+        fn picture_within(&self, _: &Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+        fn on_pixels(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+            let on = |v: f32| (v * 1.5).round() / 1.5;
+            (on(x), on(y), on(x + w) - on(x), on(y + h) - on(y))
+        }
+    }
 
     fn text(key: &str, text: &str, x: f32, y: f32, size: f32) -> Part {
         let font = Font::new(Family::Inter, size, 600.0);
@@ -671,6 +744,46 @@ mod tests {
             most = most.max(drawn.iter().map(|part| part.ops.len()).sum::<usize>());
         }
         assert!(most < 40, "{most} things drawn");
+    }
+
+    #[test]
+    fn every_kind_of_thing_drawn_alike_each_way_stays_as_it_is_on_the_way() {
+        // (A kind with no way between fell back to the whole part fading out and in again: drawn alike at both ends, the
+        // volume's knob, shadowed, showed through itself halfway as a panel turned.)
+        let font = Font::new(Family::Inter, 12.0, 500.0);
+        let at = Point { x: 10.0, y: 20.0 };
+        let fill = Fill::Down { top: 0.0, from: INK, bottom: 10.0, to: INK };
+        let picture = Picture { key: 7, size: (1, 1), pixels: std::sync::Arc::new(vec![0; 4]) };
+        let within = Bounds { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+        let ops = [
+            Op::Text { text: "18".into(), font, color: INK, x: 1.0, y: 2.0, width: 40.0, align: Align::Start, inked: 10.0, scale: 1.0 },
+            Op::Markdown { text: "**18**".into(), font, inks: Inks { words: INK, faint: INK, accent: INK }, x: 1.0, y: 2.0, w: 40.0, h: 20.0, scrolled: 0.0 },
+            Op::Clip { x: 0.0, y: 0.0, w: 40.0, h: 20.0, part: Some((0.5, false)), fades: (0.0, 4.0) },
+            Op::Fill { color: INK, x: 0.0, y: 0.0, w: 4.0, h: 4.0 },
+            Op::Rounded { color: INK, x: 0.0, y: 0.0, w: 4.0, h: 4.0, radius: 2.0 },
+            Op::Circle { color: INK, centre: at, radius: 3.0 },
+            Op::Stroke { points: vec![at, Point { x: 30.0, y: 40.0 }], color: INK, width: 1.0, dashed: true },
+            Op::Shape { points: vec![at, Point { x: 30.0, y: 40.0 }, Point { x: 10.0, y: 40.0 }], fill },
+            Op::Outline { fill, x: 0.0, y: 0.0, w: 4.0, h: 4.0, radius: 2.0, line: 1.0 },
+            Op::Shadow { color: INK, x: 0.0, y: 0.0, w: 20.0, h: 14.0, radius: 7.0, blur: 5.0, drop: 1.5 },
+            Op::Frosted { x: 0.0, y: 0.0, w: 20.0, h: 14.0, radius: 7.0, blur: 20.0, below: vec![Op::Fill { color: INK, x: 0.0, y: 0.0, w: 4.0, h: 4.0 }] },
+            Op::Arc { centre: at, radius: 8.0, from: 0.0, sweep: 1.0, color: INK, width: 2.0 },
+            Op::Icon { icon: Icon::Volume, centre: at, size: 16.0, color: INK },
+            Op::Mark { mark: super::super::marks::Mark::Claude, centre: at, size: 16.0, text: INK, opacity: 1.0 },
+            Op::Picture { picture, at: within, within, radius: 4.0, opacity: 1.0 },
+        ];
+        // (Every kind there is: one not listed here is not told of. A clip is ended as it is drawn, round something.)
+        for op in &ops {
+            match op {
+                Op::Text { .. } | Op::Markdown { .. } | Op::Clip { .. } | Op::Unclip | Op::Fill { .. } | Op::Rounded { .. } | Op::Circle { .. } | Op::Stroke { .. } | Op::Shape { .. } | Op::Outline { .. } | Op::Shadow { .. } | Op::Frosted { .. } | Op::Arc { .. } | Op::Icon { .. } | Op::Mark { .. } | Op::Picture { .. } => {}
+            }
+        }
+        let dot = Op::Fill { color: INK, x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        for op in ops {
+            let drawn = if matches!(op, Op::Clip { .. }) { vec![op.clone(), dot.clone(), Op::Unclip] } else { vec![dot.clone(), op.clone()] };
+            let part = [Part { key: Some("volume.track".into()), ops: drawn }];
+            assert_eq!(between(&part, &part, 0.5), part, "{op:?}");
+        }
     }
 
     #[test]
@@ -729,39 +842,25 @@ mod tests {
     }
 
     #[test]
+    fn what_is_recorded_is_put_on_the_pixels_it_is_played_on() {
+        // (Recorded unput, words centred in a box stood up to a pixel off where they are drawn as they are, and went
+        // back as the turn ended: the search's words, as a panel turned when a thing was pinned.)
+        let font = Font::new(Family::Inter, 14.0, 400.0);
+        let recorder = Recorder::new(&Measure, 1.0, (5.0, 5.3));
+        recorder.text("搜索", font, INK, 0.0, recorder.line_in(font, 10.2, 36.0), 50.0, Align::Start);
+        let (x, y, w, h) = recorder.on_pixels(0.1, 20.4, 30.0, 3.3);
+        recorder.fill(INK, x, y, w, h);
+        let ops = recorder.parts().into_iter().flat_map(|part| part.ops).collect::<Vec<_>>();
+        let near = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-4);
+        let Op::Text { y, .. } = ops[0] else { panic!() };
+        assert!(near(&[y], &[Measure.line_in(font, 15.5, 36.0)]), "{y}");
+        let Op::Fill { x, y, w, h, .. } = ops[1] else { panic!() };
+        let (px, py, pw, ph) = Measure.on_pixels(5.1, 25.7, 30.0, 3.3);
+        assert!(near(&[x, y, w, h], &[px, py, pw, ph]), "{:?}", (x, y, w, h));
+    }
+
+    #[test]
     fn records_each_name_as_one_part_scaled_and_moved() {
-        struct Measure;
-        impl Canvas for Measure {
-            fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
-            fn markdown(&self, _: &str, _: Font, _: Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
-            fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
-                0.0
-            }
-            fn measure(&self, text: &str, _: Font) -> f32 {
-                text.len() as f32
-            }
-            fn baseline(&self, _: Font) -> (f32, f32) {
-                (10.0, 2.0)
-            }
-            fn ink(&self, _: &str, _: Font) -> (f32, f32) {
-                (2.0, 10.0)
-            }
-            fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
-            fn unclip(&self) {}
-            fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
-            fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
-            fn fill_circle(&self, _: Color, _: Point, _: f32) {}
-            fn stroke(&self, _: &[Point], _: Color, _: f32) {}
-            fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
-            fn fill_shape(&self, _: &[Point], _: Fill) {}
-            fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
-            fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
-            fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
-            fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
-            fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
-            fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
-            fn picture_within(&self, _: &Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
-        }
         let recorder = Recorder::new(&Measure, 2.0, (5.0, 5.0));
         recorder.key("cpu.chart");
         recorder.fill(INK, 1.0, 1.0, 10.0, 10.0);

@@ -2753,9 +2753,10 @@ struct Panel<'a> {
     turn: render::Turn,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
-    /// What its station showed as it was last drawn: changed since (something came from a device nearby, or begins to,
-    /// or was put on it or taken off), it turns from how that was drawn (none: not drawn since it opened).
-    station_was: Option<crate::station::Drawn>,
+    /// What its station showed as it was last drawn, and the lanes it was drawn with, laid out how: changed since
+    /// (something came from a device nearby, or begins to, or was put on it or taken off, pinned or not), it turns from
+    /// how that was drawn (none: not drawn since it opened).
+    station_was: Option<(crate::station::Drawn, Vec<view::Lane>, Layout)>,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -4650,7 +4651,7 @@ impl<'a> Panel<'a> {
         let mut lifted = None;
         // What its station showed as last drawn, where it shows otherwise now (see `station_was`).
         let station_now = crate::station::Drawn::now();
-        let station_was = self.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !reduced_motion());
+        let station_was = self.station_was.replace((station_now.clone(), lanes.clone(), layout.clone())).filter(|(was, ..)| station_now.moved_from(was) && !reduced_motion());
         let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
@@ -4678,7 +4679,14 @@ impl<'a> Panel<'a> {
             // What is on its station otherwise than it was drawn (something came, or begins to come, or was put on
             // it or taken off): turning from how it was drawn, each thing moving to where it is now, what came fading
             // in. (One under way, or laid out anew, turns on as it does.)
-            let changed_from = || station_was.filter(|_| turn.is_none()).map(|was| was.as_was(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))));
+            // (Drawn as it was then: its lanes as they were, laid out as they were, kept to the side it keeps to.)
+            let changed_from = || {
+                station_was.filter(|_| turn.is_none()).map(|(was, old_lanes, old)| {
+                    let (old_w, old_h) = (old.width(), old.height());
+                    let at = (if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 }, if keeps_bottom { height - old_h } else { 0.0 });
+                    was.as_was(|| render::record(frame, &scene, &old_lanes, &old, None, 1.0, at))
+                })
+            };
             let turn = match gone_from.or_else(changed_from) {
                 Some(from) => {
                     turning.begin(now, from);
