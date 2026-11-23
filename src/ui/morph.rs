@@ -402,6 +402,12 @@ impl Part {
         self.ops.iter().filter_map(Op::bounds).reduce(Bounds::union)
     }
 
+    /// Where it draws: left, top, width, height (for tests of where things are).
+    #[cfg(test)]
+    pub(crate) fn extent(&self) -> Option<(f32, f32, f32, f32)> {
+        self.bounds().map(|b| (b.x, b.y, b.w, b.h))
+    }
+
     /// What of it shows (see `Op::shows`), clips left round nothing
     /// dropped; nothing, if none of it does. A turn broken off by another
     /// starts from what showed, so what has faded out is not carried on

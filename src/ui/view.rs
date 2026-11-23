@@ -4387,6 +4387,20 @@ impl Layout {
     }
 }
 
+/// How each of `lanes` that lays itself out in the room `layout` gives it is laid out there (the AI component's in a
+/// widget: see `ai::arranged`), in their order: laid out otherwise as a widget is sized, it turns into that as into
+/// another form (see `widget::Readings::show`).
+pub fn arranged(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout) -> Vec<Option<ai::Arranged>> {
+    lanes
+        .iter()
+        .zip(layout.lanes())
+        .filter_map(|(lane, area)| match lane.blocks.as_slice() {
+            [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] => Some(ai::arranged(frame, scene, lane.ink, (dock, mounted, rich), (area.x, area.y, area.w, area.h))),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Draws one pass over the panel with its top-left corner at the origin,
 /// and returns where clicks and wheel turns land.
 pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, pass: Pass) -> Vec<HitBox> {
@@ -4496,8 +4510,10 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     // (What of it is drawn unnamed is its own: see `Canvas::scope`.)
     frame.scope(id);
     let mut kinds: Vec<String> = Vec::new();
-    // (The AI component's: each source's blocks in its ink from its head on, named by it.)
-    let (mut ink, mut source) = (ink, None);
+    // (The AI component's: each source's blocks in its ink from its head on, named by it (in a lane of its own, by its
+    // lane) till another head, the sessions at work, every source's, by none; and not by the lane they are in, each named
+    // alike however the component is laid out, a lane or a lane for each of its parts: see `ai::paint_shaped`.)
+    let (mut ink, mut named_by) = (ink, ai::Source::of(id));
     for block in &lane.blocks {
         let kind = match block {
             Block::Head { .. } | Block::Dated { .. } => "head",
@@ -4528,16 +4544,22 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Folder(_) => "folder",
             Block::Across(_) => "across",
         };
-        if let Block::Ai(ai::AiBlock::Head { source: of, .. }) = block {
-            (ink, source) = (theme.ink(of.id()), Some(*of));
+        match block {
+            Block::Ai(ai::AiBlock::Head { source: of, .. }) => (ink, named_by) = (theme.ink(of.id()), Some(*of)),
+            Block::Head { .. } => named_by = None,
+            _ => {}
         }
         let kind = match block {
-            Block::Ai(block) => format!("{}.{}", source.map_or("all", |source| source.id()), block.kind()),
+            Block::Ai(working @ ai::AiBlock::Working { .. }) => format!("all.{}", working.kind()),
+            Block::Ai(block) => format!("{}.{}", named_by.map_or("all", |source: ai::Source| source.id()), block.kind()),
             _ => kind.to_string(),
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind.clone());
-        let part = |what: &str| name(&format!("{kind}{nth}.{what}"));
+        let part = |what: &str| match block {
+            Block::Ai(_) => frame.key(&format!("{kind}{nth}.{what}")),
+            _ => name(&format!("{kind}{nth}.{what}")),
+        };
         // (What of it is not named otherwise, as a whole: see `Canvas::scope`.)
         frame.scope(&format!("{kind}{nth}"));
         let charted = matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. });
@@ -8176,6 +8198,67 @@ otepad.exe", "Notepad"),
         assert_eq!(spots(Shape::Least, (300.0, 240.0)), every);
         // (Today's figure first, the sources' turned to after it, by the wheel or its dots.)
         assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today), Hit::AiPage(0), Hit::AiPage(1), Hit::AiPage(2), Hit::AiPages(3, true)]);
+    }
+
+    /// The AI component's widget sized a DIP at a time, wider at several heights and taller at several widths: wherever
+    /// it is laid out alike (`ai::arranged`), it draws the same parts, each no more than a few DIPs from where it was;
+    /// where any of them would leap, or come or go, it is laid out otherwise, and a widget turns into that as into
+    /// another form (see `widget::Readings::show`). (Laid out otherwise without a turn, its parts leapt as the owner
+    /// sized it, unlike any other widget's.)
+    #[test]
+    fn the_ai_widget_is_laid_out_otherwise_wherever_its_parts_would_leap() {
+        use crate::ui::morph::Recorder;
+        let mut forms = std::collections::HashSet::new();
+        let mut leaps = Vec::new();
+        for (skin, lang) in [(Skin::Glass, Lang::Zh), (Skin::Fluent, Lang::En)] {
+        let theme = Theme::new(skin, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, lang, Some(&usage), now, Detail::Shape(Shape::Across), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        let told = (dock, mounted.as_slice(), rich.as_ref());
+        let ink = theme.ink(AI_LANE);
+        // How it is laid out `w` by `h`, and where each of its parts is drawn, by their names, in the order drawn.
+        let drawn = |(w, h): (f32, f32)| {
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            ai::paint_shaped(&recorder, &scene, ink, told, (0.0, 0.0, w, h), &mut Vec::new());
+            let mut parts: Vec<(String, (f32, f32, f32, f32))> = recorder.parts().iter().filter_map(|part| Some((part.key.clone()?, part.extent()?))).collect();
+            parts.sort_by(|a, b| a.0.cmp(&b.0));
+            (ai::arranged(&Nothing, &scene, ink, told, (0.0, 0.0, w, h)), parts)
+        };
+        // (As far as a part moves at most for a DIP the widget is sized by, laid out alike: a part in the middle of it
+        // half a DIP, one at its far end one, today's figure growing with it a little more.)
+        const LEAP: f32 = 3.0;
+        let paths: Vec<Vec<(f32, f32)>> = [50.0, 84.0, 106.0, 160.0, 240.0, 400.0, 613.0]
+            .into_iter()
+            .map(|h| (60..=1000).map(|w| (w as f32, h)).collect())
+            .chain([110.0, 200.0, 320.0, 500.0, 761.0, 830.0].into_iter().map(|w| (40..=900).map(|h| (w, h as f32)).collect()))
+            .collect();
+        for path in paths {
+            let mut last = drawn(path[0]);
+            for (n, &size) in path.iter().enumerate().skip(1) {
+                let now = drawn(size);
+                forms.insert(format!("{:?}", now.0.as_ref().map(std::mem::discriminant)));
+                if now.0 == last.0 {
+                    let names = |parts: &[(String, (f32, f32, f32, f32))]| parts.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+                    if names(&now.1) != names(&last.1) {
+                        leaps.push(format!("{skin:?} {:?} -> {size:?}, {:?}: parts {:?} -> {:?}", path[n - 1], now.0, names(&last.1), names(&now.1)));
+                    } else if let Some(((name, was), (_, is))) = last.1.iter().zip(&now.1).find(|((_, was), (_, is))| (was.0 - is.0).abs().max((was.1 - is.1).abs()).max((was.2 - is.2).abs()).max((was.3 - is.3).abs()) > LEAP) {
+                        leaps.push(format!("{skin:?} {:?} -> {size:?}, {:?}: {name} {was:?} -> {is:?}", path[n - 1], now.0));
+                    }
+                }
+                last = now;
+            }
+        }
+        }
+        // (Sized so, it takes more than a few of its forms.)
+        assert!(forms.len() >= 5, "{forms:?}");
+        assert!(leaps.is_empty(), "{} leaps, the first: {:#?}", leaps.len(), &leaps[..leaps.len().min(12)]);
     }
 
     /// The AI component's widget shows more the larger it is made, each form drawn only a little larger than designed

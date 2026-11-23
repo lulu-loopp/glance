@@ -1075,7 +1075,9 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
     match block {
         AiBlock::Head { source, title, device, aside, opened, flag } => {
             let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
-            part("mark");
+            // (Its mark and the mark after its name named as the dock's ring and its mark are, its strip's and as near a
+            // square: one moves into the other as a widget turns between them, see `morph`.)
+            frame.key(&format!("{}.mark", source.id()));
             frame.mark(source.mark(), Point { x: left + HEAD_MARK_SIDE / 2.0, y: y + HEAD / 2.0 }, HEAD_MARK_SIDE, theme.text, 1.0);
             let title_left = left + HEAD_MARK;
             let title_width = frame.measure(title, theme.title);
@@ -1084,7 +1086,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
             // (Its mark after its name: what its card says.)
             let title_width = match flag {
                 Some(flag) => {
-                    part("flag");
+                    frame.key(&format!("{}.flag", source.id()));
                     paint_flag(frame, theme, *flag, Point { x: title_left + title_width + 7.0, y: y + HEAD / 2.0 }, 7.0);
                     title_width + 12.0
                 }
@@ -1110,15 +1112,15 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
         AiBlock::Today { figure, unit, mounted } => {
             let bottom = y + PLOT;
             let figure_width = frame.measure(figure, theme.figure);
-            let unit_width = frame.measure(unit, theme.unit);
-            part("value");
+            // (Named as today's figure is on the dock, its strip and as near a square: see the head's mark.)
+            frame.key("ai:today.value");
             text_on_line(frame, figure, theme.figure, theme.text, left, bottom, theme.figure.size * theme.figure_line, width);
             part("unit");
             text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, (width - figure_width - 3.0).max(30.0));
             // How it mounted, in the room after the figure (the chart's room at least), over the quarters so far.
-            let spark_left = (left + LABEL + LABEL_GAP).max(left + figure_width + 3.0 + unit_width + 16.0);
-            let spark_width = left + width - spark_left;
-            if mounted.len() < 2 || spark_width < 40.0 {
+            let spark_width = spark_room(frame, theme, figure, unit, width);
+            let spark_left = left + width - spark_width;
+            if !mounts(mounted, spark_width) {
                 return;
             }
             part("chart");
@@ -1273,6 +1275,30 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
 /// it was a little lower than, as the owner saw.) Where two tell as much, the one nearer the widget's shape. On the
 /// dock's forms and as near a square, where the pointer rests to show a spot's card beside it.
 pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    match chosen(frame, scene, ink, told, room) {
+        Some((Chosen::Turned, _)) => {
+            paint_strip(frame, scene, told.0, room, true, hits);
+        }
+        Some((Chosen::Form(form), _)) => {
+            paint_form(form, frame, scene, ink, told, room, hits);
+        }
+        None => {}
+    }
+}
+
+/// How the component is laid out in a widget's `room` (see `paint_shaped`): none where nothing of it fits.
+pub(super) fn arranged(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32)) -> Option<Arranged> {
+    chosen(frame, scene, ink, told, room).map(|(_, arranged)| arranged)
+}
+
+/// What `paint_shaped` draws: a form, or the strip turned by the wheel.
+enum Chosen {
+    Form(Form),
+    Turned,
+}
+
+/// What `paint_shaped` draws in `room` (see it), and how that lays the component out.
+fn chosen(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32)) -> Option<(Chosen, Arranged)> {
     let (_, _, w, h) = room;
     let squares = (0..LEAST_PLANS).flat_map(|plan| [Form::Square { plan, listing: false }, Form::Square { plan, listing: true }]);
     let forms: Vec<Form> = if w >= h {
@@ -1281,24 +1307,24 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
         [Form::Down, Form::Column].into_iter().chain(squares).chain([Form::Board, Form::Across, Form::Strip, Form::Today]).collect()
     };
     let tally = Tally::new(frame);
-    let mut best: Option<(Form, (bool, usize))> = None;
+    let mut best: Option<(Form, (bool, usize), Arranged)> = None;
     for form in forms {
         tally.said.set(0);
-        let Some(models) = paint_form(form, &tally, scene, ink, told, room, &mut Vec::new()) else { continue };
+        let Some((models, arranged)) = paint_form(form, &tally, scene, ink, told, room, &mut Vec::new()) else { continue };
         let says = (models, tally.said.get());
-        if best.is_none_or(|(_, most)| says > most) {
-            best = Some((form, says));
+        if best.as_ref().is_none_or(|(_, most, _)| says > *most) {
+            best = Some((form, says, arranged));
         }
     }
     // No form holding every source (one figure alone fits): today's and as many sources as fit in a strip, the rest
     // turned to by the wheel (see `paint_strip`). (A widget only a little smaller than one holding them all showed
     // today's figure alone, as the owner saw: 379 by 106, and low ones 260 to 420 wide.)
-    if best.is_none_or(|(form, _)| form == Form::Today) && paint_strip(frame, scene, told.0, room, true, hits) {
-        return;
+    if best.as_ref().is_none_or(|(form, ..)| *form == Form::Today) {
+        if let Some(arranged) = paint_strip(&tally, scene, told.0, room, true, &mut Vec::new()) {
+            return Some((Chosen::Turned, arranged));
+        }
     }
-    if let Some((form, _)) = best {
-        paint_form(form, frame, scene, ink, told, room, hits);
-    }
+    best.map(|(form, _, arranged)| (Chosen::Form(form), arranged))
 }
 
 /// Laid out low and wide (see `paint_strip`): the least room down its band (its two lines over each other reach 17 over
@@ -1342,12 +1368,12 @@ pub fn pages(hits: &[HitBox], shown: &super::SourceShown, sources: Vec<String>) 
 /// again), and dots at the right telling which are shown of how many, a press on one turning to it. Its spots show
 /// their cards as the pointer rests on them, as the dock's do. Whether it fits (else nothing drawn): every source, or,
 /// `turn`, today's and one source at least.
-pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), turn: bool, hits: &mut Vec<HitBox>) -> bool {
+pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), turn: bool, hits: &mut Vec<HitBox>) -> Option<Arranged> {
     let (theme, lang) = (scene.theme, scene.lang);
     let count = dock.slots.len();
     let band = h.min(BAR_HEIGHT);
     if count == 0 || band < STRIP_LOW {
-        return false;
+        return None;
     }
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let big = Font { size: 14.0, weight: 650.0, ..theme.figure };
@@ -1384,9 +1410,10 @@ pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y,
         None => 0,
     };
     if per == 0 {
-        return false;
+        return None;
     }
     let (told, with_sessions) = whole.unwrap_or((false, false));
+    let arranged = Arranged::Strip { told, sessions: with_sessions, per };
     let paged = per < count;
     let shown_widths = if paged { vec![widest; count] } else { widths(told) };
     // The room left, between the parts (so far apart at most), the rest round them all (beside the dots, turned).
@@ -1463,7 +1490,7 @@ pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y,
         // Which are shown, of how many.
         pager_dots(frame, scene, (x + w - STRIP_PAD - PAGER / 2.0, middle - pill / 2.0, pill), count, (round_page(turned, count), per), hits);
         hits.push((x, y, w, h, Hit::AiPages(count as u32, false)));
-        return true;
+        return Some(arranged);
     }
     if with_sessions {
         let sessions_x = part_x + reach + gap;
@@ -1480,7 +1507,7 @@ pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y,
             frame.mark(source.mark(), Point { x: marks_left + at as f32 * (MARK + 3.0) + MARK / 2.0, y: middle + 7.0 }, MARK, theme.text2, 1.0);
         }
     }
-    true
+    Some(arranged)
 }
 
 /// The page shown first of `count` turned round, turned to `at` pages (see `Scrolls::fold`: within a turn or not).
@@ -1511,43 +1538,91 @@ enum Form {
     Today,
 }
 
-/// Draws the component in `form` in `room`: whether it tells what any source spent by model; none where it does not
-/// fit (nothing drawn).
-fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> Option<bool> {
+/// How wide the chart of how today's spending mounted is beside today's `figure` and `unit` in a lane `width` wide
+/// (DIPs, see `paint`): the room after them, the chart's room at least.
+fn spark_room(frame: &dyn Canvas, theme: &Theme, figure: &str, unit: &str, width: f32) -> f32 {
+    width - (LABEL + LABEL_GAP).max(frame.measure(figure, theme.figure) + 3.0 + frame.measure(unit, theme.unit) + 16.0)
+}
+
+/// Whether the chart of how today's spending mounted (over the quarters `mounted`) is drawn `spark_width` wide.
+fn mounts(mounted: &[f32], spark_width: f32) -> bool {
+    mounted.len() >= 2 && spark_width >= 40.0
+}
+
+/// Whether any of `blocks`, in a lane `width` wide (DIPs, within its pads), draws the chart of how today's spending
+/// mounted (see `paint`).
+fn charted(frame: &dyn Canvas, theme: &Theme, blocks: &[Block], width: f32) -> bool {
+    blocks.iter().any(|block| matches!(block, Block::Ai(AiBlock::Today { figure, unit, mounted }) if mounts(mounted, spark_room(frame, theme, figure, unit, width))))
+}
+
+/// How the component is laid out in a widget's room (see `paint_shaped`): its form, and what that form chose to tell and
+/// where (each by the room it is given). Laid out alike in a room a little larger or smaller, each of its parts is where
+/// it was, moved with the room; laid out otherwise, they leap, or come or go, and a widget sized turns into it as into
+/// another form (see `widget::Readings::show`).
+#[derive(Clone, PartialEq, Debug)]
+pub enum Arranged {
+    /// The dock's strip across or down (see `draw_dock`), `told`: its slots across naming their sources and when their
+    /// windows start again, or down telling each of their windows.
+    Dock { across: bool, told: bool },
+    /// As near a square (see `paint_least`): in `columns` of rings, telling what each source spent by model or not, the
+    /// first `listed` of its sessions, today's figure told as `of` (the first of its words that fit), and how it
+    /// mounted or not.
+    Square { plan: usize, listing: bool, columns: usize, models: bool, listed: usize, of: usize, mounted: bool },
+    /// Its parts side by side (see `board_of`), by their ids, column by column, and as many of its sessions under them,
+    /// telling what each source spent by model or not, and how today's spending mounted or not.
+    Board { columns: Vec<Vec<String>>, models: bool, sessions: usize, mounted: bool },
+    /// Its parts one over another (see `column_of`), telling what each source spent by model or not, as many of its
+    /// sessions under them, and how today's spending mounted or not.
+    Column { models: bool, sessions: usize, mounted: bool },
+    /// Low and wide (see `paint_strip`): what each figure is of or not, the sessions at work or not, and how many sources
+    /// are shown at once (fewer than there are: the rest turned to by the wheel).
+    Strip { told: bool, sessions: bool, per: usize },
+    /// One figure alone (see `paint_one`): the dots telling which is shown beside it or not, what it is of over it or
+    /// not, and its mark after it or not.
+    One { dots: bool, labelled: bool, flagged: bool },
+}
+
+/// Draws the component in `form` in `room`: whether it tells what any source spent by model, and how it is laid out;
+/// none where it does not fit (nothing drawn).
+fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> Option<(bool, Arranged)> {
     let (theme, lang) = (scene.theme, scene.lang);
     let (_, _, w, h) = room;
     fn models<'a>(mut blocks: impl Iterator<Item = &'a Block>) -> bool {
         blocks.any(|block| matches!(block, Block::Ai(AiBlock::Models(_))))
     }
+    fn sessions<'a>(blocks: impl Iterator<Item = &'a Block>) -> usize {
+        blocks.map(|block| if let Block::Ai(AiBlock::Sessions(rows)) = block { rows.len() } else { 0 }).sum()
+    }
     match form {
         Form::Across => {
             (w >= strip_least(frame, theme, dock) && h >= BAR_HEIGHT).then(|| hits.extend(draw_dock(frame, scene, dock, true, room)))?;
-            Some(false)
+            Some((false, Arranged::Dock { across: true, told: dock_tells(dock, true, (w, h)) }))
         }
         Form::Down => {
             let (dw, dh) = dock_size(false, dock.slots.len(), dock.today.is_some());
             (w >= dw * 0.8 && h >= dh).then(|| hits.extend(draw_dock(frame, scene, dock, false, room)))?;
-            Some(false)
+            Some((false, Arranged::Dock { across: false, told: dock_tells(dock, false, (w, h)) }))
         }
         Form::Square { plan, listing } => paint_least(frame, scene, ink, (dock, mounted, rich), room, (plan, listing), hits),
         Form::Board => {
             let board = board_of(rich, theme, lang, (w, h))?;
             let told = models(board.lanes().flat_map(|lane| &lane.blocks));
             draw_board(frame, scene, &board, room, hits);
-            Some(told)
+            let columns = board.columns.iter().map(|lanes| lanes.iter().map(|lane| lane.id.clone()).collect()).collect();
+            let mounted = board.columns.iter().flatten().any(|lane| charted(frame, theme, &lane.blocks, board.column(theme, w)));
+            Some((told, Arranged::Board { columns, models: told, sessions: sessions(board.sessions.iter().flat_map(|lane| &lane.blocks)), mounted }))
         }
         Form::Column => {
             (w - 2.0 * theme.pad_x >= BOARD_COLUMN_LEAST).then_some(())?;
             let lane = column_of(rich, theme, lang, (w, h))?;
             let told = models(lane.blocks.iter());
+            let shown = sessions(lane.blocks.iter());
+            let mounted = charted(frame, theme, &lane.blocks, w - 2.0 * theme.pad_x);
             draw_column(frame, scene, ink, lane, room, hits);
-            Some(told)
+            Some((told, Arranged::Column { models: told, sessions: shown, mounted }))
         }
-        Form::Strip => paint_strip(frame, scene, dock, room, false, hits).then_some(false),
-        Form::Today => {
-            paint_one(frame, scene, dock, room, hits);
-            Some(false)
-        }
+        Form::Strip => paint_strip(frame, scene, dock, room, false, hits).map(|arranged| (false, arranged)),
+        Form::Today => Some((false, paint_one(frame, scene, dock, room, hits))),
     }
 }
 
@@ -1648,6 +1723,12 @@ impl Board {
         columns + if self.sessions.is_empty() { 0.0 } else { ACROSS_ROW_GAP + across_tall(&self.sessions) }
     }
 
+    /// How wide each of its columns is drawn in a room `w` wide (DIPs, see `draw_board`), within their pads.
+    fn column(&self, theme: &Theme, w: f32) -> f32 {
+        let per = self.columns.len().max(self.sessions.len()).max(1) as f32;
+        (w - 2.0 * theme.pad_x - (per - 1.0) * ACROSS_GAP) / per
+    }
+
     /// Every lane of it, its parts' and its sessions'.
     pub(super) fn lanes(&self) -> impl Iterator<Item = &Lane> {
         self.columns.iter().flatten().chain(&self.sessions)
@@ -1714,9 +1795,8 @@ pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32
 /// are (see `paint_across`), and its sessions under them all, each under its column.
 fn draw_board(frame: &dyn Canvas, scene: &Scene, board: &Board, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let (left, width) = (x + theme.pad_x, w - 2.0 * theme.pad_x);
-    let per = board.columns.len().max(board.sessions.len()).max(1) as f32;
-    let column = (width - (per - 1.0) * ACROSS_GAP) / per;
+    let left = x + theme.pad_x;
+    let column = board.column(theme, w);
     let top = y + theme.pad_top + (h - theme.pad_top - theme.pad_bottom - board.tall()) / 2.0;
     let mut paint = |lane: &Lane, at: usize, lane_top: f32, tall: f32| {
         let area = Rect { x: left + at as f32 * (column + ACROSS_GAP) - theme.pad_x, y: lane_top - theme.pad_top, w: column + 2.0 * theme.pad_x, h: tall + theme.pad_top + theme.pad_bottom };
@@ -1798,7 +1878,7 @@ const LEAST_PLANS: usize = 4;
 /// foot giving way to them): what was spent by model before the sessions, as in every form. Whether it tells what any
 /// source spent by model; none where it does not fit (nothing drawn): its rings, or the room `plan` is for, or what it
 /// is to tell (where there is none, laid out as another plan is).
-pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), (plan, listing): (usize, bool), hits: &mut Vec<HitBox>) -> Option<bool> {
+pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), (plan, listing): (usize, bool), hits: &mut Vec<HitBox>) -> Option<(bool, Arranged)> {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let count = dock.slots.len();
@@ -1847,7 +1927,9 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         hits.push((sx, sy, sw, sh, Hit::AiSlot(spot)));
     };
     // What today's figure is of, in as many words as fit.
-    let of = [lang.pick("今日 tokens", "Tokens today"), lang.pick("今日", "Today")].into_iter().find(|of| frame.measure(of, label) <= width).unwrap_or(lang.pick("今日", "Today"));
+    let ofs = [lang.pick("今日 tokens", "Tokens today"), lang.pick("今日", "Today")];
+    let told_as = ofs.iter().position(|of| frame.measure(of, label) <= width).unwrap_or(ofs.len() - 1);
+    let of = ofs[told_as];
     let rows = count.div_ceil(columns) as f32;
     let rings_tall = rows * (ring_room + under) + (rows - 1.0) * 8.0;
     // Listing, what each source spent by model, under its ring, where there is room for all of it; the sessions after
@@ -1911,7 +1993,8 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         None
     };
     let spark_left = left + figure_width.unwrap_or(0.0) + 16.0;
-    if figure_width.is_some() && roomy && mounted.len() >= 2 && left + width - spark_left >= 40.0 {
+    let sparked = figure_width.is_some() && roomy && mounted.len() >= 2 && left + width - spark_left >= 40.0;
+    if sparked {
         let (spark_top, spark_foot) = (row + 6.0, rings_top - 16.0);
         let spark_width = left + width - spark_left;
         let points: Vec<Point> = mounted
@@ -1974,7 +2057,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
     if listed > 0 {
         paint_across(frame, scene, &[sessions_lanes(&sessions[..listed], list_columns, theme, lang)], (left, list_top, width), Pass::Content, hits);
     }
-    Some(models_shown)
+    Some((models_shown, Arranged::Square { plan, listing, columns, models: models_shown, listed, of: told_as, mounted: sparked }))
 }
 
 /// One figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
@@ -1982,7 +2065,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
 /// used, or what it has), turned round to by the wheel, a figure a notch (`List::AiSources`, as in `paint_strip`: past
 /// the last, the first again), with dots at the right telling which is shown of how many where there is room for them
 /// beside it, a press on one turning to it.
-fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> Arranged {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let inset = 14.0_f32.min(w / 6.0);
@@ -1995,6 +2078,8 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
     let font = Font { size: (w * 0.26).clamp(11.0, 22.0), weight: 650.0, ..theme.figure };
     let tall = (label.size + 4.0 + font.size).min((h - 2.0 * inset).max(0.0));
     let middle = y + h / 2.0;
+    let labelled = h >= 60.0;
+    let mut arranged = Arranged::One { dots: pager > 0.0, labelled, flagged: false };
     let first = if paged { round_page(scene.scrolls.at(List::AiSources) / PAGE, count) } else { 0 };
     // (Today's the first page, where it is shown: a source's place one on.)
     let slot = if today_first { first.checked_sub(1) } else { Some(first) }.map(|at| dock.slots.get(at));
@@ -2005,7 +2090,7 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
             let of = if slot.label.is_empty() { name.to_string() } else { format!("{name} · {}", slot.label) };
             (Spot::Ring(slot.source), of, &slot.figure, figure_ink(theme, slot), slot.flag)
         }
-        _ => return,
+        _ => return arranged,
     };
     if scene.hover == Some(Hit::AiSlot(spot)) {
         frame.fill_rounded(theme.hover, left - 4.0, middle - tall / 2.0 - 4.0, width + 8.0, tall + 8.0, 12.0);
@@ -2015,18 +2100,19 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
         Spot::Ring(source) => source.id(),
         _ => "ai:today",
     };
-    if h >= 60.0 {
+    if labelled {
         frame.key(&format!("{key}.label"));
         centred(frame, &of, label, theme.text3, left + width / 2.0, middle - tall / 2.0, width);
     }
     frame.key(&format!("{key}.value"));
-    let figure_top = if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 };
+    let figure_top = if labelled { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 };
     centred(frame, figure, font, color, left + width / 2.0, figure_top, width);
     // (Its mark just after the figure, at its top, where there is room for it.)
     if let Some(flag) = flag {
         let side = (font.size * 0.42).clamp(6.0, 9.0);
         let after = left + width / 2.0 + frame.measure(figure, font).min(width) / 2.0 + 2.0 + side / 2.0;
         if after + side / 2.0 <= left + width {
+            arranged = Arranged::One { dots: pager > 0.0, labelled, flagged: true };
             frame.key(&format!("{key}.flag"));
             paint_flag(frame, theme, flag, Point { x: after, y: figure_top + font.size * 0.25 }, side);
         }
@@ -2037,6 +2123,7 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
         }
         hits.push((x, y, w, h, Hit::AiPages(count as u32, today_first)));
     }
+    arranged
 }
 
 /// The dots that tell which of `count` turned round are shown (`shown`: the first of them and how many, past the last
@@ -2308,7 +2395,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         let band = h.min(BAR_HEIGHT);
         let pill = band - 10.0;
         let at = |x: f32, wide: f32| ((x, middle - band / 2.0, wide, band), (x, middle - pill / 2.0, wide, pill, pill / 2.0));
-        let named = slot_w >= STRIP_NAMED;
+        let named = dock_tells(dock, true, (w, h));
         let mut x = x0 + DOCK_PAD + gap / 2.0 + round_it / 2.0;
         if let Some(today) = &dock.today {
             let (hit, plate) = at(x, BAR_END);
@@ -2370,9 +2457,8 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
             slot.windows.iter().take(DOWN_LINES).map(|(name, used)| format!("{name} {:.0}%", used * 100.0)).collect()
         }
     };
-    let most = dock.slots.iter().map(|slot| lines_of(slot).len()).max().unwrap_or(0);
-    let more = most.saturating_sub(1) as f32 * DOWN_LINE;
-    let lined = more > 0.0 && h >= natural.1 + count as f32 * more;
+    let more = down_more(dock);
+    let lined = dock_tells(dock, false, (w, h));
     let slot_h = DOCK_SLOT + if lined { more } else { 0.0 };
     let tall = natural.1 + count as f32 * (slot_h - DOCK_SLOT);
     let gap = ((h - tall) / parts).clamp(0.0, DOWN_GAP);
@@ -2410,6 +2496,28 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     centred(frame, &sessions.1, big, theme.text, centre, y + 19.0, w - 10.0);
     marks(centre, y + 44.0);
     hits.into_inner()
+}
+
+/// Whether the dock `w` by `h` (DIPs) tells more of each source (see `draw_dock`): across, its slots wide enough to name
+/// their sources and when their windows start again; down, tall enough to tell each of their windows.
+fn dock_tells(dock: &Dock, across: bool, (w, h): (f32, f32)) -> bool {
+    let count = dock.slots.len();
+    let natural = dock_size(across, count, dock.today.is_some());
+    if across {
+        let extra = (w - natural.0).max(0.0);
+        let grow = (extra / count.max(1) as f32).min(STRIP_GROW);
+        BAR_SLOT + grow - (natural.0 - w).max(0.0) / count.max(1) as f32 >= STRIP_NAMED
+    } else {
+        let more = down_more(dock);
+        more > 0.0 && h >= natural.1 + count as f32 * more
+    }
+}
+
+/// How much taller each slot of the dock down is to tell each of its windows (see `draw_dock`): a line for each past
+/// the first, of the source with the most (none where none tells more than one).
+fn down_more(dock: &Dock) -> f32 {
+    let lines = |slot: &Slot| if slot.windows.is_empty() { [&slot.label, &slot.resets].into_iter().filter(|line| !line.is_empty()).count() } else { slot.windows.len().min(DOWN_LINES) };
+    dock.slots.iter().map(lines).max().unwrap_or(0).saturating_sub(1) as f32 * DOWN_LINE
 }
 
 /// The fonts of a slot's figure and of what it is of, on the dock.

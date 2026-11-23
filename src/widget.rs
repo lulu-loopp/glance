@@ -1395,6 +1395,18 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
             readings.morph = Some((now, Before::Drawn(was.as_was(|| render::record(frame, scene, &old_lanes, &old.layout, small, 1.0, picture.at)))));
         }
     }
+    // Its lanes that lay themselves out in the room they are given (the AI component's) laid out otherwise than they
+    // were drawn last (it is sized, or what they tell has changed): turning from how they were drawn, as into another
+    // form, while it is sized by hand too (laid out otherwise, its parts leapt as the hand sized it), from where they
+    // are now if they were still turning (a turn begun this frame begun from how they were drawn already).
+    let arranged = view::arranged(frame, scene, picture.lanes, &shown.layout);
+    if let Some((_, old)) = readings.arranged.replace((arranged.clone(), shown.clone())).filter(|(was, _)| *was != arranged) {
+        match &readings.morph {
+            None => readings.morph = Some((now, Before::Shown(old))),
+            Some((since, _)) if *since != now => readings.morph = Some((now, Before::Drawn(std::mem::take(&mut readings.drawn)))),
+            Some(_) => {}
+        }
+    }
     let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
     let old = match &readings.morph {
         Some((_, Before::Shown(old))) => Some((view::lanes_at(scene, |_| old.detail), placed(old), old.clone())),
@@ -1443,6 +1455,31 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
     }
 }
 
+impl Readings {
+    /// Shows `shown`, laid out for the widget's size (`by_hand`: as the hand sizes it): turning into it from what showed
+    /// where it is another layout (see `turns_into`), from where it is now if it was still turning; the turn over once
+    /// it has taken `MORPH`. The workbench's sized by hand while still turning: the turn ends at once (see
+    /// `turns_into`). (The AI component's turns while sized by hand too, as it is laid out otherwise in it: see
+    /// `paint_readings`.)
+    fn show(&mut self, shown: Shown, by_hand: bool, now: Instant, theme: &Theme) {
+        if self.lanes == crate::settings::Part::Workbench && by_hand && self.morph.take().is_some() {
+            self.drawn.clear();
+            self.morph_layer.release();
+        }
+        if let Some(last) = self.last.take().filter(|last| turns_into(last, &shown, self.lanes != crate::settings::Part::Monitor, by_hand, theme)) {
+            note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
+            let before = if self.morph.is_some() { Before::Drawn(std::mem::take(&mut self.drawn)) } else { Before::Shown(last) };
+            self.morph = Some((now, before));
+        }
+        self.last = Some(shown);
+        if self.morph.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= MORPH) {
+            self.morph = None;
+            self.drawn.clear();
+            self.morph_layer.release();
+        }
+    }
+}
+
 /// The readings a widget shows, and what it keeps of them from frame to frame.
 struct Readings {
     layers: PanelLayers,
@@ -1454,6 +1491,9 @@ struct Readings {
     morph: Option<(Instant, Before)>,
     drawn: Vec<Part>,
     morph_layer: Layer,
+    /// How its lanes that lay themselves out in the room they are given were laid out as they were last drawn, and what
+    /// it showed then (see `view::arranged`).
+    arranged: Option<(Vec<Option<view::ai::Arranged>>, Shown)>,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
     /// What its station showed as it was last drawn, with the lanes it was drawn with and how they were laid out:
@@ -1485,7 +1525,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), arranged: None, away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -4722,24 +4762,7 @@ impl Widget {
                 };
                 self.zoom = shown.zoom;
                 self.shown = shown.size;
-                // The workbench's sized by hand while still turning: the turn ends at once (see `turns_into`).
-                if readings.lanes != crate::settings::Part::Monitor && sized_to.is_some() && readings.morph.take().is_some() {
-                    readings.drawn.clear();
-                    readings.morph_layer.release();
-                }
-                // Another layout: what showed turns into it, from where it is now if
-                // it was still turning (see `turns_into`).
-                if let Some(last) = readings.last.take().filter(|last| turns_into(last, &shown, readings.lanes != crate::settings::Part::Monitor, sized_to.is_some(), &theme)) {
-                    note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
-                    let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
-                    readings.morph = Some((now, before));
-                }
-                readings.last = Some(shown);
-                if readings.morph.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= MORPH) {
-                    readings.morph = None;
-                    readings.drawn.clear();
-                    readings.morph_layer.release();
-                }
+                readings.show(shown, sized_to.is_some(), now, &theme);
                 moving |= readings.morph.is_some();
             }
             // What plays is laid out for the room it is given (see `music::Layout`), as large as the hand makes it while
@@ -5946,6 +5969,65 @@ mod tests {
                 assert_eq!(page(&shown.drawn_at(size, false)), page(&shown.layout), "{skin:?} {size:?}");
             }
         }
+    }
+
+    /// The AI component's widget sized by hand across where it is laid out otherwise (low and wide, its rings in a strip,
+    /// then taller, as near a square: see `view::ai::arranged`) turns into that, as a widget of readings turns into
+    /// another form while sized: the turn begun as it is drawn, kept as the hand goes on sizing it (not ended at once
+    /// as the workbench's is), its parts drawn on their way, and over after `MORPH`. (It showed each layout at once,
+    /// its parts leaping, unlike any other widget, as the owner saw.)
+    #[test]
+    fn the_ai_widget_sized_by_hand_turns_where_it_is_laid_out_otherwise() {
+        let _device = gfx::held().unwrap();
+        let theme = Theme::new(Skin::Glass, true);
+        let info = view::tests::info();
+        let shown_ids = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let prefs = Prefs::resolve(&serde_json::json!({ "ai": shown_ids }), &[]).holding(crate::settings::Part::Ai);
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Shape(view::Shape::Least), columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let shown_at = |room: (f32, f32)| {
+            let (choice, layout, detail) = laid_out(&scene, &theme, crate::settings::Part::Ai, choice, false, Some(room), (1920.0, 1080.0));
+            Shown { form: choice.form, zoom: choice.scale, size: (layout.width(), layout.height()), layout, small: None, detail }
+        };
+        let (low, square) = (shown_at((520.0, 96.0)), shown_at((520.0, 320.0)));
+        let gfx = Gfx::new().expect("graphics");
+        let mut readings = Readings { lanes: crate::settings::Part::Ai, ..Readings::new(choice) };
+        // Drawn as the widget draws it at `at`, as `shown` shows it: how it is laid out, and what it drew turning.
+        let draw = |readings: &mut Readings, shown: &Shown, at: Instant| {
+            let lanes = view::lanes_at(&scene, |_| shown.detail);
+            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &shown.layout, small: None, size: shown.size, at: (0.0, 0.0), edge: None, backdrop: None, frost: 0.0, rough: false };
+            let mut arranged = Vec::new();
+            gfx.draw_offscreen((600, 400), 1.0, |frame| {
+                arranged = view::arranged(frame, &scene, &lanes, &shown.layout);
+                let keep = |old: &Shown| (old.zoom / shown.zoom, (0.0, 0.0));
+                paint_readings(frame, readings, &scene, &picture, &keep, Matrix3x2::identity(), 1.0, None, Some(&[][..]), at);
+            })
+            .expect("drawn");
+            (arranged, readings.drawn.clone())
+        };
+        let start = Instant::now();
+        let frame = Duration::from_millis(16);
+        readings.show(low.clone(), true, start, &theme);
+        let (low_arranged, _) = draw(&mut readings, &low, start);
+        assert!(readings.morph.is_none());
+        readings.show(square.clone(), true, start + frame, &theme);
+        let (square_arranged, _) = draw(&mut readings, &square, start + frame);
+        assert!(low_arranged.iter().all(Option::is_some) && !low_arranged.is_empty(), "{low_arranged:?}");
+        assert_ne!(low_arranged, square_arranged, "laid out alike: no test");
+        assert!(readings.morph.is_some(), "laid out otherwise as it is sized by hand, it does not turn");
+        // The hand goes on sizing it: still turning, its parts on their way.
+        let halfway = start + frame + MORPH / 2;
+        readings.show(square.clone(), true, halfway, &theme);
+        assert!(readings.morph.is_some(), "its turn ended as the hand sized it on");
+        let (_, on_its_way) = draw(&mut readings, &square, halfway);
+        assert!(!on_its_way.is_empty());
+        readings.show(square.clone(), true, start + frame + MORPH, &theme);
+        let _ = draw(&mut readings, &square, start + frame + MORPH);
+        assert!(readings.morph.is_none());
+        drop(readings);
+        drop(gfx);
     }
 
     /// A workbench widget sized by hand shows each layout the hand makes at once (turning behind the hand, its cards
