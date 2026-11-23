@@ -65,11 +65,10 @@ fn apart(things: &[Thing]) -> (Vec<u64>, Vec<recent::Key>) {
     (ids, keys)
 }
 
-/// The files come lately `keys` marked with `mark`, and what holds them on the station told (see `shelf::Item::held`).
+/// The files come lately `keys` marked with `mark` (what holds them on the station told as the list is: see `lib`).
 fn mark_files(keys: Vec<recent::Key>, mark: recent::Mark) {
     if !keys.is_empty() {
         recent::mark(keys, mark);
-        run::ask(run::Ask::Held);
     }
 }
 

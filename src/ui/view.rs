@@ -1061,15 +1061,16 @@ impl LanePage {
 
 impl Choice {
     /// The choices over the page `tab`: all of it, what is pinned on it, its tags, and its kinds of things. What is on the
-    /// station has none of them while nothing on it is pinned or tagged; the files come lately have what is pinned among
-    /// them while anything is.
+    /// station has none of them while nothing on it is pinned and it has no tag to show (see `station::tags_of`); the
+    /// files come lately have what is pinned among them while anything is.
     fn of(tab: Tab, shown: &crate::station::run::Shown, files: &[crate::station::recent::Came], lang: Lang) -> Vec<Choice> {
         use crate::station::{recent, shelf};
         let here = |item: &&shelf::Item| item.copied == matches!(tab, Tab::Copies(_));
         let recent_page = matches!(tab, Tab::Recent(_));
         let pinned = if recent_page { files.iter().any(|came| came.marks.pinned) } else { shown.items.iter().filter(here).any(|item| item.pinned) };
         let of = |tag: u32| if recent_page { files.iter().any(|came| came.marks.tags.contains(&tag)) } else { shown.items.iter().filter(here).any(|item| item.tags.contains(&tag)) };
-        if matches!(tab, Tab::Shelf(_)) && tab == tab.page() && !pinned && !shown.tags.iter().any(|tag| of(tag.id)) {
+        let tags = crate::station::tags_of(&shown.tags, of, tab.tag(), &shown.items, files);
+        if matches!(tab, Tab::Shelf(_)) && tab == tab.page() && !pinned && tags.is_empty() {
             return Vec::new();
         }
         let choice = |tab: Tab, name: &str, tag: bool| Choice { tab, name: name.to_string(), tag };
@@ -1077,7 +1078,7 @@ impl Choice {
         if pinned || tab == tab.pinned() || matches!(tab, Tab::Copies(_)) {
             choices.push(choice(tab.pinned(), lang.pick("已固定", "Pinned"), false));
         }
-        choices.extend(crate::station::tags_of(&shown.tags, of, tab.tag(), &shown.items, files).into_iter().map(|tag| choice(tab.tagged(tag.id), &tag.name, true)));
+        choices.extend(tags.into_iter().map(|tag| choice(tab.tagged(tag.id), &tag.name, true)));
         match tab {
             Tab::Shelf(_) => {}
             Tab::Copies(_) => choices.extend(shelf::Filter::KINDS.map(|kind| {
@@ -1467,6 +1468,11 @@ impl Lately {
         let listed = crate::station::recent::page(files, filter, folded);
         let rows = listed.first.iter().chain(&listed.rest).map(|(filter, row)| Lately::row(row, *filter, tags, lang, now)).collect();
         (rows, Groups::of(&listed, folded))
+    }
+
+    /// The page's rows of `files` (newest first) that `filter` takes, with no headings: all that is pinned first.
+    fn every(files: &[crate::station::recent::Came], filter: crate::station::recent::Filter, lang: Lang, now: u64) -> Vec<Lately> {
+        crate::station::recent::page(files, filter, false).every().iter().map(|(filter, row)| Lately::row(row, *filter, &[], lang, now)).collect()
     }
 
     /// What `entry` is as its row shows it, `files` being the files come lately (see `station::recent::files_of`).
@@ -2814,15 +2820,17 @@ fn put_on(items: &[crate::station::shelf::Item]) -> impl Iterator<Item = &crate:
 }
 
 /// The things a page of the station's lane lists, in its order, each as a press on it finds it (where things are
-/// chosen together: see `station::select`).
-pub fn lane_order(page: Tab) -> Vec<Hit> {
+/// chosen together: see `station::select`): under its headings (`whole`: the lane shows it whole, under its head), or
+/// with none, as a grid of its things shows it (all that is pinned first, see `bench`).
+pub fn lane_order(page: Tab, whole: bool) -> Vec<Hit> {
     use crate::station::{recent, shelf};
     let shown = crate::station::run::shown();
     let page = page.there(&shown);
-    let folded = shown.folded.on(page.station_page());
+    let folded = whole && shown.folded.on(page.station_page());
     let listed = |copied: bool, filter: shelf::Filter| {
         let listed = shelf::listed(&shown.items, copied, filter, folded);
-        listed.first.into_iter().chain(listed.rest).map(move |item| if copied { Hit::Copied(item.id) } else { Hit::Shelf(item.id) }).collect()
+        let hits = |items: Vec<&shelf::Item>| items.into_iter().map(|item| if copied { Hit::Copied(item.id) } else { Hit::Shelf(item.id) }).collect();
+        if whole { hits(listed.first.into_iter().chain(listed.rest).collect()) } else { hits(listed.every()) }
     };
     match page {
         Tab::Shelf(filter) => listed(false, filter),
@@ -2830,7 +2838,8 @@ pub fn lane_order(page: Tab) -> Vec<Hit> {
         Tab::Recent(filter) => {
             let files = recent::shown();
             let listed = recent::page(&files, filter, folded);
-            listed.first.iter().chain(&listed.rest).map(|(filter, row)| Hit::Recent(recent::Entry::of_row(row, *filter))).collect()
+            let rows = if whole { listed.first.into_iter().chain(listed.rest).collect() } else { listed.every() };
+            rows.iter().map(|(filter, row)| Hit::Recent(recent::Entry::of_row(row, *filter))).collect()
         }
     }
 }
@@ -6662,15 +6671,12 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             let shown = crate::station::run::shown();
             let folder = crate::station::folder::Folder::own();
             let tab = scene.tab.there(&shown);
-            let folded = shown.folded.on(tab.station_page());
             let tile = |item: &crate::station::shelf::Item| Tile::of(item, &[], &folder, lang, now);
             let tiles: Vec<(Tile, Hit)> = match tab {
                 Tab::Shelf(_) => put_on(&shown.items).map(|item| (tile(item), Hit::Shelf(item.id))).collect(),
-                Tab::Copies(filter) => {
-                    let listed = crate::station::shelf::listed(&shown.items, true, filter, folded);
-                    listed.first.into_iter().chain(listed.rest).map(|item| (tile(item), Hit::Copied(item.id))).collect()
-                }
-                Tab::Recent(filter) => Lately::page(&crate::station::recent::shown(), filter, folded, &[], lang, now).0.iter().map(|row| (row.tile(false, false), Hit::Recent(row.entry))).collect(),
+                // (Its page whole, with no headings: all that is pinned first, folded away or not. See `lane_order`.)
+                Tab::Copies(filter) => crate::station::shelf::listed(&shown.items, true, filter, false).every().into_iter().map(|item| (tile(item), Hit::Copied(item.id))).collect(),
+                Tab::Recent(filter) => Lately::every(&crate::station::recent::shown(), filter, lang, now).iter().map(|row| (row.tile(false, false), Hit::Recent(row.entry))).collect(),
             };
             Bench::Station { tiles, tab }
         }
@@ -9426,6 +9432,9 @@ otepad.exe", "Notepad"),
         assert_eq!(names(Tab::Shelf(Filter::Tagged(2)), &some, &files), ["全部", "标签1", "标签2", "标签4"]);
         let pinned = Shown { items: vec![item(1, false, true, &[])], ..Default::default() };
         assert_eq!(names(Tab::default(), &pinned, &[]), ["全部", "已固定"]);
+        // (A tag nothing has, with nothing on the station pinned or tagged: there too, for it to be taken away.)
+        let unused = Shown { tags: tags(&[5]), ..none };
+        assert_eq!(names(Tab::default(), &unused, &[came(false, &[])]), ["全部", "标签5"]);
     }
 
     /// A page's choices more than fit are turned across by the wheel, fading at the ends past which there are more. The
@@ -10393,20 +10402,28 @@ seven".into()));
             item(5, words("c"), false),
         ];
         crate::station::run::pretend(items.clone(), crate::settings::ShelfView::Cards);
-        assert_eq!(lane_order(Tab::default()), [Hit::Shelf(5), Hit::Shelf(1)]);
-        assert_eq!(lane_order(Tab::Copies(Filter::All)), [Hit::Copied(4), Hit::Copied(3), Hit::Copied(2)]);
-        assert_eq!(lane_order(Tab::Copies(Filter::Words)), [Hit::Copied(3), Hit::Copied(2)]);
+        assert_eq!(lane_order(Tab::default(), true), [Hit::Shelf(5), Hit::Shelf(1)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::All), true), [Hit::Copied(4), Hit::Copied(3), Hit::Copied(2)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::Words), true), [Hit::Copied(3), Hit::Copied(2)]);
         // (What is pinned first, on its page alone. In a row of all that is on the station, as it came.)
         let pinned = |id: u64, copied: bool, at: bool, tags: &[u32]| Item { pinned: at, tags: tags.to_vec(), ..item(id, words("d"), copied) };
         crate::station::run::pretend(vec![pinned(1, false, true, &[]), pinned(2, true, true, &[]), pinned(3, false, false, &[7]), pinned(4, true, false, &[7]), pinned(5, false, false, &[])], crate::settings::ShelfView::Cards);
         crate::station::run::pretend_tags(vec![crate::station::shelf::Tag { id: 7, name: "项目".into() }], Default::default());
-        assert_eq!(lane_order(Tab::default()), [Hit::Shelf(1), Hit::Shelf(5), Hit::Shelf(3)]);
-        assert_eq!(lane_order(Tab::Copies(Filter::All)), [Hit::Copied(2), Hit::Copied(4)]);
-        assert_eq!(lane_order(Tab::Shelf(Filter::Pinned)), [Hit::Shelf(1)]);
-        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(7))), [Hit::Shelf(3)]);
+        assert_eq!(lane_order(Tab::default(), true), [Hit::Shelf(1), Hit::Shelf(5), Hit::Shelf(3)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::All), true), [Hit::Copied(2), Hit::Copied(4)]);
+        assert_eq!(lane_order(Tab::Shelf(Filter::Pinned), true), [Hit::Shelf(1)]);
+        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(7)), true), [Hit::Shelf(3)]);
         // (A tag there is no more: all of the page.)
-        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(8))), lane_order(Tab::default()));
+        assert_eq!(lane_order(Tab::Shelf(Filter::Tagged(8)), true), lane_order(Tab::default(), true));
         assert_eq!(row_order(), [Hit::Shelf(5), Hit::Shelf(3), Hit::Shelf(1)]);
+        // (Under its headings, the first pinned alone, or, folded away, none. In a grid of its things, all, first.)
+        crate::station::run::pretend((1..=6).map(|id| pinned(id, true, id > 1, &[])).collect(), crate::settings::ShelfView::Cards);
+        let copies = |ids: &[u64]| ids.iter().map(|id| Hit::Copied(*id)).collect::<Vec<_>>();
+        assert_eq!(lane_order(Tab::Copies(Filter::All), true), copies(&[6, 5, 4, 1]));
+        assert_eq!(lane_order(Tab::Copies(Filter::All), false), copies(&[6, 5, 4, 3, 2, 1]));
+        crate::station::run::pretend_tags(Vec::new(), crate::settings::PinsFolded { copies: true, ..Default::default() });
+        assert_eq!(lane_order(Tab::Copies(Filter::All), true), copies(&[1]));
+        assert_eq!(lane_order(Tab::Copies(Filter::All), false), copies(&[6, 5, 4, 3, 2, 1]));
         crate::station::run::pretend(items, crate::settings::ShelfView::Cards);
         crate::station::run::pretend_copied(vec![crate::station::run::Copied::Item(2), crate::station::run::Copied::Item(5)]);
         assert_eq!(copied().map(|(_, hits)| hits), Some(vec![Hit::Shelf(2), Hit::Copied(2), Hit::Shelf(5), Hit::Copied(5)]));

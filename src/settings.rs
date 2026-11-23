@@ -1266,11 +1266,14 @@ pub fn local_dir() -> PathBuf {
 }
 
 /// In a test, a folder of this test process's own, where both are (a test never reads or writes the user's: run as
-/// a release, as tests are, they are the installed Glance's).
+/// a release, as tests are, they are the installed Glance's). There, as Glance's own are for it, whichever test asks
+/// first.
 #[cfg(all(windows, test))]
 fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
     let which = if *known == FOLDERID_RoamingAppData { "roaming" } else { "local" };
-    std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join(which)
+    let folder = std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join(which);
+    std::fs::create_dir_all(&folder).expect("a test's own folder");
+    folder
 }
 
 #[cfg(all(windows, not(test)))]

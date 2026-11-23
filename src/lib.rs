@@ -595,7 +595,12 @@ pub fn run() {
     // The station (its own thread: see `station::run`), the panel woken as what it holds changes.
     station::run::start(|| app().controller.wake());
     station::thumbs::start(|| app().controller.wake());
-    station::recent::start(|| app().controller.wake());
+    // (The files come lately as they change: what holds those that stay on the station told too, whatever changed
+    // them, a mark, a tag gone or the list turned on again: see `shelf::Item::held`.)
+    station::recent::start(|| {
+        app().controller.wake();
+        station::run::ask(station::run::Ask::Held);
+    });
     // The folders whose sizes the storage component tells, counted as it is looked at (see `folders`).
     folders::start(&app().settings.lock().unwrap().storage_folders.clone(), || app().controller.folders_changed());
     // Files sent from devices nearby, by the phone remote's helper (see `nearby`).

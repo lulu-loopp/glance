@@ -31,18 +31,17 @@ impl Keys {
     }
 }
 
-/// A list things are chosen in: the window it shows in (its handle, as a number) and the page of the lane it is, or
-/// (`row`) all that is on the station, in a row, or a grid, of it.
+/// A list things are chosen in: the window it shows in (its handle, as a number), the page of the lane it is, and
+/// whether the lane shows it whole, under its head (see `view::lane_whole`), rather than as a row, or a grid, of things.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct On {
     pub window: isize,
     pub page: Tab,
-    pub row: bool,
+    pub whole: bool,
 }
 
 impl On {
-    /// The list `hit` is in, in `window`, its lane showing the page `shown`, whole or not (see `view::lane_whole`: a
-    /// thing on the station shows whatever page is chosen where the lane is a row of them).
+    /// The list `hit` is in, in `window`, its lane showing the page `shown`, whole or not.
     pub fn of(window: isize, hit: Hit, shown: Tab, whole: bool) -> On {
         let page = match (hit, shown) {
             (Hit::Copied(_), Tab::Copies(_)) | (Hit::Recent(_), Tab::Recent(_)) | (Hit::Shelf(_), Tab::Shelf(_)) => shown,
@@ -50,12 +49,19 @@ impl On {
             (Hit::Recent(_), _) => Tab::Recent(Default::default()),
             _ => Tab::default(),
         };
-        On { window, page, row: matches!(hit, Hit::Shelf(_)) && !whole }
+        On { window, page, whole }
     }
 
-    /// The things in it, in their order.
+    /// The things in it, in their order: where the lane is a row, or a grid, of the things on the station, all of them,
+    /// whatever page is chosen.
     fn order(self) -> Vec<Hit> {
-        if self.row { crate::ui::view::row_order() } else { crate::ui::view::lane_order(self.page) }
+        if !self.whole && matches!(self.page, Tab::Shelf(_)) { crate::ui::view::row_order() } else { crate::ui::view::lane_order(self.page, self.whole) }
+    }
+
+    /// The list `hit` is in, as `of` tells, the page shown being the one there is (see `Tab::there`: a tag gone, a page
+    /// turned off).
+    fn there(window: isize, hit: Hit, shown: Tab, whole: bool) -> On {
+        On::of(window, hit, shown.there(&super::run::shown()), whole)
     }
 }
 
@@ -91,6 +97,14 @@ impl Chosen {
     /// Nothing chosen, nothing pressed last.
     pub fn clear(&mut self) {
         *self = Chosen::default();
+    }
+
+    /// The page shown in the window `window` turned to `page`: what was chosen there on another page, no longer, in a
+    /// row, or a grid, of things too (one whose page is chosen shows other things now).
+    fn turned(&mut self, window: isize, page: Tab) {
+        if self.on.is_some_and(|on| on.window == window && on.page != page) {
+            self.clear();
+        }
     }
 
     /// Nothing chosen in `on` any more, where what is chosen is there.
@@ -211,7 +225,7 @@ pub struct Press {
 /// `hit` pressed with `keys` held in the window `window`, its lane showing the page `shown` (`whole`: as `On::of`
 /// says), the pointer at `from`: what is chosen as the press comes (see `Chosen::pressed`).
 pub fn press(window: isize, hit: Hit, shown: Tab, whole: bool, keys: Keys, from: windows::Win32::Foundation::POINT) -> Press {
-    let on = On::of(window, hit, shown, whole);
+    let on = On::there(window, hit, shown, whole);
     change(|chosen| chosen.pressed(on, hit, keys, &on.order()));
     Press { hit, on, keys, from }
 }
@@ -229,13 +243,13 @@ pub fn drag(press: Press) -> Vec<Hit> {
 /// `hit` given a right click in the window `window` showing the page `shown`: what the menu of things chosen together
 /// is for, or none (see `Chosen::menu_on`).
 pub fn menu_on(window: isize, hit: Hit, shown: Tab, whole: bool) -> Vec<Hit> {
-    let on = On::of(window, hit, shown, whole);
+    let on = On::there(window, hit, shown, whole);
     change(|chosen| chosen.menu_on(on, hit, &on.order()))
 }
 
 /// All of the list `hit` is in chosen, in the window `window` showing the page `shown` (Ctrl+A over it).
 pub fn all(window: isize, hit: Hit, shown: Tab, whole: bool) {
-    let on = On::of(window, hit, shown, whole);
+    let on = On::there(window, hit, shown, whole);
     change(|chosen| chosen.all(on, &on.order()));
 }
 
@@ -285,14 +299,11 @@ pub fn leave(window: isize) {
     });
 }
 
-/// The page shown in the window `window` turned to `page`: what was chosen on another page there, no longer. (What was
-/// chosen in a row of all that is on the station is in no page.)
+/// The page shown in the window `window` turned to `page`: what was chosen on another page there, no longer (see
+/// `Chosen::turned`).
 pub fn turned(window: isize, page: Tab) {
-    change(|chosen| {
-        if chosen.on.is_some_and(|on| on.window == window && !on.row && on.page != page) {
-            chosen.clear();
-        }
-    });
+    let page = page.there(&super::run::shown());
+    change(|chosen| chosen.turned(window, page));
 }
 
 /// How many files land where `what` is dropped: each of files put on the station together, one of anything else
@@ -321,7 +332,7 @@ pub fn landing(hits: &[Hit]) -> usize {
 mod tests {
     use super::*;
 
-    const ON: On = On { window: 7, page: Tab::Shelf(crate::station::shelf::Filter::All), row: false };
+    const ON: On = On { window: 7, page: Tab::Shelf(crate::station::shelf::Filter::All), whole: true };
     const ORDER: [Hit; 6] = [Hit::Shelf(10), Hit::Shelf(11), Hit::Shelf(12), Hit::Shelf(13), Hit::Shelf(14), Hit::Shelf(15)];
     const CTRL: Keys = Keys { ctrl: true, shift: false };
     const SHIFT: Keys = Keys { ctrl: false, shift: true };
@@ -433,8 +444,8 @@ mod tests {
     /// What is chosen lives in one list: a press in another (another page, another window) leaves it, Ctrl or not.
     #[test]
     fn what_is_chosen_lives_in_one_list() {
-        let copies = On { window: 7, page: Tab::Copies(Default::default()), row: false };
-        let widget = On { window: 9, page: Tab::default(), row: false };
+        let copies = On { window: 7, page: Tab::Copies(Default::default()), whole: true };
+        let widget = On { window: 9, page: Tab::default(), whole: true };
         let mut chosen = Chosen::default();
         click(&mut chosen, ON, Hit::Shelf(10), CTRL);
         click(&mut chosen, ON, Hit::Shelf(11), CTRL);
@@ -483,14 +494,48 @@ mod tests {
         use crate::station::shelf::Filter;
         let words = Tab::Copies(Filter::Words);
         let pinned = Tab::Shelf(Filter::Pinned);
-        assert_eq!(On::of(3, Hit::Copied(1), words, true), On { window: 3, page: words, row: false });
+        assert_eq!(On::of(3, Hit::Copied(1), words, true), On { window: 3, page: words, whole: true });
         assert_eq!(On::of(3, Hit::Copied(1), pinned, true).page, Tab::Copies(Filter::All));
         assert_eq!(On::of(3, Hit::Shelf(1), words, true).page, Tab::default());
-        assert_eq!(On::of(3, Hit::Shelf(1), pinned, true), On { window: 3, page: pinned, row: false });
-        assert!(On::of(3, Hit::Shelf(1), words, false).row);
+        assert_eq!(On::of(3, Hit::Shelf(1), pinned, true), On { window: 3, page: pinned, whole: true });
+        assert!(!On::of(3, Hit::Shelf(1), words, false).whole);
         let shots = Tab::Recent(crate::station::recent::Filter::Screenshots);
         let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: 1 });
-        assert_eq!(On::of(3, Hit::Recent(entry), shots, true), On { window: 3, page: shots, row: false });
+        assert_eq!(On::of(3, Hit::Recent(entry), shots, true), On { window: 3, page: shots, whole: true });
+    }
+
+    /// What was chosen on a page, its page turned in its window, no longer: in a grid of things too. In another window,
+    /// or the page shown again, it stays.
+    #[test]
+    fn what_is_chosen_goes_as_its_page_is_turned() {
+        use crate::station::shelf::Filter;
+        let grid = On::of(3, Hit::Shelf(1), Tab::Shelf(Filter::All), false);
+        let mut chosen = Chosen::default();
+        click(&mut chosen, grid, Hit::Shelf(1), CTRL);
+        chosen.turned(4, Tab::Copies(Filter::All));
+        chosen.turned(3, Tab::Shelf(Filter::All));
+        assert_eq!(chosen.hits, [Hit::Shelf(1)]);
+        chosen.turned(3, Tab::Copies(Filter::All));
+        assert!(chosen.hits.is_empty() && chosen.on.is_none());
+    }
+
+    /// What was chosen under a tag, the tag deleted, is left as the page it was on shows all: Shift takes from no thing
+    /// pressed there.
+    #[test]
+    fn what_was_chosen_under_a_tag_gone_is_left() {
+        use crate::station::shelf::{Filter, Item, Tag, What};
+        let item = |id: u64, tags: &[u32]| Item { id, what: What::Text { text: "a".into() }, added_ms: id, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: tags.to_vec(), held: false, freed_ms: 0 };
+        let from = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+        let tagged = Tab::Shelf(Filter::Tagged(7));
+        super::super::run::pretend(vec![item(1, &[7]), item(2, &[]), item(3, &[7]), item(4, &[])], crate::settings::ShelfView::Cards);
+        super::super::run::pretend_tags(vec![Tag { id: 7, name: "a".into() }], Default::default());
+        change(Chosen::clear);
+        release(press(3, Hit::Shelf(1), tagged, true, CTRL, from));
+        assert_eq!(change(|chosen| chosen.hits.clone()), [Hit::Shelf(1)]);
+        super::super::run::pretend((1..=4).map(|id| item(id, &[])).collect(), crate::settings::ShelfView::Cards);
+        super::super::run::pretend_tags(Vec::new(), Default::default());
+        release(press(3, Hit::Shelf(3), tagged, true, SHIFT, from));
+        assert_eq!(change(|chosen| chosen.hits.clone()), [Hit::Shelf(3)]);
     }
 
     /// Files put on the station together land as so many files, anything else as one.

@@ -83,7 +83,7 @@ pub struct Came {
     #[serde(default, skip_serializing_if = "Marks::none")]
     pub marks: Marks,
     /// Where it was lost, while it is looked for there (see `Kept::settle`).
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     lost: Option<Lost>,
 }
 
@@ -117,8 +117,9 @@ impl Marks {
 }
 
 /// Where a file that stays was when its number was gone, or had a name or a place not listed: another file may come to
-/// be there in its stead. And when that was (ms since 1970), and whether it is gone.
-#[derive(Clone, PartialEq, Debug)]
+/// be there in its stead. And when that was (ms since 1970), and whether it is gone. Kept with it: a restart while a
+/// program saves it so finds it there all the same.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 struct Lost {
     path: PathBuf,
     at_ms: u64,
@@ -481,6 +482,7 @@ fn only_tags(files: &mut [Came], tags: &[u32], now: u64) -> bool {
 
 /// What the list's thread is to take: the tags there are (none: not told yet), and the marks made since it last took
 /// them, each when it was made. What is shown has them at once (see `publish`).
+#[derive(Default)]
 struct Asked {
     tags: Option<Vec<u32>>,
     marks: Vec<(Vec<Key>, Mark, u64)>,
@@ -495,6 +497,9 @@ pub fn mark(keys: Vec<Key>, mark: Mark) {
     asked.marks.push((keys, mark, super::now_ms()));
     asked.upon(&mut files);
     show(files, asked);
+    // (Its thread woken to keep it now: it waits on `WANTED`, and checks what is asked holding it.)
+    drop(WANTED.0.lock().unwrap());
+    WANTED.1.notify_all();
 }
 
 /// The tags there are: a file is of none other.
@@ -693,6 +698,10 @@ struct Kept {
     /// drive it was on (one left out stays out).
     #[serde(default)]
     volumes: Vec<(char, String)>,
+    /// Those let go of (too old, or past the most listed) since the marks were last taken: one marked meanwhile, as it
+    /// was still shown, is taken back with them (see `take_asked`).
+    #[serde(skip)]
+    let_go: Vec<Came>,
 }
 
 impl Kept {
@@ -782,7 +791,9 @@ impl Kept {
         if loose.len() > MOST {
             loose.sort_by_key(|(since, _)| std::cmp::Reverse(*since));
             let past: HashSet<Key> = loose[MOST..].iter().map(|(_, key)| *key).collect();
-            self.files.retain(|came| !past.contains(&came.key));
+            let (past, files): (Vec<Came>, Vec<Came>) = std::mem::take(&mut self.files).into_iter().partition(|came| past.contains(&came.key));
+            self.files = files;
+            self.let_go.extend(past);
         }
     }
 
@@ -863,6 +874,12 @@ impl Kept {
     /// What is asked of the list (see `Asked`) taken: the marks made since, and none of a tag that is gone. Whether the
     /// list changed.
     fn take_asked(&mut self, asked: &mut Asked) -> bool {
+        let marked: HashSet<Key> = asked.marks.iter().flat_map(|(keys, ..)| keys.iter().copied()).collect();
+        for came in std::mem::take(&mut self.let_go) {
+            if marked.contains(&came.key) && !self.files.iter().any(|listed| listed.key == came.key) {
+                self.files.push(came);
+            }
+        }
         let gone = asked.upon(&mut self.files);
         let marked = !asked.marks.is_empty();
         asked.marks.clear();
@@ -874,9 +891,11 @@ impl Kept {
 
     /// Those made longer ago than the days kept before `now` taken off; whether any were.
     fn age(&mut self, now: u64) -> bool {
-        let before = self.files.len();
-        self.files.retain(|came| came.lasts(now));
-        self.files.len() != before
+        let (files, old): (Vec<Came>, Vec<Came>) = std::mem::take(&mut self.files).into_iter().partition(|came| came.lasts(now));
+        self.files = files;
+        let aged = !old.is_empty();
+        self.let_go.extend(old);
+        aged
     }
 
     /// The files come that could not be opened as they were read, tried again (`open`: on their drives, `out`: left
@@ -1141,20 +1160,31 @@ fn follow() {
                 publish(Vec::new());
                 shown_scope = None;
             }
-            // (Off, no drive is held: each is opened again as it is on.)
+            // (Off, no drive is held: each is opened again as it is on. A mark made as it was turned off, kept.)
             drives.clear();
             looked_for_drives = None;
-            drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| wanted.is_none()).unwrap());
+            files_owed |= kept.take_asked(&mut ASKED.lock().unwrap());
+            if files_owed && keep(&folder, &kept) {
+                (files_owed, read_owed) = (false, false);
+                saved = Instant::now();
+            }
+            drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| wanted.is_none() && ASKED.lock().unwrap().marks.is_empty()).unwrap());
             continue;
         };
         // (Nothing read till the machine has settled after it started, or the list is looked at: what was kept shown
-        // meanwhile.)
+        // meanwhile, and the marks made on it kept.)
         if !crate::settle::ready(crate::settle::Work::Recent) {
-            if shown_scope.as_ref() != Some(&scope) {
+            let marked = kept.take_asked(&mut ASKED.lock().unwrap());
+            if marked || shown_scope.as_ref() != Some(&scope) {
                 publish(kept.shown(&scope));
                 shown_scope = Some(scope);
             }
-            std::thread::sleep(EVERY);
+            files_owed |= marked;
+            if files_owed && keep(&folder, &kept) {
+                (files_owed, read_owed) = (false, false);
+                saved = Instant::now();
+            }
+            rest(EVERY);
             continue;
         }
         let turn = Instant::now();
@@ -1278,18 +1308,29 @@ fn follow() {
         // Kept as it changes, and where each journal was read up to now and then (a restart reads on from there); one
         // not kept, kept at the next turn.
         files_owed |= changed;
-        if files_owed || read_owed && saved.elapsed() > SAVE_EVERY {
-            let written = serde_json::to_vec(&kept).map_err(std::io::Error::other).and_then(|bytes| {
-                crate::elevation::ensure_folder(&folder)?;
-                crate::elevation::write_in_place(&folder, FILE, &bytes)
-            });
-            if written.is_ok() {
-                (files_owed, read_owed) = (false, false);
-                saved = Instant::now();
-            }
+        if (files_owed || read_owed && saved.elapsed() > SAVE_EVERY) && keep(&folder, &kept) {
+            (files_owed, read_owed) = (false, false);
+            saved = Instant::now();
         }
-        std::thread::sleep(pause(turn.elapsed(), more));
+        rest(pause(turn.elapsed(), more));
     }
+}
+
+/// `kept` written in `folder`; whether it was.
+#[cfg(windows)]
+fn keep(folder: &Path, kept: &Kept) -> bool {
+    let written = serde_json::to_vec(kept).map_err(std::io::Error::other).and_then(|bytes| {
+        crate::elevation::ensure_folder(folder)?;
+        crate::elevation::write_in_place(folder, FILE, &bytes)
+    });
+    written.is_ok()
+}
+
+/// The list's thread resting `pause`, or till a mark is made (see `mark`): kept at once, rather than lost should Glance
+/// be quit meanwhile.
+#[cfg(windows)]
+fn rest(pause: Duration) {
+    drop(WANTED.1.wait_timeout_while(WANTED.0.lock().unwrap(), pause, |_| ASKED.lock().unwrap().marks.is_empty()).unwrap());
 }
 
 /// The pause after a turn that took `took`, a journal having `more` to read on or not: as long as the turn took at
@@ -2071,6 +2112,50 @@ mod tests {
         assert!(kept.take('D', Change { at_ms: t + 67 * day, ..change }, t + 67 * day, &places(), &out, |_| Looked::At(PathBuf::from(r"D:\Documents\1.pdf"), t, 91, 0), |_| None) && files(&kept) == [1, 2]);
         assert!(kept.age(t + 68 * day + 1) && files(&kept) == [2]);
         assert!(kept.age(t + 69 * day + 1) && kept.files.is_empty());
+    }
+
+    /// A mark made wakes the list's thread resting between its turns, to keep it at once.
+    #[test]
+    fn a_mark_wakes_the_list_s_thread() {
+        let started = Instant::now();
+        let resting = std::thread::spawn(|| rest(Duration::from_secs(30)));
+        std::thread::sleep(Duration::from_millis(200));
+        mark(vec![Key { drive: 'D', file: 1 }], Mark::Pinned(true));
+        resting.join().unwrap();
+        ASKED.lock().unwrap().marks.clear();
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A file let go of (too old, or past the most listed) as it was marked where it was shown is taken back, as marked:
+    /// unless it is marked to go. One lost, kept so, is looked for where it was after a restart.
+    #[test]
+    fn a_file_marked_as_it_was_let_go_of_is_kept() {
+        let day = 24 * 3_600_000;
+        let t = 1_760_800_000_000;
+        let key = |file: u128| Key { drive: 'D', file };
+        let mut kept = Kept { files: newest_first((1..=MOST as u128 + 2).map(|file| come(file, &format!(r"D:\Documents\{file}.pdf"), t + file as u64, 1, Kind::Document)).collect()), ..Kept::default() };
+        kept.sort();
+        assert!(!kept.files.iter().any(|came| came.key == key(1) || came.key == key(2)));
+        let mut asked = Asked { tags: None, marks: vec![(vec![key(1)], Mark::Pinned(true), t), (vec![key(2)], Mark::Pinned(false), t)] };
+        assert!(kept.take_asked(&mut asked));
+        assert!(kept.files.iter().any(|came| came.key == key(1) && came.marks.pinned) && !kept.files.iter().any(|came| came.key == key(2)));
+        // Too old, the same.
+        let listed = |kept: &Kept| {
+            let mut files: Vec<u128> = kept.files.iter().map(|came| came.key.file).collect();
+            files.sort();
+            files
+        };
+        assert!(kept.age(t + 30 * day) && listed(&kept) == [1]);
+        assert!(kept.take_asked(&mut Asked { tags: None, marks: vec![(vec![key(3)], Mark::Tag(7, true), t + 30 * day)] }) && listed(&kept) == [1, 3]);
+        // (Let go of a turn before: gone.)
+        kept.files.push(come(5, r"D:\Documents\5.pdf", t, 1, Kind::Document));
+        assert!(kept.age(t + 30 * day) && !kept.take_asked(&mut Asked::default()));
+        kept.take_asked(&mut Asked { tags: None, marks: vec![(vec![key(5)], Mark::Pinned(true), t + 30 * day)] });
+        assert_eq!(listed(&kept), [1, 3]);
+        let mut lost = kept.files.iter().find(|came| came.key == key(3)).unwrap().clone();
+        assert!(lost.lose(t + 30 * day, false));
+        let again: Came = serde_json::from_slice(&serde_json::to_vec(&lost).unwrap()).unwrap();
+        assert_eq!(again, lost);
     }
 
     /// The list of all, what is pinned first (files come together, all pinned, as one row), and the rest, what is pinned

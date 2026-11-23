@@ -261,25 +261,32 @@ impl Filter {
 }
 
 /// What a page lists, in its order (see `listed`): the pinned things listed first, under a heading of their own, how many
-/// are pinned in all (none: no such heading), and the rest.
+/// are pinned in all (none: no such heading), and the rest. The pinned things not listed first are kept apart (`more`),
+/// for where the page is shown whole without its headings (see `every`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Listed<T> {
     pub first: Vec<T>,
     pub pinned: usize,
     pub rest: Vec<T>,
+    pub more: Vec<T>,
 }
 
 impl<T> Listed<T> {
     /// All of a page: what is `pinned` first (the first `PINNED_FIRST` of it, or, `folded`, none), `rest` after.
     pub fn grouped(mut pinned: Vec<T>, rest: Vec<T>, folded: bool) -> Listed<T> {
         let of = pinned.len();
-        pinned.truncate(if folded { 0 } else { PINNED_FIRST });
-        Listed { first: pinned, pinned: of, rest }
+        let more = pinned.split_off(if folded { 0 } else { PINNED_FIRST.min(of) });
+        Listed { first: pinned, pinned: of, rest, more }
     }
 
     /// What is under one filter: no groups.
     pub fn plain(rest: Vec<T>) -> Listed<T> {
-        Listed { first: Vec::new(), pinned: 0, rest }
+        Listed { first: Vec::new(), pinned: 0, rest, more: Vec::new() }
+    }
+
+    /// All of the page with no headings: all that is pinned first, the rest after.
+    pub fn every(self) -> Vec<T> {
+        self.first.into_iter().chain(self.more).chain(self.rest).collect()
     }
 }
 

@@ -1537,8 +1537,24 @@ impl Content {
         }
     }
 
-    /// How far its lists are scrolled: its readings' (merged, the first readings part's).
-    /// Whether it is, or holds, the single lane `only` (see `Readings::only`): which of its parts, where merged.
+    /// The choices over its station's page, the one just lit or just come, brought into sight (see `view::show_choice`):
+    /// by where its readings drew them, in their own DIPs, as they are scrolled (merged, the widget's are scaled to the
+    /// readings' zoom). Whether they are turned now.
+    fn bring_choice(&mut self) -> bool {
+        let drawn = self.readings_hits();
+        let shown = crate::station::run::shown();
+        self.readings_mut().is_some_and(|readings| view::show_choice(&mut readings.scrolls, &mut readings.choice_shown, &drawn, readings.tab.there(&shown)))
+    }
+
+    /// What a press finds on its readings, as they last drew it, each part in its own DIPs (see `Readings::found`).
+    fn readings_hits(&self) -> Vec<view::HitBox> {
+        match self {
+            Content::Readings(readings) => readings.hits.clone(),
+            Content::Music(_) => Vec::new(),
+            Content::Merged(merged) => merged.parts.iter().flat_map(Content::readings_hits).collect(),
+        }
+    }
+
     /// Its own colour, its hint drawn in it: what plays, its ground's, a note, its own (`written`: as it is being written
     /// in, else as it was last read).
     fn ground(&self, written: Option<crate::notes::Colour>, music: MusicGround) -> Option<Ground> {
@@ -1553,6 +1569,7 @@ impl Content {
         }
     }
 
+    /// Whether it is, or holds, the single lane `only` (see `Readings::only`): which of its parts, where merged.
     fn holding(&self, only: &str) -> Option<Option<usize>> {
         match self {
             Content::Readings(readings) => (readings.only.as_deref() == Some(only)).then_some(None),
@@ -1561,6 +1578,7 @@ impl Content {
         }
     }
 
+    /// How far its lists are scrolled: its readings' (merged, the first readings part's).
     fn scrolls(&self) -> view::Scrolls {
         match self {
             Content::Readings(readings) => readings.scrolls,
@@ -5004,11 +5022,7 @@ impl Widget {
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
         // The choices over its station's page: the one just lit, or just come, brought into sight.
-        let choices_moving = {
-            let Widget { content, hits, .. } = &mut *self;
-            let shown = crate::station::run::shown();
-            content.readings_mut().is_some_and(|readings| view::show_choice(&mut readings.scrolls, &mut readings.choice_shown, hits, readings.tab.there(&shown)))
-        };
+        let choices_moving = self.content.bring_choice();
         self.follow_card(&theme, prefs, look.lang);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if sizing {
@@ -5599,6 +5613,25 @@ mod tests {
         assert!((carried_reach(size, (0.0, 0.0), 1.1, 0.0, 0.0) - 20.0).abs() < 1e-3);
         // Turned a quarter about its middle: its long sides stand up, half of its width less half its height past.
         assert!((carried_reach(size, (100.0, 50.0), 1.0, 90.0, 0.0) - 50.0).abs() < 1e-3);
+    }
+
+    /// A tag lit over the station's page of a merged widget, drawn larger or smaller than its own size, is brought into
+    /// sight by where its readings drew it in their own DIPs: turned as far as in a widget of its own.
+    #[test]
+    fn a_merged_widget_brings_its_lit_tag_into_sight() {
+        use crate::station::shelf::Filter;
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let tabs: Vec<view::Tab> = [Filter::All, Filter::Pinned].into_iter().chain((1..=8).map(Filter::Tagged)).map(view::Tab::Shelf).collect();
+        let mut drawn: Vec<view::HitBox> = tabs.iter().enumerate().map(|(at, tab)| (0.0, 0.0, 56.0, 28.0, view::Hit::Choice(*tab, (at as f32 * 60.0).to_bits(), 56.0f32.to_bits()))).collect();
+        drawn.push((0.0, 0.0, 200.0, 28.0, view::Hit::List(view::List::Choices, (10.0 * 60.0 - 4.0 - 200.0f32).to_bits())));
+        crate::station::run::pretend(Vec::new(), crate::settings::ShelfView::Cards);
+        crate::station::run::pretend_tags((1..=8).map(|id| crate::station::shelf::Tag { id, name: format!("{id}") }).collect(), Default::default());
+        let readings = Readings { lanes: crate::settings::Part::Workbench, hits: drawn, ..Readings::new(choice) };
+        let mut merged = Content::Merged(Box::new(Merged { parts: vec![Content::Readings(Readings::new(choice)), Content::Readings(readings)], beside: false, size: (0.0, 0.0), rects: Vec::new(), touch: Vec::new(), least: (0.0, 0.0), moving: None, told: Vec::new(), in_lane: false, grown: false }));
+        assert!(!merged.bring_choice());
+        merged.readings_mut().unwrap().tab = view::Tab::Shelf(Filter::Tagged(5));
+        assert!(merged.bring_choice());
+        assert_eq!(merged.scrolls().to(view::List::Choices), 6.0 * 60.0 + 56.0 + 24.0 - 200.0);
     }
 
     /// A widget hidden (shown only while a game is played) on a device no screen would be drawn for any longer (a

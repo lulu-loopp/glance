@@ -733,14 +733,12 @@ impl Station {
                     super::recent::tags_are(&self.keep.shelf.tags);
                     if let Some(tag) = made.filter(|_| !files.is_empty()) {
                         super::recent::mark(files, super::recent::Mark::Tag(tag, true));
-                        self.hold();
                     }
                 }
                 Ask::RenameTag(tag, name) => self.keep.tags(|shelf| shelf.rename_tag(tag, &name)),
                 Ask::RemoveTag(tag) => {
                     self.keep.tags(|shelf| shelf.remove_tag(tag, super::now_ms()));
                     super::recent::tags_are(&self.keep.shelf.tags);
-                    self.hold();
                 }
                 Ask::Held => self.hold(),
                 Ask::Remove(id) => self.keep.remove(id),
