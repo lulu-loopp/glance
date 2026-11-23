@@ -173,30 +173,7 @@ impl PanelLayers {
             Some(others) => self.ground(frame, picture, local, scale, others)?,
             None => false,
         };
-        // The readings' own: not the desktop behind them, which moves under
-        // a widget moved over it while the readings stay as they were.
-        let mut key = DefaultHasher::new();
-        (theme.skin, theme.dark, scale.to_bits()).hash(&mut key);
-        layout.lanes().iter().chain([&layout.bar()]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut key));
-        (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.scrolls.bits(), scene.hover, scene.pinned).hash(&mut key);
-        // (The sliders' knobs as they ease: kept as they were, the knob grew only as a sample came, once a second.)
-        scene.thumbs.hash(&mut key);
-        scene.overlay.hash(&mut key);
-        // Drawn afresh as a sample comes (a small layout's charts are part
-        // of it, and the bar's uptime is), and as what is chosen to show
-        // changes.
-        (scene.history.len(), scene.history.last().map(|sample| sample.t)).hash(&mut key);
-        scene.prefs.hash_drawn(&mut key);
-        // (What plays and how loud change between samples: as they are pressed.)
-        crate::playing::stamp().hash(&mut key);
-        // (What AI tools spent, read by the AI component's dock as it is drawn: as it is read anew.)
-        crate::ai::stamp().hash(&mut key);
-        // (A thing on a station's lane pressed, carried off it, springing back as it is put back.)
-        view::tiles_drawn().hash(&mut key);
-        if let Some((small, drawn)) = picture.small {
-            (small, drawn.0.to_bits(), drawn.1.to_bits()).hash(&mut key);
-        }
-        let content_key = key.finish();
+        let content_key = content_key(picture, scale);
         let mut hits = None;
         let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
         let content = Matrix3x2::translation(ax, ay) * local;
@@ -225,6 +202,34 @@ impl PanelLayers {
         self.ground.release();
         self.content.release();
     }
+}
+
+/// What the readings of `picture` drawn at `scale` show, as the key their layer is kept by (see `Layer::draw`): not the
+/// desktop behind them, which moves under a widget moved over it while the readings stay as they were.
+fn content_key(picture: &Picture, scale: f32) -> u64 {
+    let (scene, layout) = (picture.scene, picture.layout);
+    let theme = scene.theme;
+    let mut key = DefaultHasher::new();
+    (theme.skin, theme.dark, scale.to_bits()).hash(&mut key);
+    layout.lanes().iter().chain([&layout.bar()]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut key));
+    (picture.lanes, &layout.cuts, layout.columns).hash(&mut key);
+    // (All the scene holds that is drawn in them but its data, each as it is now: see `Scene::hash_drawn`.)
+    scene.hash_drawn(&mut key);
+    // Drawn afresh as a sample comes (a small layout's charts are part
+    // of it, and the bar's uptime is), and as what is chosen to show
+    // changes.
+    (scene.history.len(), scene.history.last().map(|sample| sample.t)).hash(&mut key);
+    scene.prefs.hash_drawn(&mut key);
+    // (What plays and how loud change between samples: as they are pressed.)
+    crate::playing::stamp().hash(&mut key);
+    // (What AI tools spent, read by the AI component's dock as it is drawn: as it is read anew.)
+    crate::ai::stamp().hash(&mut key);
+    // (A thing on a station's lane pressed, carried off it, springing back as it is put back.)
+    view::tiles_drawn().hash(&mut key);
+    if let Some((small, drawn)) = picture.small {
+        (small, drawn.0.to_bits(), drawn.1.to_bits()).hash(&mut key);
+    }
+    key.finish()
 }
 
 /// What a picture's readings draw, recorded as named parts (see `morph`):
@@ -419,6 +424,35 @@ mod tests {
     use super::super::view::{self, Hit};
     use super::{Away, Turn};
     use std::time::{Duration, Instant};
+
+    /// What the readings show drawn afresh as anything the scene holds that is drawn in them changes, kept as nothing
+    /// does: the preview's shortcut as it comes in (it stayed as it was first drawn, faint, till a sample came), the
+    /// settings' button as it grows, the dot of a newer Glance, the page shown.
+    #[test]
+    fn the_readings_are_drawn_afresh_as_what_is_drawn_of_them_changes() {
+        use super::super::theme::{Skin, Theme};
+        use super::super::seen::Seen;
+        use super::super::view::{Layout, Scene, Scrolls, Tab, RESTING};
+        use super::Picture;
+        let theme = Theme::new(Skin::Glass, true);
+        let (info, prefs) = (view::tests::info(), super::super::prefs::Prefs::resolve(&serde_json::Value::Null, &[]));
+        let history = [std::sync::Arc::new(view::tests::sample(None, None, None))];
+        let seen = Seen::of(&history);
+        let lanes = [view::Lane::empty("station", &theme)];
+        let layout = Layout::with_columns(vec![200.0], 1, &theme);
+        let at_rest = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: super::super::text::Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(1)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let key = |scene: &Scene| super::content_key(&Picture { scene, lanes: &lanes, layout: &layout, small: None, size: (300.0, 200.0), at: (0.0, 0.0), edge: None, backdrop: None, frost: 1.0, rough: false }, 1.0);
+        let rest = key(&at_rest);
+        assert_eq!(key(&Scene { pen_ms: 500.0, ..at_rest }), rest, "only the charts follow the pen: kept");
+        let coming = key(&Scene { hint: Some((Hit::Shelf(1), 0.1, "Ctrl+Q")), ..at_rest });
+        let come = key(&Scene { hint: Some((Hit::Shelf(1), 1.0, "Ctrl+Q")), ..at_rest });
+        assert!(coming != rest && come != coming, "the shortcut said as it comes in");
+        assert_ne!(key(&Scene { settings_lit: Some(1.2), ..at_rest }), key(&Scene { settings_lit: Some(1.0), ..at_rest }), "the settings' button as it grows");
+        assert_ne!(key(&Scene { newer: true, ..at_rest }), rest, "a newer Glance's dot");
+        assert_ne!(key(&Scene { buttons: false, ..at_rest }), rest, "the bar with no buttons");
+        assert_ne!(key(&Scene { music_apart: true, ..at_rest }), rest, "what plays drawn apart");
+        assert_ne!(key(&Scene { tab: Tab::Copies(Default::default()), ..at_rest }), rest, "another page");
+    }
 
     /// Laid out in other columns than it was drawn in last, a panel turns into the new layout for `widget::MORPH`,
     /// from the start; laid out in the same columns, or drawn as something else in its place, or with motion reduced,

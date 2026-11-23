@@ -920,6 +920,20 @@ pub struct Scene<'a> {
 }
 
 impl Scene<'_> {
+    /// All it holds that the readings draw but their data (what was read, the choices, the skin, the machine: hashed
+    /// by what draws them, see `render`), and the pen's time (only the charts follow it, drawn afresh every frame), as
+    /// each is now: what a picture of the readings kept serves again by.
+    pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        let Scene { info: _, prefs: _, theme: _, history: _, seen: _, pen_ms: _, lang, scrolls, tab, hover, hint, thumbs, pinned, overlay, buttons, newer, settings_lit, music_apart } = self;
+        (lang, scrolls.bits(), tab, hover, pinned, overlay, buttons, newer, music_apart).hash(key);
+        // (The preview's shortcut as it comes in, the settings' button as it grows: each frame of it.)
+        hint.map(|(hit, shown, says)| (hit, shown.to_bits(), says)).hash(key);
+        settings_lit.map(f32::to_bits).hash(key);
+        // (The sliders' knobs as they ease: kept as they were, the knob grew only as a sample came, once a second.)
+        thumbs.hash(key);
+    }
+
     fn latest(&self) -> &Sample {
         self.history.last().unwrap()
     }
