@@ -358,7 +358,7 @@ impl Away {
     /// they were carried, for it to turn from into what it draws now (the rooms left closing, the rest moving up).
     pub fn follow(&mut self, record: impl Fn() -> Vec<Part>) -> Option<Vec<Part>> {
         let drawn = |parts: &[Part], hit: view::Hit| {
-            let key = format!("tile.{hit:?}");
+            let key = view::tile_key(hit);
             parts.iter().any(|part| part.key.as_deref() == Some(key.as_str()))
         };
         let away = view::away_tiles();
@@ -406,7 +406,7 @@ fn tiles_of(parts: &[Part], boxes: &[TileBox]) -> Vec<(view::Hit, Vec<Part>)> {
     boxes
         .iter()
         .map(|&(hit, (x, y))| {
-            let key = format!("tile.{hit:?}");
+            let key = view::tile_key(hit);
             (hit, parts.iter().filter(|part| part.key.as_deref() == Some(key.as_str())).map(|part| part.moved((-x, -y))).collect::<Vec<Part>>())
         })
         .filter(|(_, parts)| !parts.is_empty())

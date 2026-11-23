@@ -458,6 +458,26 @@ pub enum Mark {
     Tag(u32, bool),
 }
 
+thread_local! {
+    /// What this thread draws the list as, for a moment (see `as_was`).
+    static AS_WAS: std::cell::RefCell<Option<Arc<Vec<Came>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What `draw` gives, the list drawn as `was` (what a drawing turns from, as it changed since: see
+/// `station::Drawn`).
+pub fn as_was<T>(was: Arc<Vec<Came>>, draw: impl FnOnce() -> T) -> T {
+    let before = AS_WAS.with(|as_was| as_was.borrow_mut().replace(was));
+    let drawn = draw();
+    AS_WAS.with(|as_was| *as_was.borrow_mut() = before);
+    drawn
+}
+
+/// What is pinned of `files`, in the order it is listed, each row by its files: other, the page moves (see
+/// `station::Drawn::moved_from`). Files come, as they come, do not move it.
+pub fn pinned_rows(files: &[Came]) -> Vec<Vec<Key>> {
+    listed(files, Filter::Pinned).iter().map(|row| row.iter().map(|came| came.key).collect()).collect()
+}
+
 /// The files `keys` of `files` marked with `mark` at `now`.
 fn marked(files: &mut [Came], keys: &[Key], mark: Mark, now: u64) {
     for came in files.iter_mut().filter(|came| keys.contains(&came.key)) {
@@ -1071,6 +1091,9 @@ thread_local! {
 
 /// The files come lately, newest first (none while the list is off, or not yet read).
 pub fn shown() -> Arc<Vec<Came>> {
+    if let Some(was) = AS_WAS.with(|as_was| as_was.borrow().clone()) {
+        return was;
+    }
     #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;

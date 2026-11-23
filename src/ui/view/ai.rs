@@ -608,7 +608,7 @@ fn failed_words(failed: crate::ai::Failed, keyed: bool, lang: Lang) -> &'static 
         crate::ai::Failed::Key if !keyed => lang.pick("登录已过期", "Sign-in expired"),
         crate::ai::Failed::Key => lang.pick("密钥无效", "Key refused"),
         crate::ai::Failed::Limited => lang.pick("请求过于频繁", "Asked too often"),
-        crate::ai::Failed::Unavailable => lang.pick("暂时无法读取", "Not reached"),
+        crate::ai::Failed::Unavailable => lang.pick("暂时无法读取", "Unreachable"),
     }
 }
 

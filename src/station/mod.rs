@@ -18,6 +18,33 @@ pub mod thumbs;
 #[cfg(test)]
 mod spike;
 
+/// What a station's lane is drawn from: the station as its thread shows it, and the files come lately. Drawn otherwise
+/// than before (see `moved_from`), the lane turns from how it was drawn (see `as_was`).
+#[derive(Clone)]
+pub struct Drawn {
+    station: std::sync::Arc<run::Shown>,
+    files: std::sync::Arc<Vec<recent::Came>>,
+}
+
+impl Drawn {
+    /// As it is now.
+    pub fn now() -> Drawn {
+        Drawn { station: run::shown(), files: recent::shown() }
+    }
+
+    /// Whether it is other than `before` (see `run::Shown::moved_from`), or what is pinned of the files come lately is
+    /// (pinned or not, in another order).
+    pub fn moved_from(&self, before: &Drawn) -> bool {
+        self.station.moved_from(&before.station) || recent::pinned_rows(&self.files) != recent::pinned_rows(&before.files)
+    }
+
+    /// What `draw` gives, the lane drawn as it was.
+    pub fn as_was<T>(self, draw: impl FnOnce() -> T) -> T {
+        let Drawn { station, files } = self;
+        run::as_was(station, || recent::as_was(files, draw))
+    }
+}
+
 /// A thing that may be pinned and tagged, on any of the station's pages: one on it, or copied lately, by its number, or a
 /// file come lately (or files come together, as one: all of them).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

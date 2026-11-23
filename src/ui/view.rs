@@ -2844,6 +2844,16 @@ pub fn lane_order(page: Tab, whole: bool) -> Vec<Hit> {
     }
 }
 
+/// What a thing on a station's lane is named as it is drawn (see `morph::Part`): each moves from where it was, as they
+/// flow anew, and is drawn carried off as it is there (see `carry`). Files come together are named by their newest
+/// alone, whichever page's filter found them, so that pinned, or no longer, they move to their place.
+pub fn tile_key(hit: Hit) -> String {
+    match hit {
+        Hit::Recent(crate::station::recent::Entry::Burst(_, newest)) => format!("tile.{:?}", Hit::Recent(crate::station::recent::Entry::File(newest))),
+        hit => format!("tile.{hit:?}"),
+    }
+}
+
 /// The things on the station in a row, or a grid, of them all, in its order (see `lane_order`).
 pub fn row_order() -> Vec<Hit> {
     put_on(&crate::station::run::shown().items).map(|item| Hit::Shelf(item.id)).collect()
@@ -5887,7 +5897,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let on_button = buttons.is_some_and(|buttons| buttons.iter().any(|(button, _)| scene.hover == Some(*button)));
         // (Named, each, that it moves from where it was as they flow anew: see `morph`; and that what is carried off
         // the lane is drawn as it is here, see `carry`.)
-        frame.key(&format!("tile.{pressed:?}"));
+        frame.key(&tile_key(pressed));
         let held = tile_held(pressed);
         let lit = (scene.hover == Some(pressed) || on_button) && held != Held::Away;
         let chosen = scene.thumbs.chosen(pressed);
@@ -6176,7 +6186,8 @@ fn corner_button(tile: &Tile, (x, y, w, h): (f32, f32, f32, f32), at: usize) -> 
 }
 
 /// A button on a thing's picture, `icon` on a plate of the skin's menus' sheet as round as its buttons are (glass's a
-/// circle): in `ink` where it is on (its pin, pinned), lit with the pointer `on` it (where it is pressed).
+/// circle), with no edge drawn round it (as the lane's own buttons have none): in `ink` where it is on (its pin,
+/// pinned), lit with the pointer `on` it (where it is pressed).
 fn paint_button(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32, f32), icon: Icon, ink: Option<Color>, on: bool) {
     let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
     let radius = theme.control_radius.min(h / 2.0);
@@ -6184,7 +6195,6 @@ fn paint_button(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32,
     if on {
         frame.fill_rounded(colours.text.alpha(0.08), x, y, w, h, radius);
     }
-    frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, w, h, radius, 1.0);
     let mark = ink.unwrap_or(if on { colours.text } else { colours.text.alpha(colours.text.a * 0.75) });
     frame.icon(icon, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
 }
@@ -6219,7 +6229,6 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, (right, 
     let radius = mark_round(theme, &colours, TALL);
     let faded = |color: Color| color.alpha(color.a * shown);
     frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
-    frame.stroke_rounded(Fill::Solid(faded(colours.stroke)), left, top, wide, TALL, radius, 1.0);
     frame.text(says, font, faded(colours.text), left + PAD, frame.line_in(font, top, TALL), wide, Align::Start);
 }
 
@@ -7011,7 +7020,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
                 let (tile, hit) = &tiles[at];
                 if current {
-                    frame.key(&format!("tile.{hit:?}"));
+                    frame.key(&tile_key(*hit));
                     if lit(*hit) {
                         frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
                     }
@@ -9355,6 +9364,37 @@ otepad.exe", "Notepad"),
         assert_eq!(headings.iter().map(|one| one.1).collect::<Vec<_>>(), [Heading::Day("今天"), Heading::Day("昨天")]);
     }
 
+    /// Files come lately pinned (or no longer) turn the lane from how it was drawn, files come together moving as one,
+    /// named the same whichever filter found them. Files come as they come do not.
+    #[test]
+    fn recent_files_pinned_move_to_their_place() {
+        use crate::station::recent::{Came, Entry, Filter, Key, Kind, Marks};
+        let t = 1_760_800_000_000;
+        let came = |file: u128, pinned: bool| Came::of(Key { drive: 'D', file }, format!(r"D:\Phone\{file}.jpg").into(), t + file as u64 * 1_000, 1, Kind::Picture).marked(Marks { pinned, ..Default::default() });
+        let files = |pinned: bool, more: bool| {
+            let mut files: Vec<Came> = (1..=6).map(|file| came(file, pinned)).chain(more.then(|| came(9, false))).collect();
+            files.extend((20..=21).map(|file| Came::of(Key { drive: 'C', file }, format!(r"C:\Docs\{file}.pdf").into(), t + 600_000 + file as u64 * 100_000, 1, Kind::Document)));
+            files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
+            files
+        };
+        crate::station::run::pretend(Vec::new(), ShelfView::List);
+        crate::station::recent::pretend(files(false, false));
+        let before = crate::station::Drawn::now();
+        // (As the page lists them: see `lane_order`.)
+        let row = || {
+            let files = crate::station::recent::shown();
+            let listed = crate::station::recent::page(&files, Filter::All, false);
+            listed.first.iter().chain(&listed.rest).map(|(filter, row)| Hit::Recent(Entry::of_row(row, *filter))).find(|hit| matches!(hit, Hit::Recent(Entry::Burst(..)))).unwrap()
+        };
+        let was = row();
+        crate::station::recent::pretend(files(false, true));
+        assert!(!crate::station::Drawn::now().moved_from(&before));
+        crate::station::recent::pretend(files(true, false));
+        assert!(crate::station::Drawn::now().moved_from(&before));
+        let now = row();
+        assert!(was != now && tile_key(was) == tile_key(now));
+    }
+
     /// What is on any page of the lane is pinned and tagged by its buttons, on its line and on its card alike: both there
     /// as the pointer is over it (or over one of them), a pinned one's pin always, pressed before the thing and within it.
     /// A right click on one is on the thing.
@@ -9642,7 +9682,7 @@ otepad.exe", "Notepad"),
                             .iter()
                             .filter_map(|hit| {
                                 let &(hx, hy, hw, hh, _) = hits.iter().find(|one| one.4 == *hit)?;
-                                let key = format!("tile.{hit:?}");
+                                let key = tile_key(*hit);
                                 Some((recorded.iter().filter(|part| part.key.as_deref() == Some(key.as_str())).map(|part| part.moved((-hx, -hy))).collect(), (hw + 2.0 * pad, hh + 2.0 * pad)))
                             })
                             .collect();

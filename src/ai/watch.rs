@@ -482,14 +482,16 @@ mod tests {
     fn what_was_spent_told_anew_is_stamped() {
         let mut ledger = Ledger::default();
         ledger.unkeyed(Tool::DeepSeek);
+        // (Moments of a day as a clock tells them: a week before one of the first moments of 1970 is no day's.)
+        const NOW: u64 = 1_795_003_200_000;
         let before = stamp();
-        tell(&ledger, 1, &|| {});
+        tell(&ledger, NOW, &|| {});
         let told = stamp();
         assert!(told > before, "told anew: stamped");
-        tell(&ledger, 2, &|| {});
+        tell(&ledger, NOW + 1, &|| {});
         assert_eq!(stamp(), told, "only the time it was told at changed: not stamped");
         ledger.unkeyed(Tool::Kimi);
-        tell(&ledger, 3, &|| {});
+        tell(&ledger, NOW + 2, &|| {});
         assert!(stamp() > told, "changed: stamped");
     }
 

@@ -1339,10 +1339,10 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
     }
     // What is on its station otherwise than it was drawn (something came from a device nearby, or begins to, or was put
     // on it or taken off): turning from how it was drawn.
-    let station_now = crate::station::run::shown();
+    let station_now = crate::station::Drawn::now();
     if let Some(was) = readings.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !crate::panel::reduced_motion()) {
         if readings.morph.is_none() {
-            readings.morph = Some((now, Before::Drawn(crate::station::run::as_was(was, || render::record(frame, scene, picture.lanes, &shown.layout, picture.small, 1.0, picture.at)))));
+            readings.morph = Some((now, Before::Drawn(was.as_was(|| render::record(frame, scene, picture.lanes, &shown.layout, picture.small, 1.0, picture.at)))));
         }
     }
     let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
@@ -1408,7 +1408,7 @@ struct Readings {
     away: render::Away,
     /// What its station showed as it was last drawn: changed since, it turns from how that was drawn (as the panel
     /// does: see `Panel::station_was`).
-    station_was: Option<std::sync::Arc<crate::station::run::Shown>>,
+    station_was: Option<crate::station::Drawn>,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,

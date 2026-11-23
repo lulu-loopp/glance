@@ -2755,7 +2755,7 @@ struct Panel<'a> {
     away: render::Away,
     /// What its station showed as it was last drawn: changed since (something came from a device nearby, or begins to,
     /// or was put on it or taken off), it turns from how that was drawn (none: not drawn since it opened).
-    station_was: Option<std::sync::Arc<crate::station::run::Shown>>,
+    station_was: Option<crate::station::Drawn>,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -4649,7 +4649,7 @@ impl<'a> Panel<'a> {
         });
         let mut lifted = None;
         // What its station showed as last drawn, where it shows otherwise now (see `station_was`).
-        let station_now = crate::station::run::shown();
+        let station_now = crate::station::Drawn::now();
         let station_was = self.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !reduced_motion());
         let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
@@ -4678,7 +4678,7 @@ impl<'a> Panel<'a> {
             // What is on its station otherwise than it was drawn (something came, or begins to come, or was put on
             // it or taken off): turning from how it was drawn, each thing moving to where it is now, what came fading
             // in. (One under way, or laid out anew, turns on as it does.)
-            let changed_from = || station_was.filter(|_| turn.is_none()).map(|was| crate::station::run::as_was(was, || render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))));
+            let changed_from = || station_was.filter(|_| turn.is_none()).map(|was| was.as_was(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))));
             let turn = match gone_from.or_else(changed_from) {
                 Some(from) => {
                     turning.begin(now, from);
