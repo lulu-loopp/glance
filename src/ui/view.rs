@@ -8668,15 +8668,16 @@ otepad.exe", "Notepad"),
                 assert!(!today_in(&keys) && !texts.contains(&figure), "{w} by {h}: {keys:?} {texts:?}");
             }
         }
-        // Too small for more than one figure: the first source's, then the next by the wheel.
-        let (texts, hits, _) = drawn((120.0, 80.0), Scrolls::default());
-        assert!(texts.contains(&dock.slots[0].figure), "{texts:?}");
+        // Too small for more than one figure: the first source's (its ring, its figure), then the next by the wheel.
+        let shows = |keys: &[String], n: usize| keys.iter().any(|key| *key == format!("{}.value", dock.slots[n].source.id()));
+        let (texts, hits, keys) = drawn((120.0, 80.0), Scrolls::default());
+        assert!(texts.contains(&dock.slots[0].figure) && shows(&keys, 0) && !shows(&keys, 1), "{texts:?} {keys:?}");
         let under: Vec<Hit> = under(&hits, (60.0, 40.0)).map(|hit| hit.4).collect();
         let mut scrolls = Scrolls::default();
         assert!(wheel(&mut scrolls, &under, -120, false));
         while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
-        let (texts, _, _) = drawn((120.0, 80.0), scrolls);
-        assert!(texts.iter().any(|text| text.starts_with(dock.slots[1].source.name(Lang::Zh))), "{texts:?}");
+        let (texts, _, keys) = drawn((120.0, 80.0), scrolls);
+        assert!(texts.contains(&dock.slots[1].figure) && shows(&keys, 1) && !shows(&keys, 0), "{texts:?} {keys:?}");
     }
 
     /// The AI widget draws nothing past its edges, at any size, in either language, with every source shown: the smallest
