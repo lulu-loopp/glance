@@ -1174,7 +1174,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let hole = RECT { left: whole(INSET), top: whole(INSET), right: whole(INSET + w), bottom: whole(INSET + h) };
                     let ring = RECT { left: 0, top: 0, right: whole(INSET + w + MARGIN + 16.0), bottom: whole(INSET + h + MARGIN + 16.0) };
                     let presence = 1.0 - shot.overlay_clear.clamp(0.0, 1.0);
-                    let glass = overlay::Glass { presence, ..overlay::glass(&mut desktop.luminances(ring, hole, 1), None).0 };
+                    let glass = overlay::Glass { presence, ..overlay::glass(&mut desktop.luminances(ring, hole, 1), None, None).0 };
                     let at = Matrix3x2::translation(INSET, INSET);
                     frame.place(at);
                     frame.crisp_text();

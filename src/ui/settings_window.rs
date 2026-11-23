@@ -1961,9 +1961,14 @@ struct Measured {
     /// How light it is behind the areas last asked of (see `Capture::luminance`), the latest first: the preview's
     /// panel or what plays, and the layout's editor's pictures, each frame.
     tones: Vec<(RECT, (f32, f32))>,
-    /// The glass of an overlay over it (its ring around, and the hole the overlay is: see `overlay::glass`).
-    glass: Option<((RECT, RECT), super::overlay::Glass)>,
+    /// The glass of an overlay over it (its ring around, the hole the overlay is, and the tone the theme holds it to:
+    /// see `overlay::glass`).
+    glass: Option<(GlassAt, super::overlay::Glass)>,
 }
+
+/// Where an overlay's glass was measured on a stage: the ring around it, the hole it is, and the tone the theme holds
+/// it to.
+type GlassAt = (RECT, RECT, Option<super::overlay::Tone>);
 
 impl Stage {
     fn new(size: (f32, f32), screen: Option<String>, work: RECT, desktop: Option<Capture>) -> Self {
@@ -2018,13 +2023,13 @@ impl Stage {
     }
 
     /// The glass of an overlay at `hole`, tinted for the desktop in `ring` around it (as the overlay measures it,
-    /// see `Overlay::look`).
-    fn glass(&mut self, ring: RECT, hole: RECT) -> super::overlay::Glass {
+    /// see `Overlay::look`), in the tone `chosen`, if any.
+    fn glass(&mut self, ring: RECT, hole: RECT, chosen: Option<super::overlay::Tone>) -> super::overlay::Glass {
         match self.measured.glass {
-            Some((at, glass)) if at == (ring, hole) => glass,
+            Some((at, glass)) if at == (ring, hole, chosen) => glass,
             _ => {
-                let glass = super::overlay::glass(&mut self.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None).0;
-                self.measured.glass = Some(((ring, hole), glass));
+                let glass = super::overlay::glass(&mut self.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None, chosen).0;
+                self.measured.glass = Some(((ring, hole, chosen), glass));
                 glass
             }
         }
@@ -8108,7 +8113,7 @@ It can be disconnected here at any time, and the status line command put back.",
         let hole = RECT { left: whole(x), top: whole(y), right: whole(x + w), bottom: whole(y + h) };
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
-        let glass = super::overlay::Glass { presence: frost, ..self.stage.glass(ring, hole) };
+        let glass = super::overlay::Glass { presence: frost, ..self.stage.glass(ring, hole, super::overlay::held_to(self.prefs.theme)) };
         // (Its tint alone over the screen as it is: the overlay does not blur what is behind it.)
         frame.place(placed);
         frame.crisp_text();
@@ -9863,8 +9868,10 @@ mod tests {
         // (Both kept: each frame may ask of several.)
         assert_eq!(stage.measured.tones.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [right, left]);
         let (ring, hole) = (whole, RECT { left: 8, top: 8, right: 56, bottom: 24 });
-        assert_eq!(stage.glass(ring, hole), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None).0);
-        assert_eq!(stage.glass(ring, hole), stage.glass(ring, hole));
+        assert_eq!(stage.glass(ring, hole, None), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None, None).0);
+        assert_eq!(stage.glass(ring, hole, None), stage.glass(ring, hole, None));
+        let dark = Some(super::super::overlay::Tone::Dark);
+        assert_eq!(stage.glass(ring, hole, dark), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None, dark).0);
         // Not read yet: grey.
         assert_eq!(Stage::new((64.0, 32.0), None, whole, None).tone(left), (0.5, 0.0));
     }

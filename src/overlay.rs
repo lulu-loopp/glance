@@ -128,6 +128,8 @@ pub struct Overlay {
     drawn: (Vec<overlay::Reading>, Vec<Option<f32>>, Shape),
     /// How its glass is tinted, as the screen around it last asked.
     glass: Option<Glass>,
+    /// The panel's theme, which holds its glass to a tone or has it follow what is behind it (see `overlay::held_to`).
+    theme: crate::ui::prefs::ThemePref,
     /// The tint its last look at the screen needed, and when it looked (see `look`).
     needed: Option<f32>,
     looked: Instant,
@@ -294,6 +296,7 @@ impl Overlay {
             size: 1.0,
             drawn: (Vec::new(), Vec::new(), Shape { layout: Layout::Card, rows: 1, width: f32::INFINITY }),
             glass: None,
+            theme: crate::ui::prefs::ThemePref::default(),
             needed: None,
             looked: Instant::now(),
             grab: None,
@@ -307,9 +310,12 @@ impl Overlay {
     /// ask, while `wanted`: while a game is played (`playing`), with its
     /// frames, on its screen; otherwise on the screen it was put on. Hidden
     /// while not wanted, and while there is nothing to show. Above all but
-    /// `beneath` (the open panel's window).
-    pub fn show(&mut self, history: &[Arc<Sample>], settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
+    /// `beneath` (the open panel's window). Its glass in the tone the panel's `theme` holds it to, or as what is behind
+    /// it is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(&mut self, history: &[Arc<Sample>], settings: &OverlaySettings, lang: Lang, theme: crate::ui::prefs::ThemePref, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
+        self.theme = theme;
         let clear = settings.clear.clamp(0.0, 1.0);
         if self.shown && clear != self.clear {
             self.said = Some(clear);
@@ -442,7 +448,7 @@ impl Overlay {
         let area = RECT { left: (r.left - around).max(s.left), top: (r.top - around).max(s.top), right: (r.right + around).min(s.right), bottom: (r.bottom + around).min(s.bottom) };
         let seen = Capture::take(area);
         let mut behind = seen.map(|capture| capture.luminances(area, r, self.dpi.round().max(1.0) as i32)).unwrap_or_default();
-        let (glass, needed) = overlay::glass(&mut behind, self.glass.zip(self.needed));
+        let (glass, needed) = overlay::glass(&mut behind, self.glass.zip(self.needed), overlay::held_to(self.theme));
         (self.glass, self.needed, self.looked) = (Some(glass), Some(needed), Instant::now());
     }
 
@@ -494,7 +500,7 @@ impl Overlay {
         // but for the open panel.
         self.place();
         let scale = self.scale();
-        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None).0) };
+        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None, overlay::held_to(self.theme)).0) };
         let (width, height, radius) = self.measures();
         self.shape(width, height, radius);
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);

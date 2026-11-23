@@ -671,7 +671,7 @@ impl Controller {
             let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.samples();
             let beneath = panels.iter().find(|panel| panel.is_shown()).map(|panel| panel.window.hwnd);
-            overlay.show(&history, &settings, panels[0].lang, playing, wanted, beneath);
+            overlay.show(&history, &settings, panels[0].lang, panels[0].prefs.theme, playing, wanted, beneath);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
         // (A link made or lost as this thread began had no one to tell yet.)
