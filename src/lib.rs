@@ -34,6 +34,8 @@ mod gpu_libraries;
 #[cfg(windows)]
 mod gpu_power;
 #[cfg(windows)]
+mod system_libraries;
+#[cfg(windows)]
 mod folders;
 #[cfg(windows)]
 mod hang;

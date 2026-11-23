@@ -22,6 +22,7 @@ use windows::Win32::System::Performance::{PdhAddEnglishCounterW, PdhCloseQuery, 
 use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW, HKEY, HKEY_CURRENT_USER, KEY_READ};
 
 use crate::reading::WslSample;
+use crate::system_libraries::Optional;
 
 /// How often the distributions running are asked for, while the machine is,
 /// and how often WSL's machine is looked for again among partitions that
@@ -212,7 +213,8 @@ fn installed() -> bool {
 }
 
 /// The id of WSL's virtual machine, if it is running, as the Host Compute
-/// Service lists it (in capitals).
+/// Service lists it (in capitals). None on a Windows without the service's
+/// library (no virtual machine runs there).
 fn wsl_partition() -> Option<String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "PascalCase")]
@@ -220,6 +222,9 @@ fn wsl_partition() -> Option<String> {
         id: String,
         #[serde(default)]
         owner: String,
+    }
+    if !Optional::HostCompute.present() {
+        return None;
     }
     let operation = unsafe { HcsCreateOperation(None, None) };
     if operation.is_invalid() {

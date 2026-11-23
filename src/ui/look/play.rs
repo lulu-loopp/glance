@@ -30,10 +30,15 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-/// Media Foundation started, once for the process (whether it could be).
+use crate::system_libraries::Optional;
+
+/// Media Foundation started, once for the process (whether it could be: not on a Windows without its libraries, an N
+/// edition without its media pack).
 fn started() -> bool {
     static STARTED: OnceLock<bool> = OnceLock::new();
-    *STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.is_ok())
+    *STARTED.get_or_init(|| {
+        Optional::MediaPlatform.present() && Optional::MediaReadWrite.present() && unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.is_ok()
+    })
 }
 
 /// What the engine says happens (its metadata read, playing, paused, ended, a moment reached, failed): told to the

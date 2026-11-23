@@ -15,7 +15,18 @@ fn main() {
         std::fs::write(&path, format!("#pragma code_page(65001)\n#define RT_MANIFEST 24\n1 RT_MANIFEST \"{root}/glance.manifest\"\n")).unwrap();
         embed_resource::compile_for_everything(&path, embed_resource::NONE).manifest_required().unwrap();
     }
+    // The libraries not every Windows has, each loaded when first called rather than as a program starts (which a
+    // Windows without one would refuse): every program's, the tests' too.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rerun-if-changed=src/system_libraries/optional.rs");
+        for optional in Optional::ALL {
+            println!("cargo:rustc-link-arg=/DELAYLOAD:{}", optional.file());
+        }
+        println!("cargo:rustc-link-arg=delayimp.lib");
+    }
 }
+
+include!("src/system_libraries/optional.rs");
 
 /// The resources of the program `bin`, as `description` names it.
 fn resources(bin: &str, description: &str) {

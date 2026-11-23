@@ -1701,9 +1701,13 @@ fn wifi_name_on(adapter: &str, network: windows::core::GUID) -> Option<String> {
 const WIFI_ASKED_AGAIN: Duration = Duration::from_secs(60);
 
 /// The wireless network the adapter `adapter` (its identifier, in braces, as Windows names adapters) is on, by
-/// its name; none for an adapter that is no wireless one, or is on none, or where Windows does not say.
+/// its name; none for an adapter that is no wireless one, or is on none, or where Windows does not say (or has no
+/// wireless library).
 fn wifi_name(adapter: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::WiFi::{wlan_intf_opcode_current_connection, WlanCloseHandle, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface, WLAN_CONNECTION_ATTRIBUTES};
+    if !crate::system_libraries::Optional::Wireless.present() {
+        return None;
+    }
     let adapter = windows::core::GUID::try_from(adapter.trim_matches(|c| c == '{' || c == '}')).ok()?;
     let (mut version, mut client) = (0u32, windows::Win32::Foundation::HANDLE::default());
     if unsafe { WlanOpenHandle(2, None, &mut version, &mut client) } != ERROR_SUCCESS.0 {
