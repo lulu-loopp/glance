@@ -25,6 +25,14 @@ for path in sys.argv[1:3]:
             continue
         seen.add(traditional)
         lines.append(f'{traditional}\t{first}\n')
+# (Its notice, as the Apache License asks of a file changed from the work: lines without a tab, which Glance skips.)
+NOTICE = """# Derived from OpenCC (Open Chinese Convert) 1.4.2, https://github.com/BYVoid/OpenCC
+# Copyright Carbo Kuo (BYVoid) and the OpenCC contributors. Licensed under the Apache License, Version 2.0:
+# licenses/OpenCC-Apache-2.0.txt, see licenses/THIRD-PARTY.txt.
+# Changed by Glance (scripts/simplified.py): data/dictionary/TSPhrases.txt and TSCharacters.txt joined, phrases first,
+# each text kept with the first of what it is written as only, characters written as they are left out.
+"""
 with open('src/simplified.tsv', 'w', encoding='utf-8', newline='') as out:
+    out.write(NOTICE)
     out.writelines(lines)
 print(len(lines), 'kept')

@@ -65,20 +65,43 @@ pub fn file_of(track: &Track) -> Option<PathBuf> {
     fitting(&named_as(track), track).into_iter().next().cloned()
 }
 
-/// The files in `index` that are `track`, as `lyrics` says; in the order of their paths (the same each time).
+/// The files in `index` that are `track`, as `lyrics` says (titled as it is, then see `taken`); in the order of their
+/// paths (the same each time).
 fn matching<'a>(index: &'a HashMap<PathBuf, Song>, track: &Track) -> Vec<&'a PathBuf> {
     let title = bare(&track.title);
-    let mut found: Vec<&PathBuf> = index.iter().filter(|(_, song)| bare(&song.title) == title && agrees(song, track)).map(|(path, _)| path).collect();
-    found.sort();
-    found
+    taken(index.iter().filter(|(_, song)| bare(&song.title) == title), track)
 }
 
-/// Of the files `named` as `track` is titled (see `named_as`), those whose tags do not say they are not it (see
-/// `agrees`); in the order of their paths.
+/// Of the files `named` as `track` is titled (see `named_as`), those taken for it (see `taken`); in the order of their
+/// paths.
 fn fitting<'a>(named: &'a [(PathBuf, Song)], track: &Track) -> Vec<&'a PathBuf> {
-    let mut found: Vec<&PathBuf> = named.iter().filter(|(_, song)| agrees(song, track)).map(|(path, _)| path).collect();
-    found.sort();
-    found
+    taken(named.iter().map(|(path, song)| (path, song)), track)
+}
+
+/// Of the files that may be `track`, those taken for it: of the ones whose tags do not say they are not it (see
+/// `agrees`), those whose tags say most that they are (its artist, its length), in the order of their paths; none
+/// where those are more than one and not one song by their tags (several albums' "01.flac", the player telling no
+/// artist: which is it is not known).
+fn taken<'a>(files: impl Iterator<Item = (&'a PathBuf, &'a Song)>, track: &Track) -> Vec<&'a PathBuf> {
+    let artist = bare(&track.artist);
+    let said = |song: &Song| {
+        let by = !artist.is_empty() && song.artist.split(';').any(|theirs| bare(theirs) == artist);
+        let as_long = song.seconds != 0 && track.seconds != 0 && song.seconds.abs_diff(track.seconds) <= 2;
+        by as u8 + as_long as u8
+    };
+    let fit: Vec<(&PathBuf, &Song)> = files.filter(|(_, song)| agrees(song, track)).collect();
+    let most = fit.iter().map(|(_, song)| said(song)).max().unwrap_or(0);
+    let mut best: Vec<(&PathBuf, &Song)> = fit.into_iter().filter(|(_, song)| said(song) == most).collect();
+    best.sort_by(|a, b| a.0.cmp(b.0));
+    if best.len() > 1 && !best.windows(2).all(|pair| one_song(pair[0].1, pair[1].1)) {
+        return Vec::new();
+    }
+    best.into_iter().map(|(path, _)| path).collect()
+}
+
+/// Whether `a` and `b` are one song by their tags: both titled, the same, by the same artists, as long to two seconds.
+fn one_song(a: &Song, b: &Song) -> bool {
+    !a.title.trim().is_empty() && bare(&a.title) == bare(&b.title) && bare(&a.artist) == bare(&b.artist) && a.seconds != 0 && b.seconds != 0 && a.seconds.abs_diff(b.seconds) <= 2
 }
 
 /// Text as titles and artists are matched, as the lyrics' sources' are (see `lyrics::folded`).
@@ -97,15 +120,15 @@ fn agrees(song: &Song, track: &Track) -> bool {
 /// The files of music on any drive named as `track` is titled (with its extension, or with one of a file of music's:
 /// a player telling what plays by its file's name), each with what its tags say. The drives' index asked again for
 /// the same title no more often than `LOOK_AGAIN` (a track with no cover asks for one every few seconds), but at once
-/// where it was asked before every drive was listed and they are now (see `crate::search::whole`).
+/// where more of them was listed since (see `crate::search::listed`). Not held while the files are looked for and
+/// read: a title on a slow drive keeps no other waiting.
 fn named_as(track: &Track) -> Vec<(PathBuf, Song)> {
-    /// The files last found, for which title, when, and whether every drive was listed then.
-    type Found = (String, std::time::Instant, bool, Vec<(PathBuf, Song)>);
+    /// The files last found, for which title, when, and how far the drives were listed then.
+    type Found = (String, std::time::Instant, u64, Vec<(PathBuf, Song)>);
     static NAMED: Mutex<Option<Found>> = Mutex::new(None);
-    let mut named = NAMED.lock().unwrap();
-    let whole = crate::search::whole();
-    if let Some((title, at, was_whole, found)) = named.as_ref() {
-        if *title == track.title && at.elapsed() < LOOK_AGAIN && (*was_whole || !whole) {
+    let listed = crate::search::listed().1;
+    if let Some((title, at, then, found)) = NAMED.lock().unwrap().as_ref() {
+        if *title == track.title && at.elapsed() < LOOK_AGAIN && *then == listed {
             return found.clone();
         }
     }
@@ -121,7 +144,7 @@ fn named_as(track: &Track) -> Vec<(PathBuf, Song)> {
             Some((path, song))
         })
         .collect();
-    *named = Some((track.title.clone(), std::time::Instant::now(), whole, found.clone()));
+    *NAMED.lock().unwrap() = Some((track.title.clone(), std::time::Instant::now(), listed, found.clone()));
     found
 }
 
@@ -735,25 +758,36 @@ mod tests {
     }
 
     /// What plays, titled by its file's name (as PotPlayer tells it: 3KSEGT), is a file of that name anywhere on this PC
-    /// (see `crate::search::files_named`) whose length and artist do not say otherwise: one as long to two seconds, or
-    /// either not saying, of its artist or either not saying; in the order of their paths.
+    /// (see `crate::search::files_named`) whose length and artist do not say otherwise (as long to two seconds, of its
+    /// artist, or either not saying), and of those the ones whose tags say most that they are it (its artist, its
+    /// length); none where those are not one song by their tags (a review: "01.flac" in several albums, the player
+    /// telling no artist, gave the first by its path, another song's lyrics). Copies of one song: all, by their paths.
     #[test]
     fn a_file_named_as_what_plays_is_it_where_its_tags_agree() {
         let track = |artist: &str, seconds| Track { netease: None, title: "05. S.H.E - 河滨公园.flac".into(), artist: artist.into(), album: String::new(), seconds, qq_music: false };
-        let song = |artist: &str, seconds| Song { size: 0, written: 0, title: String::new(), artist: artist.into(), seconds };
+        let song = |title: &str, artist: &str, seconds| Song { size: 0, written: 0, title: title.into(), artist: artist.into(), seconds };
         let named = vec![
-            (PathBuf::from("D:/b.flac"), song("", 235)),
-            (PathBuf::from("D:/a.flac"), song("S.H.E", 236)),
-            (PathBuf::from("D:/c.flac"), song("", 300)),
-            (PathBuf::from("D:/d.flac"), song("Someone; Else", 235)),
-            (PathBuf::from("D:/e.flac"), song("", 0)),
+            (PathBuf::from("D:/b.flac"), song("", "", 235)),
+            (PathBuf::from("D:/a.flac"), song("河滨公园", "S.H.E", 236)),
+            (PathBuf::from("D:/c.flac"), song("", "", 300)),
+            (PathBuf::from("D:/d.flac"), song("Other", "Someone; Else", 235)),
+            (PathBuf::from("D:/e.flac"), song("", "", 0)),
         ];
         let paths = |found: Vec<&PathBuf>| found.into_iter().map(|path| path.display().to_string()).collect::<Vec<_>>();
-        assert_eq!(paths(fitting(&named, &track("", 235))), ["D:/a.flac", "D:/b.flac", "D:/d.flac", "D:/e.flac"]);
-        assert_eq!(paths(fitting(&named, &track("s.h.e", 235))), ["D:/a.flac", "D:/b.flac", "D:/e.flac"]);
+        // Its artist told: the file by it, as long.
+        assert_eq!(paths(fitting(&named, &track("s.h.e", 235))), ["D:/a.flac"]);
         // (Its artist in full-width letters, as some players write it: the same.)
-        assert_eq!(paths(fitting(&named, &track("Ｓ.Ｈ.Ｅ", 235))), ["D:/a.flac", "D:/b.flac", "D:/e.flac"]);
-        assert_eq!(paths(fitting(&named, &track("", 0))).len(), 5);
+        assert_eq!(paths(fitting(&named, &track("Ｓ.Ｈ.Ｅ", 235))), ["D:/a.flac"]);
+        // No artist told: three as long, not one song by their tags; nothing told: five. None.
+        assert!(fitting(&named, &track("", 235)).is_empty());
+        assert!(fitting(&named, &track("", 0)).is_empty());
+        // One file of the name: it, whatever its tags do not say.
+        assert_eq!(paths(fitting(&named[2..3], &track("", 0))), ["D:/c.flac"]);
+        // Copies of one song in two folders: both. Two untagged files of one name: neither.
+        let copies = vec![(PathBuf::from("E:/copy.flac"), song("河滨公园", "S.H.E", 236)), (PathBuf::from("D:/a.flac"), song("河滨公园", "S.H.E", 235))];
+        assert_eq!(paths(fitting(&copies, &track("", 235))), ["D:/a.flac", "E:/copy.flac"]);
+        let untagged = vec![(PathBuf::from("D:/x/01.flac"), song("", "", 0)), (PathBuf::from("D:/y/01.flac"), song("", "", 0))];
+        assert!(fitting(&untagged, &track("", 200)).is_empty());
     }
 
     #[test]

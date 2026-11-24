@@ -96,23 +96,35 @@ enum Held {
     Unreached(Instant),
 }
 
-/// Tracks not found on this PC while its drives were not all listed (see `crate::search::whole`): looked for there
-/// again once they are (see `look_again`).
-static UNLISTED: Mutex<Option<std::collections::HashSet<Track>>> = Mutex::new(None);
+/// Tracks not found on this PC, each with how far its drives had been listed then (see `crate::search::listed`): looked
+/// for there again once more of them is and all of them are (see `look_again`). Kept for as long as what is held of
+/// their lyrics is (see `of`).
+static UNLISTED: Mutex<Option<HashMap<Track, u64>>> = Mutex::new(None);
 
-/// `track` looked for on this PC and not found, its drives all listed then (`whole`) or not.
-fn not_on_this_pc(track: &Track, whole: bool) {
-    if !whole {
-        UNLISTED.lock().unwrap().get_or_insert_with(Default::default).insert(track.clone());
-    }
+/// `track` looked for on this PC and not found, its drives listed so far (`listed`, see `crate::search::listed`).
+fn not_on_this_pc(track: &Track, listed: u64) {
+    UNLISTED.lock().unwrap().get_or_insert_with(Default::default).insert(track.clone(), listed);
 }
 
-/// Whether `track`, not found on this PC while its drives were not all listed, is to be looked for there again: they
-/// are now (`whole`, asked only for such a track). Once.
-fn look_again(track: &Track, whole: impl FnOnce() -> bool) -> bool {
+/// Whether `track`, not found on this PC, is to be looked for there again: more of its drives listed since and all of
+/// them as they are now (`listed`, asked only for such a track: see `crate::search::listed`); its drives still being
+/// listed as Glance started, or a drive come since. Once for each time it was not found.
+fn look_again(track: &Track, listed: impl FnOnce() -> (bool, u64)) -> bool {
     let mut unlisted = UNLISTED.lock().unwrap();
-    let Some(tracks) = unlisted.as_mut().filter(|tracks| tracks.contains(track)) else { return false };
-    whole() && tracks.remove(track)
+    let Some(tracks) = unlisted.as_mut() else { return false };
+    let Some(&then) = tracks.get(track) else { return false };
+    let (whole, now) = listed();
+    whole && now > then && tracks.remove(track).is_some()
+}
+
+/// `held` of `track`, where its lyrics are still being asked for: what the sources said, or that a file of it on this
+/// PC has none, not put over the lyrics of its file found meanwhile (looked for again: see `look_again`).
+fn publish(track: Track, held: Held) {
+    let mut known = KNOWN.lock().unwrap();
+    let known = known.get_or_insert_with(HashMap::new);
+    if matches!(known.get(&track), None | Some(Held::Asking)) {
+        known.insert(track, held);
+    }
 }
 
 /// How long lyrics a source could not be reached for are taken to be none before they are asked for again.
@@ -137,12 +149,17 @@ fn held(has: Option<Has>) -> Held {
 /// `known_as`); asked for (on a thread of its own) the first time, and again a while after a source could not be
 /// reached.
 pub fn of(track: &Track, simplified: bool) -> Known {
-    // Not found on this PC as Glance started, its drives not yet listed: its file looked for again once they are.
-    if look_again(track, crate::search::whole) {
+    // Not found on this PC before more of its drives were listed (as Glance started, or a drive come since): its file
+    // looked for again now they are; its lyrics, where it has them, put over any found.
+    if look_again(track, crate::search::listed) {
         let track = track.clone();
         std::thread::spawn(move || {
-            if let Some(lines) = crate::library::lyrics(&track) {
-                KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
+            let listed = crate::search::listed().1;
+            match crate::library::lyrics(&track) {
+                Some(lines) => {
+                    KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
+                }
+                None => not_on_this_pc(&track, listed),
             }
         });
     }
@@ -155,17 +172,20 @@ pub fn of(track: &Track, simplified: bool) -> Known {
     }
     if known.len() >= KEPT_MOST {
         known.retain(|_, held| matches!(held, Held::Asking));
+        if let Some(unlisted) = UNLISTED.lock().unwrap().as_mut() {
+            unlisted.retain(|track, _| known.contains_key(track));
+        }
     }
     known.insert(track.clone(), Held::Asking);
     let track = track.clone();
     std::thread::spawn(move || {
         // A file of it on this PC with lyrics: those (as they are now; not kept, as the file can change).
-        let whole = crate::search::whole();
+        let listed = crate::search::listed().1;
         if let Some(lines) = crate::library::lyrics(&track) {
-            KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
+            publish(track, found(Some(lines)));
             return;
         }
-        not_on_this_pc(&track, whole);
+        not_on_this_pc(&track, listed);
         let held = match kept::read(&track) {
             Some(kept) if kept.fresh() => held(kept.found),
             kept => {
@@ -183,7 +203,7 @@ pub fn of(track: &Track, simplified: bool) -> Known {
                 }
             }
         };
-        KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, held);
+        publish(track, held);
     });
     Known::Asking
 }
@@ -203,12 +223,12 @@ fn known_as(held: &mut Held, simplified: bool) -> Known {
 }
 
 /// `lines` in simplified characters (see `crate::simplified`), none where they are so already: what is sung, word by
-/// word (each word as many characters as it was), and behind it, unless that is Japanese (has kana, see
-/// `simplified::kana`: its kanji are not traditional Chinese); its translation, unless that is.
+/// word (each word as many characters as it was), and behind it, unless that is Japanese (most of its lines have kana,
+/// see `simplified::japanese`: its kanji are not traditional Chinese); its translation, unless that is.
 fn simplified_lines(lines: &[Line]) -> Option<Vec<Line>> {
-    use crate::simplified::{kana, simplified};
-    let sung_japanese = lines.iter().any(|line| kana(&line.text) || line.backing.as_deref().is_some_and(kana));
-    let translated_japanese = lines.iter().any(|line| line.translation.as_deref().is_some_and(kana));
+    use crate::simplified::{japanese, simplified};
+    let sung_japanese = japanese(lines.iter().flat_map(|line| [Some(line.text.as_str()), line.backing.as_deref()]).flatten());
+    let translated_japanese = japanese(lines.iter().filter_map(|line| line.translation.as_deref()));
     let written = |text: &str, japanese: bool| if japanese { None } else { simplified(text) };
     let mut changed = false;
     let shown = lines
@@ -1281,19 +1301,48 @@ pub mod kept {
 mod tests {
     use super::*;
 
-    /// A track not found on this PC while its drives were still being listed (Glance just started: search lists them
-    /// after the machine settles) is looked for there again once they are all listed, once; one not found once they
-    /// were, not again. (It was taken as on none of them for as long as Glance ran.)
+    /// A track not found on this PC is looked for there again once more of its drives is listed and all of them are:
+    /// while they were still being listed (Glance just started: search lists them after the machine settles), or
+    /// before a drive came (a USB drive put in as it played: a review), once each time; not while one is still being
+    /// listed, nor while none more is. (It was taken as on none of them for as long as Glance ran.)
     #[test]
-    fn a_track_not_found_while_the_drives_were_listed_is_looked_for_again() {
+    fn a_track_not_found_is_looked_for_again_once_more_drives_are_listed() {
         let track = |title: &str| Track { netease: None, title: title.into(), artist: String::new(), album: String::new(), seconds: 30, qq_music: false };
         let (early, late) = (track("looked for early"), track("looked for late"));
-        not_on_this_pc(&early, false);
-        assert!(!look_again(&early, || false));
-        assert!(look_again(&early, || true));
-        assert!(!look_again(&early, || true));
-        not_on_this_pc(&late, true);
-        assert!(!look_again(&late, || true));
+        not_on_this_pc(&early, 0);
+        assert!(!look_again(&early, || (false, 0)));
+        assert!(!look_again(&early, || (false, 1)));
+        assert!(look_again(&early, || (true, 1)));
+        assert!(!look_again(&early, || (true, 1)));
+        not_on_this_pc(&late, 1);
+        assert!(!look_again(&late, || (true, 1)));
+        // A drive come since and listed: again, once.
+        assert!(look_again(&late, || (true, 2)));
+        assert!(!look_again(&late, || (true, 3)));
+        assert!(!look_again(&track("never looked for"), || (true, 9)));
+    }
+
+    /// What the sources said of a track is not put over the lyrics of its file on this PC found meanwhile, looked for
+    /// again as its drives were listed (a review: the file's lyrics shown, then gone as the sources answered), and is
+    /// where its lyrics were still being asked for.
+    #[test]
+    fn what_the_sources_said_does_not_put_out_a_files_lyrics_found_meanwhile() {
+        let track = |title: &str| Track { netease: None, title: title.into(), artist: String::new(), album: String::new(), seconds: 31, qq_music: false };
+        let line = Line { at: 1.0, end: None, text: "from the file".into(), words: Vec::new(), backing: None, translation: None };
+        let held_text = |track: &Track| match KNOWN.lock().unwrap().as_ref().and_then(|known| known.get(track).cloned()) {
+            Some(Held::Found(Some(lines), _)) => Some(lines[0].text.clone()),
+            Some(Held::Found(None, _)) => Some(String::new()),
+            _ => None,
+        };
+        let (file, asked) = (track("found meanwhile on this PC"), track("still asked for"));
+        for track in [&file, &asked] {
+            KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track.clone(), Held::Asking);
+        }
+        KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(file.clone(), found(Some(vec![line])));
+        publish(file.clone(), Held::Found(None, None));
+        assert_eq!(held_text(&file).as_deref(), Some("from the file"));
+        publish(asked.clone(), Held::Found(None, None));
+        assert_eq!(held_text(&asked).as_deref(), Some(""));
     }
 
     #[test]

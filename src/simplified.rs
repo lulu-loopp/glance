@@ -42,10 +42,27 @@ pub fn simplified(text: &str) -> Option<String> {
     (out != text).then_some(out)
 }
 
-/// Whether `text` has kana (hiragana, katakana, their half-width forms): Japanese, whose kanji are not traditional
-/// Chinese to be written otherwise.
+/// Whether `text` has kana: a letter of hiragana or katakana (their iteration marks too, their half-width forms), not
+/// the signs Chinese is written with as well (the middle dot "・", the long mark "ー").
 pub fn kana(text: &str) -> bool {
-    text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}'))
+    text.chars().any(|c| matches!(c, '\u{3041}'..='\u{3096}' | '\u{309D}'..='\u{309F}' | '\u{30A1}'..='\u{30FA}' | '\u{30FD}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF6F}' | '\u{FF71}'..='\u{FF9D}'))
+}
+
+/// Whether `text` has a Chinese character (kanji, hanzi) or kana.
+fn written_in_characters(text: &str) -> bool {
+    kana(text) || text.chars().any(|c| matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{20000}'..='\u{3134F}'))
+}
+
+/// Whether the lines `texts` are Japanese, whose kanji are not traditional Chinese to be written otherwise: at least
+/// half of those written in characters have kana (a Japanese song's lines of kanji alone are some of them, and a Chinese
+/// song's one kana, as a title's "の", is one).
+pub fn japanese<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
+    let (mut with_kana, mut written) = (0, 0);
+    for text in texts.filter(|text| written_in_characters(text)) {
+        written += 1;
+        with_kana += kana(text) as usize;
+    }
+    written > 0 && with_kana * 2 >= written
 }
 
 #[cfg(test)]
@@ -64,5 +81,19 @@ mod tests {
         let long = "頭髮亂了 後來 著急";
         assert_eq!(simplified(long).map(|text| text.chars().count()), Some(long.chars().count()));
         assert!(kana("君の名は") && kana("ｶﾀｶﾅ") && !kana("我會像奧德修斯一樣"));
+    }
+
+    /// Lyrics are Japanese where most of their lines written in Chinese characters or kana have kana letters: not
+    /// where one line has a kana sign Chinese is written with too (a review: "詞：邁克爾・傑克遜", its "・", left a
+    /// Chinese song in traditional characters) or one kana (a Chinese title's "の"), and so where some lines are kanji
+    /// alone. Lines of letters alone do not count.
+    #[test]
+    fn lyrics_are_japanese_where_most_of_their_lines_have_kana() {
+        assert!(!kana("詞：邁克爾・傑克遜") && !kana("ー") && kana("ラーメン"));
+        let chinese = ["詞：邁克爾・傑克遜", "我の世界", "而我受過的傷", "都是我的成長", "Whoa"];
+        assert!(!japanese(chinese.iter().copied()));
+        let japanese_lines = ["永遠", "君の名前を", "呼んでいる", "運命", "Oh yeah"];
+        assert!(japanese(japanese_lines.iter().copied()));
+        assert!(!japanese(["Hello", "World"].iter().copied()));
     }
 }

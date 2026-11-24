@@ -101,6 +101,13 @@ impl Volume {
         Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), current: AtomicBool::new(false), told: Mutex::new(HashMap::new()) }
     }
 
+    /// Its index holding all its names as they are now (see `current`): once more of the drives listed (see `listed`).
+    fn caught_up(&self) {
+        if !self.current.swap(true, Ordering::Relaxed) {
+            LISTED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Whether it is no longer followed: gone, or let go of as Windows asked to take it out.
     fn away(&self) -> bool {
         self.gone.load(Ordering::Relaxed) || self.drive.left()
@@ -252,10 +259,17 @@ static VOLUMES: Mutex<Vec<Arc<Volume>>> = Mutex::new(Vec::new());
 /// Whether the drives there are have been found (as `drives` first looked).
 static DRIVES_FOUND: AtomicBool = AtomicBool::new(false);
 
-/// Whether every drive there is has its names listed whole (or read as kept whole): a file not found by its name then
-/// is on none of them. Not before the drives are first found.
-pub fn whole() -> bool {
-    DRIVES_FOUND.load(Ordering::Relaxed) && VOLUMES.lock().unwrap().iter().all(|volume| volume.ready.load(Ordering::Relaxed))
+/// How many times a drive's index has come to hold all its names as they are now (listed whole, or read as kept and
+/// all that changed since found: see `Volume::caught_up`): more, where more may be found by name since.
+static LISTED: AtomicU64 = AtomicU64::new(0);
+
+/// Whether every drive there is holds all its names as they are now (see `Volume::current`): a file not found by its
+/// name then is on none of them, as far as they are known (not before the drives are first found; a drive kept whole
+/// as Glance last ran, not till all that changed since is found). And how many times a drive has come to (see
+/// `LISTED`): a file not found then may be found once it is more (a drive listed whole, or another come).
+pub fn listed() -> (bool, u64) {
+    let whole = DRIVES_FOUND.load(Ordering::Relaxed) && VOLUMES.lock().unwrap().iter().all(|volume| volume.ready.load(Ordering::Relaxed) && volume.current.load(Ordering::Relaxed));
+    (whole, LISTED.load(Ordering::Relaxed))
 }
 
 /// Starts finding the names on every drive, and keeping them current, on threads of its own, once the machine has
@@ -559,7 +573,7 @@ fn follow_journal(volume: &Volume, pool: &Arc<walk::Pool>, mut keeping: Keeping)
                 }
                 // (Read to its end: all that changed while Glance was not running is found.)
                 if !more {
-                    volume.current.store(true, Ordering::Relaxed);
+                    volume.caught_up();
                 }
                 // (Only once what changed is in the index, or marked in it to be listed again: kept now, it holds all
                 // before `next`.)
@@ -609,7 +623,7 @@ fn coalesce(seen: watch::Seen, told: &mpsc::Receiver<watch::Seen>) -> watch::See
 /// A drive with no journal kept current as Windows tells of names changed in its folders.
 fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &Arc<walk::Pool>, mut keeping: Keeping) {
     // (Listed whole since it was watched.)
-    volume.current.store(true, Ordering::Relaxed);
+    volume.caught_up();
     let mut pacing = Pacing::new(volume);
     while !volume.away() {
         let changed = match told.recv_timeout(JOURNAL_EVERY).map(|seen| coalesce(seen, told)) {
@@ -624,7 +638,7 @@ fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &Arc<
             Ok(watch::Seen::Lost) => {
                 mark_all(volume);
                 sweep(volume, pool, &mut keeping, true);
-                volume.current.store(true, Ordering::Relaxed);
+                volume.caught_up();
                 pacing = Pacing::new(volume);
                 false
             }
