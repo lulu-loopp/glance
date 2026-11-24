@@ -820,6 +820,17 @@ impl Index {
         found
     }
 
+    /// The places of the live files (not folders) named `name`, or `name` and one of `extensions` after a dot, case
+    /// folded, looked for by `threads` threads at once (see `holding`).
+    pub fn files_named(&self, name: &str, extensions: &[&str], threads: usize) -> Vec<u32> {
+        let folded: String = name.chars().flat_map(char::to_lowercase).collect();
+        let named = |place: u32| {
+            let named = self.folded_name(place);
+            named == folded || named.strip_prefix(folded.as_str()).and_then(|rest| rest.strip_prefix('.')).is_some_and(|extension| extensions.iter().any(|one| one.eq_ignore_ascii_case(extension)))
+        };
+        self.holding(&folded, threads).into_iter().filter(|&place| !self.entry(place).folder() && named(place)).collect()
+    }
+
     /// The places of the live entries whose names hold Chinese characters.
     pub fn chinese(&self) -> impl Iterator<Item = u32> + '_ {
         let base = self.base.as_ref().map_or(&[][..], Base::chinese);
@@ -1490,6 +1501,33 @@ mod tests {
         let names: Vec<Vec<u16>> = (1..read.len()).map(|place| read.name(place).encode_wide().collect()).collect();
         assert!(names.contains(&vec![0x41, 0xD800, 0x62]));
         assert!(names.contains(&"ÄBC.txt".encode_utf16().collect()));
+    }
+
+    /// Files are found by their whole names, in any case, as a player tells what it plays (its file's name, with or
+    /// without its extension): named so, or so and one of the extensions given; not a folder named so, nor a file whose
+    /// name holds it among more.
+    #[test]
+    fn files_are_found_by_their_whole_names() {
+        let mut index = Index::new(5, true);
+        let items = vec![
+            item("05. S.H.E - 河滨公园.flac", 3, FILE),
+            item("05. S.H.E - 河滨公园.flac.bak", 4, FILE),
+            item("05. s.h.e - 河滨公园.MP3", 5, FILE),
+            item("05. S.H.E - 河滨公园", 6, FOLDER),
+            item("x 05. S.H.E - 河滨公园.flac", 7, FILE),
+            item("05. S.H.E - 河滨公园.txt", 8, FILE),
+        ];
+        round(&mut index, &[(ROOT, items)]);
+        let named = |name: &str, threads: usize| {
+            let mut found: Vec<String> = index.files_named(name, &["flac", "mp3"], threads).into_iter().map(|place| index.name(place).to_string_lossy().into_owned()).collect();
+            found.sort();
+            found
+        };
+        for threads in [1, 3] {
+            assert_eq!(named("05. S.H.E - 河滨公园.flac", threads), ["05. S.H.E - 河滨公园.flac"]);
+            assert_eq!(named("05. s.h.e - 河滨公园", threads), ["05. S.H.E - 河滨公园.flac", "05. s.h.e - 河滨公园.MP3"]);
+            assert!(named("河滨公园", threads).is_empty());
+        }
     }
 
     #[test]

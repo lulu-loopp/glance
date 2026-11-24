@@ -740,6 +740,19 @@ pub fn standing() -> Vec<Standing> {
         .collect()
 }
 
+/// The files on every drive, as far as each is listed, named `name`, or `name` and one of `extensions` (see
+/// `Index::files_named`): their paths.
+pub fn files_named(name: &str, extensions: &[&str]) -> Vec<PathBuf> {
+    let volumes = VOLUMES.lock().unwrap().clone();
+    let mut found = Vec::new();
+    for volume in &volumes {
+        let index = volume.index.read().unwrap();
+        let threads = (index.len() as usize).div_ceil(1 << 20).clamp(1, 4);
+        found.extend(index.files_named(name, extensions, threads).into_iter().filter_map(|place| index.path(place, &volume.drive.path)));
+    }
+    found
+}
+
 /// The names meeting `query` on every drive: how many there are, how many are folders', and the best `most` folders
 /// and the best `most` files, best first.
 pub fn find(query: &Query, most: usize) -> Found {
@@ -778,6 +791,26 @@ mod tests {
     use journal::Journal;
     use std::path::PathBuf;
     use walk::tests::{indexed, on_disk, tree};
+
+    /// How long files are found by name in a drive's index as it was kept on a PC (by hand: a copy of its kept file in
+    /// the folder `GLANCE_TEST_INDEX` names, its drive's serial in hex in `GLANCE_TEST_SERIAL`): each of a few names,
+    /// as the lyrics of what plays ask, a few times over.
+    #[test]
+    #[ignore = "reads the index GLANCE_TEST_INDEX names"]
+    fn times_finding_files_by_name_in_a_kept_index() {
+        let folder = PathBuf::from(std::env::var("GLANCE_TEST_INDEX").expect("GLANCE_TEST_INDEX"));
+        let serial = u32::from_str_radix(&std::env::var("GLANCE_TEST_SERIAL").expect("GLANCE_TEST_SERIAL"), 16).expect("a serial in hex");
+        let (index, _) = store::kept_in(&folder, serial).expect("an index kept there");
+        let threads = (index.len() as usize).div_ceil(1 << 20).clamp(1, 4);
+        println!("{} names, {threads} threads", index.names());
+        for name in ["05. S.H.E - 河滨公园.flac", "hello", "a", "readme.md"] {
+            for _ in 0..3 {
+                let at = Instant::now();
+                let found = index.files_named(name, &["mp3", "flac"], threads);
+                println!("{name}: {} in {:?}", found.len(), at.elapsed());
+            }
+        }
+    }
 
     /// An index kept is read on from where it was kept while the journal still holds all since. Kept before what the
     /// journal holds now (Glance not running while it went on), or with another journal, it is searched as it was kept

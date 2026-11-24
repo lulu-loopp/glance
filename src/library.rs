@@ -3,7 +3,8 @@
 //! length), kept on disk (`index`) and read again only where a file has changed; and the lyrics of a file,
 //! from an LRC file beside it of the same name, else from its own tags (ID3's USLT and SYLT, Vorbis comments in
 //! FLAC and Ogg, MP4's ©lyr), else as Windows reads them. A player says only what plays, never from which file:
-//! the track is found among them by its title, artist and length.
+//! the track is found among them by its title, artist and length; else, as a player may title what it plays by its
+//! file's name, among the files of music of that name on any drive (as search lists them).
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -47,7 +48,10 @@ pub fn lyrics(track: &Track) -> Option<Vec<Line>> {
     if track.title.trim().is_empty() {
         return None;
     }
-    matching(&looked_at(&folders()), track).into_iter().find_map(|path| of_file(path))
+    if let Some(lines) = matching(&looked_at(&folders()), track).into_iter().find_map(|path| of_file(path)) {
+        return Some(lines);
+    }
+    fitting(&named_as(track), track).into_iter().find_map(|path| of_file(path))
 }
 
 /// The file of music on this PC that is `track`, as `lyrics` finds it (the first, by its path).
@@ -55,22 +59,78 @@ pub fn file_of(track: &Track) -> Option<PathBuf> {
     if track.title.trim().is_empty() {
         return None;
     }
-    matching(&looked_at(&folders()), track).into_iter().next().cloned()
+    if let Some(path) = matching(&looked_at(&folders()), track).into_iter().next() {
+        return Some(path.clone());
+    }
+    fitting(&named_as(track), track).into_iter().next().cloned()
 }
 
 /// The files in `index` that are `track`, as `lyrics` says; in the order of their paths (the same each time).
 fn matching<'a>(index: &'a HashMap<PathBuf, Song>, track: &Track) -> Vec<&'a PathBuf> {
-    let bare = |text: &str| text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
-    let (title, artist) = (bare(&track.title), bare(&track.artist));
-    let mut found: Vec<&PathBuf> = index
-        .iter()
-        .filter(|(_, song)| bare(&song.title) == title)
-        .filter(|(_, song)| song.seconds == 0 || track.seconds == 0 || song.seconds.abs_diff(track.seconds) <= 2)
-        .filter(|(_, song)| song.artist.is_empty() || artist.is_empty() || song.artist.split(';').any(|theirs| bare(theirs) == artist))
-        .map(|(path, _)| path)
-        .collect();
+    let title = bare(&track.title);
+    let mut found: Vec<&PathBuf> = index.iter().filter(|(_, song)| bare(&song.title) == title && agrees(song, track)).map(|(path, _)| path).collect();
     found.sort();
     found
+}
+
+/// Of the files `named` as `track` is titled (see `named_as`), those whose tags do not say they are not it (see
+/// `agrees`); in the order of their paths.
+fn fitting<'a>(named: &'a [(PathBuf, Song)], track: &Track) -> Vec<&'a PathBuf> {
+    let mut found: Vec<&PathBuf> = named.iter().filter(|(_, song)| agrees(song, track)).map(|(path, _)| path).collect();
+    found.sort();
+    found
+}
+
+/// Text as titles and artists are matched: without its spaces, in lower case.
+fn bare(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
+}
+
+/// Whether `song`'s length and artist do not say it is not `track`: as long to two seconds, or either not saying it;
+/// by its artist (one of its artists), or either not saying it.
+fn agrees(song: &Song, track: &Track) -> bool {
+    let artist = bare(&track.artist);
+    (song.seconds == 0 || track.seconds == 0 || song.seconds.abs_diff(track.seconds) <= 2)
+        && (song.artist.is_empty() || artist.is_empty() || song.artist.split(';').any(|theirs| bare(theirs) == artist))
+}
+
+/// The files of music on any drive named as `track` is titled (with its extension, or with one of a file of music's:
+/// a player telling what plays by its file's name), each with what its tags say. The drives' index asked again for
+/// the same title no more often than `LOOK_AGAIN` (a track with no cover asks for one every few seconds).
+fn named_as(track: &Track) -> Vec<(PathBuf, Song)> {
+    /// The files last found, for which title, when.
+    type Found = (String, std::time::Instant, Vec<(PathBuf, Song)>);
+    static NAMED: Mutex<Option<Found>> = Mutex::new(None);
+    let mut named = NAMED.lock().unwrap();
+    if let Some((title, at, found)) = named.as_ref() {
+        if *title == track.title && at.elapsed() < LOOK_AGAIN {
+            return found.clone();
+        }
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let found: Vec<(PathBuf, Song)> = crate::search::files_named(track.title.trim(), AUDIO)
+        .into_iter()
+        .filter(|path| audio(path))
+        .filter_map(|path| {
+            let metadata = std::fs::metadata(&path).ok()?;
+            let song = read_tags(&path, metadata.len(), written(&metadata));
+            Some((path, song))
+        })
+        .collect();
+    *named = Some((track.title.clone(), std::time::Instant::now(), found.clone()));
+    found
+}
+
+/// Whether `path` is a file of music's, by its extension.
+fn audio(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| AUDIO.iter().any(|audio| audio.eq_ignore_ascii_case(extension)))
+}
+
+/// When a file was last written, as its index keeps it (nanoseconds since 1970; 0 where not told).
+fn written(metadata: &std::fs::Metadata) -> u64 {
+    metadata.modified().ok().and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()).map_or(0, |since| since.as_nanos() as u64)
 }
 
 /// How long the folders, once looked at, are taken as they were (a track with no cover is asked for one every few
@@ -154,9 +214,9 @@ fn walk(folder: &Path, files: &mut Vec<(PathBuf, u64, u64)>) {
         let path = entry.path();
         if kind.is_dir() {
             walk(&path, files);
-        } else if kind.is_file() && path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| AUDIO.iter().any(|audio| audio.eq_ignore_ascii_case(extension))) {
+        } else if kind.is_file() && audio(&path) {
             if let Ok(metadata) = entry.metadata() {
-                let written = metadata.modified().ok().and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()).map_or(0, |since| since.as_nanos() as u64);
+                let written = written(&metadata);
                 files.push((path, metadata.len(), written));
             }
         }
@@ -670,6 +730,26 @@ mod tests {
         assert_eq!(found(&track("oggsong", "Some Artist", 20)), 1);
         assert_eq!(found(&track("Ogg Song", "Someone Else", 20)), 0);
         assert_eq!(found(&track("Ogg Song", "Some Artist", 30)), 0);
+    }
+
+    /// What plays, titled by its file's name (as PotPlayer tells it: 3KSEGT), is a file of that name anywhere on this PC
+    /// (see `crate::search::files_named`) whose length and artist do not say otherwise: one as long to two seconds, or
+    /// either not saying, of its artist or either not saying; in the order of their paths.
+    #[test]
+    fn a_file_named_as_what_plays_is_it_where_its_tags_agree() {
+        let track = |artist: &str, seconds| Track { netease: None, title: "05. S.H.E - 河滨公园.flac".into(), artist: artist.into(), album: String::new(), seconds, qq_music: false };
+        let song = |artist: &str, seconds| Song { size: 0, written: 0, title: String::new(), artist: artist.into(), seconds };
+        let named = vec![
+            (PathBuf::from("D:/b.flac"), song("", 235)),
+            (PathBuf::from("D:/a.flac"), song("S.H.E", 236)),
+            (PathBuf::from("D:/c.flac"), song("", 300)),
+            (PathBuf::from("D:/d.flac"), song("Someone; Else", 235)),
+            (PathBuf::from("D:/e.flac"), song("", 0)),
+        ];
+        let paths = |found: Vec<&PathBuf>| found.into_iter().map(|path| path.display().to_string()).collect::<Vec<_>>();
+        assert_eq!(paths(fitting(&named, &track("", 235))), ["D:/a.flac", "D:/b.flac", "D:/d.flac", "D:/e.flac"]);
+        assert_eq!(paths(fitting(&named, &track("s.h.e", 235))), ["D:/a.flac", "D:/b.flac", "D:/e.flac"]);
+        assert_eq!(paths(fitting(&named, &track("", 0))).len(), 5);
     }
 
     #[test]
