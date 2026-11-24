@@ -697,6 +697,7 @@ impl Controller {
         let mut look_back = false;
         let mut look_play = false;
         let mut look_shown: Option<(isize, u64)> = None;
+        let mut sound_shown: Option<isize> = None;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
         let mut seam_rest: Option<(Instant, POINT)> = None;
@@ -1908,6 +1909,17 @@ impl Controller {
                     }
                 }
                 look_shown = shown;
+            }
+            // The sound's page come up or gone: what it opened from drawn at once, its output's name showing so.
+            let shown = crate::ui::beside::sound_owner();
+            if shown != sound_shown {
+                for owner in [sound_shown, shown].into_iter().flatten() {
+                    match panels.iter_mut().find(|panel| panel.window.hwnd.0 as isize == owner) {
+                        Some(panel) => panel.next_frame = now,
+                        None => widgets.draw_soon(),
+                    }
+                }
+                sound_shown = shown;
             }
             let needed = pusher.resting() || seam_rest.is_some();
             if needed != ticking {
@@ -3681,6 +3693,21 @@ impl<'a> Panel<'a> {
         }
     }
 
+    /// The sound's page opened beside it, its first line level with the output's name (in line with it, under the top
+    /// edge's panel); or, up, closed.
+    fn toggle_sound(&self) {
+        if crate::ui::beside::sound_up_for(self.window.hwnd) {
+            crate::ui::beside::close();
+            return;
+        }
+        let (Some(placement), Some(row)) = (&self.placement, self.hit_on_screen(Hit::Outputs)) else { return };
+        let along = match self.edge {
+            Edge::Top => row.left - placement.panel.left - (crate::ui::outputs::FIRST_COLUMN * placement.px).round() as i32,
+            Edge::Left | Edge::Right => row.top - placement.panel.top - (crate::ui::outputs::FIRST_LINE * placement.px).round() as i32,
+        };
+        self.open_beside(crate::ui::beside::Page::Sound { along });
+    }
+
     /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.
     fn open_beside(&self, page: crate::ui::beside::Page) {
         use crate::ui::beside::{Opening, Side};
@@ -3784,6 +3811,10 @@ impl<'a> Panel<'a> {
         // (Off the panel, in its window before it was told to let clicks through there: nothing of the panel's.)
         if !self.on_panel(client) {
             return;
+        }
+        // The sound's page beside it closed by a press anywhere on it but the output's name (which opens and closes it).
+        if crate::ui::beside::sound_up_for(self.window.hwnd) && self.hit_at(client) != Some(Hit::Outputs) {
+            crate::ui::beside::close();
         }
         // Where nothing may be chosen, pressed alone: nothing chosen here any more.
         if keys.none() && !self.hit_at(client).is_some_and(Hit::drags) {
@@ -4621,7 +4652,7 @@ impl<'a> Panel<'a> {
         // up from it.)
         let says = crate::ui::look::hint_says().filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -5245,6 +5276,7 @@ impl<'a> Panel<'a> {
                 crate::station::select::turned(self.window.hwnd.0 as isize, tab);
             }
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
+            Some(Hit::Outputs) => self.toggle_sound(),
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
             Some(Hit::Search) => crate::ui::find::toggle(),
             Some(Hit::Note(number)) => {
@@ -5350,6 +5382,7 @@ fn scene<'s>(
         newer: crate::update::available().is_some(),
         settings_lit: None,
         music_apart: false,
+        sound_open: false,
         hint: None,
     }
 }

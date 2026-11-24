@@ -440,7 +440,7 @@ mod tests {
         let seen = Seen::of(&history);
         let lanes = [view::Lane::empty("station", &theme)];
         let layout = Layout::with_columns(vec![200.0], 1, &theme);
-        let at_rest = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: super::super::text::Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(1)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let at_rest = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: super::super::text::Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(1)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
         let key = |scene: &Scene| super::content_key(&Picture { scene, lanes: &lanes, layout: &layout, small: None, size: (300.0, 200.0), at: (0.0, 0.0), edge: None, backdrop: None, frost: 1.0, rough: false }, 1.0);
         let rest = key(&at_rest);
         assert_eq!(key(&Scene { pen_ms: 500.0, ..at_rest }), rest, "only the charts follow the pen: kept");
@@ -448,6 +448,7 @@ mod tests {
         let come = key(&Scene { hint: Some((Hit::Shelf(1), 1.0, "Ctrl+Q")), ..at_rest });
         assert!(coming != rest && come != coming, "the shortcut said as it comes in");
         assert_ne!(key(&Scene { settings_lit: Some(1.2), ..at_rest }), key(&Scene { settings_lit: Some(1.0), ..at_rest }), "the settings' button as it grows");
+        assert_ne!(key(&Scene { sound_open: true, ..at_rest }), rest, "the sound's page opened from it: its output's name shows so");
         assert_ne!(key(&Scene { newer: true, ..at_rest }), rest, "a newer Glance's dot");
         assert_ne!(key(&Scene { buttons: false, ..at_rest }), rest, "the bar with no buttons");
         assert_ne!(key(&Scene { music_apart: true, ..at_rest }), rest, "what plays drawn apart");

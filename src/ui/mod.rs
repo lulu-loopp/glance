@@ -7,6 +7,8 @@ pub mod arrange;
 #[cfg(windows)]
 pub mod backdrop;
 pub mod beside;
+#[cfg(windows)]
+pub mod outputs;
 pub mod buttons;
 pub mod canvas;
 pub mod editor;

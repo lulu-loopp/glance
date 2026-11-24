@@ -680,7 +680,7 @@ mod tests {
                     let theme = Theme::new(skin, dark);
                     let y0 = 20.0 + row as f32 * 195.0;
                     for (column, hover) in [None, Some(Hit::Search)].into_iter().enumerate() {
-                        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+                        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false, sound_open: false };
                         let lane = Rect { x: 20.0 + column as f32 * 300.0, y: y0, w: 280.0, h: 84.0 };
                         let todo = Rect { x: 20.0 + column as f32 * 300.0, y: y0 + 92.0, w: 280.0, h: 86.0 };
                         for piece in [lane, todo] {
@@ -719,7 +719,7 @@ mod tests {
         let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
         let prefs = crate::ui::prefs::Prefs::default();
         let seen = crate::ui::seen::Seen::default();
-        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false, sound_open: false };
         let row = |n: u32, lit: f32| Row { n, key: 1000 + u64::from(n), text: format!("{n}"), done: false, label: None, soon: false, tick: 0.0, lit };
         let ticks = |lit: Option<u32>| {
             let lane = TodoLane { undone: (0..8).map(|n| row(n, if Some(n) == lit { 1.0 } else { 0.0 })).collect(), done: Vec::new(), open: false, field: None, moving: 0, edit: None };
@@ -743,7 +743,7 @@ mod tests {
         let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
         let prefs = crate::ui::prefs::Prefs::default();
         let seen = crate::ui::seen::Seen::default();
-        let scene_on = |hover: Option<Hit>| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+        let scene_on = |hover: Option<Hit>| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false, sound_open: false };
         let row = |n: u32, done: bool, label: Option<&str>| Row { n, key: 500 + u64::from(n), text: format!("item {n}"), done, label: label.map(Into::into), soon: false, tick: if done { 1.0 } else { 0.0 }, lit: 0.0 };
         let undone = vec![row(0, false, Some("18:00")), row(1, false, None)];
         let done = vec![row(2, true, None)];
@@ -803,7 +803,7 @@ mod tests {
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
             for dark in [false, true] {
                 let theme = Theme::new(skin, dark);
-                let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+                let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false, sound_open: false };
                 let (w, h) = ((wide * scale) as usize, (tall * scale) as usize);
                 let paint = |words: bool| {
                     gfx.draw_offscreen((w as u32, h as u32), scale, |frame| {

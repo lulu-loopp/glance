@@ -23,7 +23,8 @@ use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::canvas::{Align, Canvas, Color, Point};
@@ -41,6 +42,9 @@ pub enum Page {
     Picker,
     /// A note, by its file's name in the notes' folder (none: a new one, named by its title as it is first kept).
     Note(Option<String>),
+    /// The sound's outputs and its programs' (see `outputs`), as tall as what it lists, its first line `along` physical
+    /// px along what it opens from (down it, or across it for the top edge's panel): level with the row it opened from.
+    Sound { along: i32 },
 }
 
 /// Where the page goes: beside `by` (screen px: the panel or the widget it opens from), on the side `side` (away from
@@ -137,6 +141,10 @@ const ROW_IN: f32 = 8.0;
 /// Its timer for drawing again while a mark slides (each frame's time).
 const SLIDING: usize = 6;
 const SHOW_WITHIN_MS: u32 = 400;
+/// The sound's page's timer: what it shows looked at again each frame (how loud the programs sound moves), drawn again
+/// where that changed.
+const SOUND_TICK: usize = 7;
+const SOUND_TICK_MS: u32 = 33;
 
 /// The page's window while one is up (0 while none is): what a page's going asked for later is for (see `go_soon`).
 static PAGE: AtomicIsize = AtomicIsize::new(0);
@@ -176,6 +184,25 @@ fn goes_now(meant: isize, up: isize) -> bool {
 /// Whether the page is up.
 pub fn is_up() -> bool {
     UP.load(Ordering::Acquire)
+}
+
+/// `hwnd` told (`WM_MOUSELEAVE`) as the pointer goes off it, or at once where it is off it already.
+fn told_as_it_leaves(hwnd: HWND) {
+    let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+    let _ = unsafe { TrackMouseEvent(&mut track) };
+}
+
+/// Whether the page up is the sound's (see `Page::Sound`).
+static SOUND_UP: AtomicBool = AtomicBool::new(false);
+
+/// The window the sound's page up was opened from (what opened it shows so).
+pub fn sound_owner() -> Option<isize> {
+    (is_up() && SOUND_UP.load(Ordering::Acquire)).then(|| OWNER.load(Ordering::Acquire))
+}
+
+/// Whether the sound's page is up, opened from `window`.
+pub fn sound_up_for(window: HWND) -> bool {
+    sound_owner() == Some(window.0 as isize)
 }
 
 /// The note written in on the page up, by its name (a new one, once it is first kept).
@@ -309,6 +336,8 @@ struct Beside {
     shown: bool,
     /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
+    /// The sound's page's own (see `outputs`).
+    sound: super::outputs::Sound,
 }
 
 thread_local! {
@@ -351,6 +380,8 @@ enum Hit {
     NoteMenu,
     /// A thing listed, by what opens it and its name: added, or taken off where it is kept already.
     Pick(String, String),
+    /// Something of the sound's page (see `outputs`).
+    Sound(super::outputs::Hit),
 }
 
 thread_local! {
@@ -490,24 +521,31 @@ fn placed(opening: &Opening) -> (RECT, f32) {
 /// wider or taller than the room (on a narrow screen at a large scale, a page beside the panel was wider than the
 /// screen, and placing it within it failed, ending Glance).
 fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
-    let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
+    // (The sound's page as wide as a column of the panel, as tall as what it lists, along what it opens from where its
+    // row is: see `Page::Sound`.)
+    let (wide, sound) = match opening.page {
+        Page::Sound { along } => (super::outputs::WIDTH, Some((along, (super::outputs::height_of(&crate::audio::mixer()) * scale).round() as i32))),
+        _ => (WIDTH, None),
+    };
+    let (wide, gap) = ((wide * scale).round() as i32, (GAP * scale).round() as i32);
     let least = (480.0 * scale) as i32;
     let wide = wide.min(room.right - room.left);
     let left_of = opening.by.left - gap - wide;
     let right_of = opening.by.right + gap;
     let (x, y, tall) = match opening.side {
         Side::Below => {
-            let tall = (room.bottom - opening.by.bottom - gap - gap).max(least).min(room.bottom - room.top);
-            ((opening.by.left + opening.by.right - wide) / 2, opening.by.bottom + gap, tall)
+            let tall = sound.map_or((room.bottom - opening.by.bottom - gap - gap).max(least), |(_, tall)| tall).min(room.bottom - room.top);
+            let x = sound.map_or((opening.by.left + opening.by.right - wide) / 2, |(along, _)| opening.by.left + along);
+            (x, opening.by.bottom + gap, tall)
         }
         side => {
-            let tall = (opening.by.bottom - opening.by.top).max(least).min(room.bottom - room.top);
+            let tall = sound.map_or((opening.by.bottom - opening.by.top).max(least), |(_, tall)| tall).min(room.bottom - room.top);
             let x = match (side == Side::Left, left_of >= room.left, right_of + wide <= room.right) {
                 (true, true, _) | (false, true, false) => left_of,
                 (false, _, true) | (true, false, true) => right_of,
                 _ => (opening.by.left + opening.by.right - wide) / 2,
             };
-            (x, opening.by.top, tall)
+            (x, sound.map_or(opening.by.top, |(along, _)| opening.by.top + along), tall)
         }
     };
     let x = x.clamp(room.left, room.right - wide);
@@ -575,6 +613,7 @@ fn show(opening: Opening) {
             moved_from: None,
             shown: false,
             marks: super::thumb::Dots::new(),
+            sound: super::outputs::Sound::default(),
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
@@ -619,6 +658,10 @@ fn show(opening: Opening) {
             let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
             DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
         }
+        if let Page::Sound { .. } = opening.page {
+            let _ = SetTimer(Some(hwnd), SOUND_TICK, SOUND_TICK_MS, None);
+        }
+        SOUND_UP.store(matches!(opening.page, Page::Sound { .. }), Ordering::Release);
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
         let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
         // Shown once drawn whole (see `Beside::shown`), or after a while drawn as it can be.
@@ -708,6 +751,7 @@ fn let_go(told: bool) {
     }
     PAGE.store(0, Ordering::Release);
     UP.store(false, Ordering::Release);
+    SOUND_UP.store(false, Ordering::Release);
     *WRITING.lock().unwrap() = None;
 }
 
@@ -715,7 +759,7 @@ fn let_go(told: bool) {
 /// (none: not its, the page's own, its own timers among them, or the system's to answer as well). The page's own part is
 /// done then too, or as soon as the page is free.
 fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<Option<LRESULT>> {
-    if message == WM_TIMER && matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING) {
+    if message == WM_TIMER && matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING | SOUND_TICK) {
         return None;
     }
     let answer = ANSWER.with(|held| held.borrow().clone())?;
@@ -766,18 +810,45 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let (x, y) = point();
             with(|beside| {
                 let (x, y) = beside.on_page(x, y);
+                // (Told as it leaves: else what is under it stays lit after it went.)
+                if beside.pointer.is_none() {
+                    told_as_it_leaves(beside.hwnd);
+                }
                 beside.pointer = Some((x, y));
+                if beside.sound.holding() {
+                    let hits = beside.sound_hits();
+                    beside.sound.drag(x, &hits);
+                }
                 if let Some((_, from, moved)) = beside.holding.as_mut() {
                     *moved = *moved || ((x - from.0).powi(2) + (y - from.1).powi(2)).sqrt() > DRAG_FROM;
                 }
                 beside.redraw();
             });
         }
+        // The pointer gone off the page: nothing under it lit (kept while something on it is held: that follows it).
+        WM_MOUSELEAVE => {
+            with(|beside| {
+                if !beside.sound.holding() && beside.holding.is_none() {
+                    beside.pointer = None;
+                    beside.redraw();
+                }
+            });
+        }
         WM_LBUTTONUP => {
             let (x, y) = point();
             let close = with(|beside| {
                 let (x, y) = beside.on_page(x, y);
-                if beside.holding.is_some() { beside.let_go(x) } else { beside.press(x, y) }
+                if beside.sound.holding() {
+                    beside.sound.let_go();
+                    beside.pressed = None;
+                    super::window::let_go_of_capture(beside.hwnd);
+                    beside.redraw();
+                    false
+                } else if beside.holding.is_some() {
+                    beside.let_go(x)
+                } else {
+                    beside.press(x, y)
+                }
             })
             .unwrap_or(false);
             if close {
@@ -795,7 +866,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             }
         }
         WM_CAPTURECHANGED => {
+            // (Let go of where the pointer had gone off it while held: told so now.)
+            told_as_it_leaves(hwnd);
             with(|beside| {
+                beside.sound.let_go();
                 beside.holding = None;
                 beside.pressed = None;
                 beside.redraw();
@@ -804,6 +878,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_MOUSEWHEEL => {
             let turns = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
             with(|beside| {
+                // (Over a program's track on the sound's page: its level moved.)
+                let over = beside.pointer.and_then(|(x, y)| beside.hit_at(x, y));
+                if let Some(Hit::Sound(hit)) = over {
+                    beside.sound.wheel(hit, turns);
+                    beside.redraw();
+                    return;
+                }
                 // (Over what is kept: along it; else down the list.)
                 if beside.pointer.is_some_and(|(_, y)| beside.page == Page::Picker && (STRIP_TOP..STRIP_TOP + STRIP_CELL).contains(&y)) {
                     beside.strip_scroll = (beside.strip_scroll - turns * STRIP_CELL).clamp(0.0, beside.strip_most);
@@ -837,6 +918,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                         beside.keep_soon();
                     }
                     FOLLOW => beside.read_outside(),
+                    SOUND_TICK => {
+                        beside.sound_tick();
+                        return;
+                    }
                     SHOW => {
                         let _ = unsafe { KillTimer(Some(hwnd), SHOW) };
                         beside.show_now();
@@ -942,7 +1027,9 @@ impl Beside {
 
     /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
     fn ready(&self) -> bool {
-        self.theme.skin == Skin::Paper || BEHIND.with(|held| held.borrow().1.is_some())
+        // (The sound's page once what it lists is read: else it came up empty, and grew a moment after.)
+        let read = !matches!(self.page, Page::Sound { .. }) || crate::audio::mixer().read;
+        read && (self.theme.skin == Skin::Paper || BEHIND.with(|held| held.borrow().1.is_some()))
     }
 
     /// Shown, in front, taking the keys (once: see `shown`).
@@ -1211,8 +1298,18 @@ impl Beside {
     /// A press begun at (`x`, `y`) DIPs: what it is on noted; on a kept thing, it is held (to be dragged into another
     /// place).
     fn hold(&mut self, x: f32, y: f32) {
-        let held = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone());
+        let held = self.hit_at(x, y);
         self.pressed = held.clone();
+        // (A program's track on the sound's page: held, and dragged along.)
+        if let Some(Hit::Sound(hit @ super::outputs::Hit::Level(_))) = held {
+            let hits = self.sound_hits();
+            self.sound.hold(hit, x, &hits);
+            unsafe {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd);
+            }
+            self.redraw();
+            return;
+        }
         if let Some(Hit::Kept(target)) = held {
             self.holding = Some((target, (x, y), false));
             unsafe {
@@ -1280,6 +1377,7 @@ impl Beside {
     fn pressed_on(&mut self, hit: Hit, x: f32, y: f32) -> bool {
         match hit {
             Hit::Close => return true,
+            Hit::Sound(hit) => self.sound.pressed(hit),
             Hit::Search | Hit::Kept(_) => {}
             Hit::Kind(kind) => {
                 self.kind = kind;
@@ -1536,6 +1634,56 @@ impl Beside {
         match self.page {
             Page::Picker => self.paint_picker(frame, (width, height)),
             Page::Note(_) => self.paint_note(frame, (width, height)),
+            Page::Sound { .. } => self.paint_sound(frame, (width, height)),
+        }
+    }
+
+    /// The sound's page: on the skin's ground, as `outputs` draws it.
+    fn paint_sound(&mut self, frame: &Frame, (width, height): (f32, f32)) {
+        self.paint_ground(frame, (width, height));
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let mut hits = Vec::new();
+        self.waiting = self.sound.paint(frame, &theme, self.lang, width, self.pointer, accent, &mut hits);
+        self.hits = hits.into_iter().map(|(x, y, w, h, hit)| (x, y, w, h, Hit::Sound(hit))).collect();
+    }
+
+    /// What of the sound's page is where, as it was last drawn (see `outputs`).
+    fn sound_hits(&self) -> Vec<(f32, f32, f32, f32, super::outputs::Hit)> {
+        self.hits
+            .iter()
+            .filter_map(|(x, y, w, h, hit)| match hit {
+                Hit::Sound(hit) => Some((*x, *y, *w, *h, *hit)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What is at (`x`, `y`) DIPs on the page, as it was last drawn.
+    fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
+        self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone())
+    }
+
+    /// The sound's page each frame (see `SOUND_TICK`): as tall as what it lists now (moved so), drawn again where what
+    /// it shows changed or a knob eases.
+    fn sound_tick(&mut self) {
+        if let Some(opening) = self.opening.clone() {
+            let (page, _) = placed(&opening);
+            let now = self.page_on_screen();
+            if page.bottom - page.top != now.bottom - now.top || page.top != now.top {
+                self.move_to(page);
+            }
+        }
+        let over = self.pointer.and_then(|(x, y)| self.hit_at(x, y)).and_then(|hit| match hit {
+            Hit::Sound(hit) => Some(hit),
+            _ => None,
+        });
+        if self.sound.changed(std::time::Instant::now(), over) {
+            if self.shown {
+                self.redraw();
+            } else {
+                self.draw();
+            }
         }
     }
 
@@ -2001,6 +2149,7 @@ otepad.exe"),
                             moved_from: None,
                             shown: false,
                             marks: super::super::thumb::Dots::new(),
+                            sound: super::super::outputs::Sound::default(),
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
@@ -2014,6 +2163,85 @@ otepad.exe"),
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
         // (Its device let go of before the thread ends: else it hung there.)
+        drop(gfx);
+        gfx::let_go();
+    }
+
+    /// The sound's page in each skin, light and dark, with this PC's own outputs and programs (nothing set), the pointer
+    /// on an output's row and on a program's track (`cargo test --features studio --lib -- --ignored beside_sound`
+    /// writes `target/beside/sound-<skin>-<dark>-<over>.png`).
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    fn beside_sound() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        crate::station::thumbs::start(|| {});
+        while !crate::audio::mixer().read {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mixer = crate::audio::mixer();
+        let gfx = gfx::for_main_screen().unwrap();
+        let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let (w, h) = (super::super::outputs::WIDTH, super::super::outputs::height_of(&mixer));
+        // (On the second output's row; on the first program's track.)
+        let on_output = (120.0, super::super::outputs::FIRST_LINE + 24.0 + 40.0 + 20.0);
+        let on_track = (200.0, h - 14.0 - 32.0 * mixer.apps.len().max(1) as f32 + 8.0 + 12.0);
+        for pass in 0..2 {
+            for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
+                for dark in [false, true] {
+                    for (pointer, label) in [(on_output, "output"), (on_track, "track")] {
+                        let mut beside = Beside {
+                            hwnd: HWND::default(),
+                            gfx: gfx.clone(),
+                            surface: None,
+                            _showing: super::super::life::Showing::of(&gfx),
+                            scale: 1.5,
+                            theme: Rc::new(Theme::new(skin, dark)),
+                            lang: super::super::text::Lang::Zh,
+                            page: Page::Sound { along: 0 },
+                            inset: 0.0,
+                            frost: 0.0,
+                            pressed: None,
+                            choosing: false,
+                            kind: Kinds::Programs,
+                            dropping: false,
+                            holding: None,
+                            strip_scroll: 0.0,
+                            strip_most: 0.0,
+                            search: Typing::most(SEARCH_MOST),
+                            scroll: 0.0,
+                            scroll_most: 0.0,
+                            pointer: Some(pointer),
+                            hits: Vec::new(),
+                            caret: None,
+                            caret_on: true,
+                            waiting: false,
+                            writing: None,
+                            opening: None,
+                            moved_from: None,
+                            shown: false,
+                            marks: super::super::thumb::Dots::new(),
+                            sound: super::super::outputs::Sound::default(),
+                        };
+                        // (Drawn once for where things are, the knob under the pointer eased to its size, then again.)
+                        gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
+                        let over = beside.sound_hits().into_iter().find(|(x, y, hw, hh, _)| pointer.0 >= *x && pointer.0 < x + hw && pointer.1 >= *y && pointer.1 < y + hh).map(|hit| hit.4);
+                        let start = std::time::Instant::now();
+                        for step in 1..=30 {
+                            beside.sound.changed(start + std::time::Duration::from_millis(step * 33), over);
+                        }
+                        let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
+                        if pass == 1 {
+                            let file = format!("sound-{name}-{}-{label}.png", if dark { "dark" } else { "light" });
+                            crate::studio::save_png(&out.join(file), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
         drop(gfx);
         gfx::let_go();
     }

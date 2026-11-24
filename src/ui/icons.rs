@@ -1,6 +1,7 @@
 //! The icons the panel's small layouts mark their readings with: Lucide's
 //! (lucide.dev, ISC licence: licenses/Lucide-ISC.txt), as the SVG path data
-//! it publishes on its 24-unit grid, read into figures any canvas can draw.
+//! it publishes on its 24-unit grid, read into figures any canvas can draw. The sound
+//! outputs' are Fluent UI System Icons' forms (MIT: licenses/FluentUI-System-Icons-MIT.txt) traced in Lucide's line.
 
 /// An icon, by what it stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -136,6 +137,12 @@ pub enum Icon {
     /// The devices' page: a monitor with a phone before it (Lucide's monitor-smartphone).
     MonitorSmartphone,
     Laptop,
+    /// The sound's outputs (Fluent's forms in Lucide's line, see the top): a speaker's box, headphones,
+    /// a headset (its microphone's arm), and an output to another box that plays it (a line out, a digital one).
+    Speaker,
+    Headphones,
+    Headset,
+    AudioOut,
     /// The AI component's: Qiuqiu, a round face looking up and to the right, a spark beside it (drawn for Glance in
     /// Lucide's manner: its lines as wide, its spark filled, see `spots`).
     Ai,
@@ -260,6 +267,10 @@ impl Icon {
             Icon::MoveDiagonal2 => &["M19 13v6h-6", "M5 11V5h6", "m5 5 14 14"],
             Icon::MonitorSmartphone => &["M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8", "M10 19v-3.96 3.15", "M7 19h5", "M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"],
             Icon::Ai => &[AI_FACE, "M10.41 10.23 9.79 13.17", "M14.81 10.23 14.19 13.17"],
+            Icon::Speaker => &["M8.4 3h7.2a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H8.4a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z", "M15 14.4a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M12 7.6h.01"],
+            Icon::Headphones => &["M3 19.2V12a9 9 0 0 1 18 0v7.2a1.8 1.8 0 0 1-1.8 1.8h-3v-7.2H21", "M3 13.8h4.8V21H4.8A1.8 1.8 0 0 1 3 19.2"],
+            Icon::Headset => &["M5.4 9.6a6.6 6.6 0 0 1 13.2 0V13.2a1.8 1.8 0 0 1-1.8 1.8H15V9.6h3.6", "M5.4 9.6H9V15H5.4", "M5.4 9.6v7.2a3 3 0 0 0 3 3h4.2"],
+            Icon::AudioOut => &["M6 6.5h12a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3z", "M18 12a2.5 2.5 0 1 1-5 0a2.5 2.5 0 1 1 5 0z", "M7.5 9.75h.01", "M7.5 14.25h.01"],
             Icon::Laptop => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
             Icon::Calendar => &["M8 2v4", "M16 2v4", "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M3 10h18"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
@@ -688,7 +699,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Tag, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop, Icon::Ai, Icon::Calculator, Icon::Globe] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Tag, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop, Icon::Speaker, Icon::Headphones, Icon::Headset, Icon::AudioOut, Icon::Ai, Icon::Calculator, Icon::Globe] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid, what is filled too.

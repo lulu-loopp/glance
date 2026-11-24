@@ -101,6 +101,8 @@ mod simplified;
 #[cfg(windows)]
 mod sound;
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 mod cover;
 #[cfg(windows)]
 mod fullscreen;

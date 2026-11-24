@@ -392,7 +392,7 @@ fn sounds() -> Result<Vec<(String, String, bool)>> {
 /// A program's name, and the path of its file, out of what its sound's
 /// session is called (`{…}|\Device\…\cloudmusic.exe%b{…}|…`); none for a
 /// session with no program's path in it.
-fn named(session: &str) -> Option<(String, String)> {
+pub fn named(session: &str) -> Option<(String, String)> {
     let path = session.split('|').nth(1)?.split("%b").next()?;
     let file = path.strip_suffix(".exe").or_else(|| path.strip_suffix(".EXE"))?;
     let name = file.rsplit('\\').next()?;
@@ -402,14 +402,14 @@ fn named(session: &str) -> Option<(String, String)> {
 /// What a program is called, by its file (`path` as a sound's session has it: from the device up): as the Start menu
 /// names it, where it does ("QQ音乐"); else as the file says the program is, in the first language it says it in
 /// (which may be more than its name: "QQ音乐 听我想听").
-fn described(path: &str) -> Option<String> {
+pub fn described(path: &str) -> Option<String> {
     static DESCRIBED: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
     once(&DESCRIBED, path, || on_drives(path).and_then(|path| shown_as(&path)).or_else(|| read_description(path)))
 }
 
 /// `path` from the device up (`\Device\HarddiskVolume3\App\x.exe`) as from its drive (`D:\App\x.exe`), as the Start
 /// menu knows a program by its file; none where it is on no drive.
-fn on_drives(path: &str) -> Option<String> {
+pub fn on_drives(path: &str) -> Option<String> {
     (b'A'..=b'Z').find_map(|letter| {
         let drive = format!("{}:", letter as char);
         let named: Vec<u16> = drive.encode_utf16().chain([0]).collect();

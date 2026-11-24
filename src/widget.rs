@@ -4319,6 +4319,17 @@ impl Widget {
                                     self.write_note(number, true);
                                 }
                                 Some(view::Hit::Search) => crate::ui::find::toggle(),
+                                // The sound's page: beside it on the side with more room, its first line level with the
+                                // output's name; up, closed.
+                                Some(view::Hit::Outputs) => {
+                                    if crate::ui::beside::sound_up_for(self.window.hwnd) {
+                                        crate::ui::beside::close();
+                                    } else if let Some(row) = self.hits.iter().find(|hit| hit.4 == view::Hit::Outputs) {
+                                        let px = self.contact.scale * self.zoom;
+                                        let along = ((self.hits_from.1 + row.1 - crate::ui::outputs::FIRST_LINE) * px).round() as i32;
+                                        self.open_beside(crate::ui::beside::Page::Sound { along });
+                                    }
+                                }
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
                                 Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
                                     use crate::ui::beside::Page;
@@ -4713,7 +4724,7 @@ impl Widget {
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
         let info = controller.info();
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -5050,7 +5061,7 @@ impl Widget {
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
         let info = controller.info();
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
         // The choices over its station's page: the one just lit, or just come, brought into sight.
@@ -5892,7 +5903,7 @@ mod tests {
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let readings = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, ..Readings::new(choice) });
         let mut merged = Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, (600.0, 700.0));
@@ -5985,7 +5996,7 @@ mod tests {
         let prefs = Prefs::resolve(&serde_json::json!({ "ai": shown_ids }), &[]).holding(crate::settings::Part::Ai);
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Shape(view::Shape::Least), columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let shown_at = |room: (f32, f32)| {
             let (choice, layout, detail) = laid_out(&scene, &theme, crate::settings::Part::Ai, choice, false, Some(room), (1920.0, 1080.0));

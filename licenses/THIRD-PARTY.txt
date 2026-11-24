@@ -58,6 +58,12 @@ LobeHub Icons (the AI providers' marks: Claude, OpenAI, DeepSeek, Kimi,
   Copyright (c) 2023 LobeHub. Licence: MIT (LobeHub-Icons-MIT.txt). Their path
   data is built into glance.exe. Each mark is its owner's trademark.
 
+Fluent UI System Icons (the forms of the sound outputs' icons: speaker_box,
+  headphones, headset), from @fluentui/svg-icons 1.1.347
+  Copyright (c) 2020 Microsoft Corporation. Licence: MIT
+  (FluentUI-System-Icons-MIT.txt). Traced and drawn in Lucide's line in
+  glance.exe's own path data.
+
 token-monitor (which address of each AI provider is asked for its account's
   balance and limits, and what of its answer is read)
   Copyright (c) 2026 Javis (https://github.com/Javis603/token-monitor).

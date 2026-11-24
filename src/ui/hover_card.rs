@@ -346,6 +346,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, cl
         buttons: false,
         newer: false,
         settings_lit: None,
+        sound_open: false,
         music_apart: false,
     };
     let Some(lane) = told(&scene, of.hit) else { return hide() };
