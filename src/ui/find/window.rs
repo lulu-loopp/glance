@@ -1848,7 +1848,7 @@ impl Finder {
                 let by = self.sheet_on_screen();
                 let (skin, dark) = (self.skin, self.dark);
                 self.close(false);
-                crate::ui::beside::open(crate::ui::beside::Opening { page: crate::ui::beside::Page::Note(Some(name.clone())), by, side: crate::ui::beside::Side::Below, skin, dark, folder: None, owner: 0 });
+                crate::ui::beside::open(crate::ui::beside::Opening { page: crate::ui::beside::Page::Note(Some(name.clone())), by, side: crate::ui::beside::Side::Below, skin, dark, folder: None, owner: 0, zoom: 1.0 });
                 return;
             }
             (What::Todo(text), Act::Open) => {

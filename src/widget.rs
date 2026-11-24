@@ -864,6 +864,8 @@ struct Widget {
     /// The card beside it shown, of what the pointer rests on (see `follow_card`), and what that is.
     carding: bool,
     resting: crate::ui::hover_card::Resting,
+    /// The pointer on the output's name, resting there and leaving (see `outputs::Rest`).
+    sound_rest: crate::ui::outputs::Rest,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
@@ -2249,6 +2251,8 @@ impl Widgets {
         // ring stays lit, its card up. Not on one of its buttons, which may lie on that way: the card goes.)
         let hit = match (hit, widget.hit_hover) {
             (hit, Some(kept)) if kept.carded() && !hit.is_some_and(|hit| hit.carded()) && over.is_none() && widget.carding && cursor_position().is_some_and(crate::ui::hover_card::holds) => Some(kept),
+            // (On the way from the output's name to the sound's page beside it, or on the page: the name still.)
+            (hit, Some(view::Hit::Outputs)) if hit != Some(view::Hit::Outputs) && !hit.is_some_and(|hit| hit.slider().is_some() || matches!(hit, view::Hit::Media(crate::playing::Key::Mute, _))) && crate::ui::beside::sound_up_for(widget.window.hwnd) && cursor_position().is_some_and(crate::ui::beside::sound_holds) => Some(view::Hit::Outputs),
             (hit, _) => hit,
         };
         if hit != widget.hit_hover {
@@ -2867,6 +2871,10 @@ impl Widgets {
                     let rest = if widget.lingered.is_some() || widget.shadowed { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
                     // (Sooner, a note written in where it is due: its caret's blink, its keeping.)
                     let rest = widget.in_place.as_ref().and_then(|in_place| in_place.due(now)).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
+                    // (Often while the sound's page is up from it, or the pointer rests on the output's name: opened and
+                    // closed as soon as it is due, see `outputs::Rest`.)
+                    let rest = if crate::ui::beside::sound_up_for(widget.window.hwnd) || widget.hit_hover == Some(view::Hit::Outputs) { rest.min(HOVERED_FRAME) } else { rest };
+                    let rest = widget.sound_rest.due().map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     // (And the card of what the pointer rests on, due: see `follow_card`.)
                     let rest = widget.resting.due().filter(|_| !widget.carding).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     // (And the preview's shortcut due to be said, or coming in.)
@@ -3389,6 +3397,16 @@ impl Widget {
         }
     }
 
+    /// The sound's page opened beside it on the side with more room, its first line level with the output's name.
+    fn open_sound(&self) {
+        let Some(row) = self.hits.iter().find(|hit| hit.4 == view::Hit::Outputs) else { return };
+        let px = self.contact.scale * self.zoom;
+        let along = ((self.hits_from.1 + row.1 - crate::ui::outputs::FIRST_LINE) * px).round() as i32;
+        let on_screen = |dx: f32, dy: f32| ((self.at.x as f32 + (self.hits_from.0 + dx) * px).round() as i32, (self.at.y as f32 + (self.hits_from.1 + dy) * px).round() as i32);
+        let ((left, top), (right, bottom)) = (on_screen(row.0, row.1), on_screen(row.0 + row.2, row.1 + row.3));
+        self.open_beside(crate::ui::beside::Page::Sound { along, about: RECT { left, top, right, bottom } });
+    }
+
     /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
     fn open_beside(&self, page: crate::ui::beside::Page) {
         use crate::ui::beside::{Opening, Side};
@@ -3396,7 +3414,7 @@ impl Widget {
         let screen = self.contact.monitor;
         let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
         let (skin, dark) = self.drawn_look;
-        crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None, owner: self.window.hwnd.0 as isize });
+        crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None, owner: self.window.hwnd.0 as isize, zoom: self.zoom });
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
@@ -3460,6 +3478,7 @@ impl Widget {
             saying: false,
             carding: false,
             resting: Default::default(),
+            sound_rest: Default::default(),
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
             shadowed: false,
@@ -4322,12 +4341,11 @@ impl Widget {
                                 // The sound's page: beside it on the side with more room, its first line level with the
                                 // output's name; up, closed.
                                 Some(view::Hit::Outputs) => {
+                                    self.sound_rest.pressed();
                                     if crate::ui::beside::sound_up_for(self.window.hwnd) {
                                         crate::ui::beside::close();
-                                    } else if let Some(row) = self.hits.iter().find(|hit| hit.4 == view::Hit::Outputs) {
-                                        let px = self.contact.scale * self.zoom;
-                                        let along = ((self.hits_from.1 + row.1 - crate::ui::outputs::FIRST_LINE) * px).round() as i32;
-                                        self.open_beside(crate::ui::beside::Page::Sound { along });
+                                    } else {
+                                        self.open_sound();
                                     }
                                 }
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
@@ -4912,8 +4930,18 @@ impl Widget {
         if !hovered && (self.tip.take().is_some() | std::mem::take(&mut self.saying)) {
             crate::ui::tip::hide();
         }
-        // (Not while it is on the card beside the AI component's dock, or on its way there: see `hover_card::holds`.)
-        let carded = self.carding && cursor.is_some_and(crate::ui::hover_card::holds);
+        // The sound's page opened as the pointer rests on the output's name, closed as it has left it, the page and
+        // their way between (see `outputs::Rest`).
+        let sound_up = crate::ui::beside::sound_up_for(self.window.hwnd);
+        let sound_holds = sound_up && cursor.is_some_and(crate::ui::beside::sound_holds);
+        match self.sound_rest.follow(hovered && self.hit_hover == Some(view::Hit::Outputs), sound_holds, sound_up, now) {
+            crate::ui::outputs::Act::Open => self.open_sound(),
+            crate::ui::outputs::Act::Close => crate::ui::beside::close(),
+            crate::ui::outputs::Act::Wait(_) | crate::ui::outputs::Act::Nothing => {}
+        }
+        // (Not while it is on the card beside the AI component's dock, or on its way there: see `hover_card::holds`. Nor
+        // on the sound's page beside it, or on its way there.)
+        let carded = (self.carding && cursor.is_some_and(crate::ui::hover_card::holds)) || sound_holds;
         if !hovered && !carded && self.hit_hover.take().is_some() {
             self.next_frame = now;
         }

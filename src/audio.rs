@@ -428,17 +428,51 @@ fn programs(device: &IMMDevice) -> Result<(Vec<App>, Held)> {
     }
 }
 
-/// The program a session is of, by what the session says (see `media::named`): its key (its file's path, from the
-/// device up, as the session says it, whatever its case), its name (see `media::described`), its file on its drive.
+/// The program a session is of, by what the session says (see `media::named`), or where it says no file (a session a
+/// program opened for another, as Wallpaper Engine's), by its process's file as Windows lists it (see `image_of`): its
+/// key (its file's path, from the device up, as said, whatever its case), its name (see `media::described`), its file
+/// on its drive.
 fn known(session: &IAudioSessionControl2) -> Option<(String, String, Option<PathBuf>)> {
     unsafe {
         let called = session.GetSessionInstanceIdentifier().ok()?;
         let identifier = called.to_string().unwrap_or_default();
         CoTaskMemFree(Some(called.0 as *const _));
-        let (file_name, path) = crate::media::named(&identifier)?;
+        let path = match crate::media::named(&identifier) {
+            Some((_, path)) => path,
+            None => image_of(session.GetProcessId().ok().filter(|&id| id != 0)?)?,
+        };
+        let file_name = file_name(&path)?;
         let name = crate::media::described(&path).unwrap_or(file_name);
         Some((path.to_lowercase(), name, crate::media::on_drives(&path).map(PathBuf::from)))
     }
+}
+
+/// A program's file's name, without its `.exe`, from its path.
+fn file_name(path: &str) -> Option<String> {
+    let name = path.rsplit('\\').next()?;
+    let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The file process `id` runs, from the device up (`\Device\HarddiskVolume4\App\x.exe`), as Windows lists its
+/// processes: nothing of the process opened (a game's never is: its anti-cheat watches what opens it).
+fn image_of(id: u32) -> Option<String> {
+    #[repr(C)]
+    struct Named {
+        process: usize,
+        length: u16,
+        most: u16,
+        buffer: *mut u16,
+    }
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    extern "system" {
+        fn NtQuerySystemInformation(class: u32, info: *mut core::ffi::c_void, length: u32, returned: *mut u32) -> i32;
+    }
+    const SYSTEM_PROCESS_ID_INFORMATION: u32 = 88;
+    let mut name = vec![0u16; 1024];
+    let mut asked = Named { process: id as usize, length: 0, most: (name.len() * 2) as u16, buffer: name.as_mut_ptr() };
+    let status = unsafe { NtQuerySystemInformation(SYSTEM_PROCESS_ID_INFORMATION, (&mut asked as *mut Named).cast(), size_of::<Named>() as u32, std::ptr::null_mut()) };
+    (status >= 0 && asked.length > 0).then(|| String::from_utf16_lossy(&name[..asked.length as usize / 2]))
 }
 
 /// The programs `apps` asks of (each by its key: see `App::key`) set as asked, on the output played on now: each of a
@@ -545,6 +579,57 @@ mod tests {
         }
         for app in &mixer.apps {
             println!("  {app:?}");
+        }
+    }
+
+    /// A process's file is had by its id alone, as Windows lists it (this test's own here), from the device up.
+    #[test]
+    fn a_process_s_file_is_had_by_its_id() {
+        let own = image_of(std::process::id()).expect("this process listed");
+        assert!(own.starts_with("\\Device\\"), "{own}");
+        let exe = std::env::current_exe().unwrap();
+        assert!(own.to_lowercase().ends_with(&exe.file_name().unwrap().to_string_lossy().to_lowercase()), "{own}");
+        assert_eq!(file_name(&own).as_deref(), Some(&*exe.file_stem().unwrap().to_string_lossy()));
+        assert_eq!(image_of(u32::MAX - 3), None);
+    }
+
+    /// Every sound session on every output played on, as Windows says it (those `programs` leaves out too), printed:
+    /// what a program missing from the page was said as (nothing set, no program opened).
+    #[test]
+    #[ignore = "reads this PC's sound"]
+    fn prints_every_session() {
+        crate::actions::com();
+        let devices = enumerator().unwrap();
+        unsafe {
+            let outputs = devices.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap();
+            for at in 0..outputs.GetCount().unwrap() {
+                let device = outputs.Item(at).unwrap();
+                println!("output {:?}", described(&device).map(|output| output.name));
+                let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None).unwrap();
+                let sessions = manager.GetSessionEnumerator().unwrap();
+                for at in 0..sessions.GetCount().unwrap() {
+                    let session = sessions.GetSession(at).unwrap().cast::<IAudioSessionControl2>().unwrap();
+                    let said = |called: windows::core::Result<windows::core::PWSTR>| called.ok().map(|called| {
+                        let said = called.to_string().unwrap_or_default();
+                        CoTaskMemFree(Some(called.0 as *const _));
+                        said
+                    });
+                    let volume = session.cast::<ISimpleAudioVolume>().unwrap();
+                    println!(
+                        "  state {:?} system {} level {:?} pid {:?} known {:?}
+    instance {:?}
+    named {:?} icon {:?}",
+                        session.GetState().map(|state| state.0),
+                        session.IsSystemSoundsSession() == HRESULT(0),
+                        volume.GetMasterVolume().ok(),
+                        session.GetProcessId().ok(),
+                        known(&session).map(|(_, name, _)| name),
+                        said(session.GetSessionInstanceIdentifier()),
+                        said(session.GetDisplayName()),
+                        said(session.GetIconPath()),
+                    );
+                }
+            }
         }
     }
 

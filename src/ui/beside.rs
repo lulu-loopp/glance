@@ -36,15 +36,17 @@ use crate::station::apps::App;
 use crate::station::found::{self, Found};
 
 /// What the page shows.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Page {
     /// Quick launch's adding.
     Picker,
     /// A note, by its file's name in the notes' folder (none: a new one, named by its title as it is first kept).
     Note(Option<String>),
     /// The sound's outputs and its programs' (see `outputs`), as tall as what it lists, its first line `along` physical
-    /// px along what it opens from (down it, or across it for the top edge's panel): level with the row it opened from.
-    Sound { along: i32 },
+    /// px along what it opens from (down it, or across it for the top edge's panel): level with the row it opened from,
+    /// the output's name `about` on the screen (the pointer there, on the page or on its way between, keeps it: see
+    /// `sound_holds`).
+    Sound { along: i32, about: RECT },
 }
 
 /// Where the page goes: beside `by` (screen px: the panel or the widget it opens from), on the side `side` (away from
@@ -61,6 +63,9 @@ pub struct Opening {
     pub folder: Option<std::path::PathBuf>,
     /// The window it opens from (a panel's, a widget's): that one stays up while it is (see `up_for`).
     pub owner: isize,
+    /// How much larger than its screen's scale what it opens from is drawn (a panel's size in the settings, a widget's
+    /// zoom): it is drawn as large, beside it.
+    pub zoom: f32,
 }
 
 /// Which side of what it opens from the page goes on, where there is room: left of it, right of it, or under it (the
@@ -145,6 +150,10 @@ const SHOW_WITHIN_MS: u32 = 400;
 /// where that changed.
 const SOUND_TICK: usize = 7;
 const SOUND_TICK_MS: u32 = 33;
+/// The page coming in (see `Appear`): drawn again each frame till it is in. Its window going, as it came in backwards
+/// (see `Beside::going`), drawn each frame till it is gone.
+const APPEARING: usize = 8;
+const GOING: usize = 9;
 
 /// The page's window while one is up (0 while none is): what a page's going asked for later is for (see `go_soon`).
 static PAGE: AtomicIsize = AtomicIsize::new(0);
@@ -186,6 +195,51 @@ pub fn is_up() -> bool {
     UP.load(Ordering::Acquire)
 }
 
+/// The page coming in from what it opened from (as the sound's plate in its mock-up): clear at first and seen whole
+/// within `FADE`, moved `NEAR` DIPs toward what it opened from and a little smaller (`FROM` as large), about its corner
+/// nearest that, eased into place within `SETTLE`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Appear {
+    opacity: f32,
+    /// How far toward what it opened from (DIPs, across and down), and how large about which point of its page.
+    by: (f32, f32),
+    size: f32,
+    about: (f32, f32),
+}
+
+const FADE: std::time::Duration = std::time::Duration::from_millis(160);
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(220);
+const NEAR: f32 = 8.0;
+const FROM: f32 = 0.985;
+
+impl Appear {
+    /// `since` it was shown (none: shown in place at once), what it opened from `toward` (the way from its page), its
+    /// page `area` large (DIPs).
+    fn at(since: Option<std::time::Duration>, toward: Side, area: (f32, f32)) -> Appear {
+        let Some(since) = since else { return Appear { opacity: 1.0, by: (0.0, 0.0), size: 1.0, about: (0.0, 0.0) } };
+        let opacity = (since.as_secs_f32() / FADE.as_secs_f32()).min(1.0);
+        let left = 1.0 - super::morph::ease(since.as_secs_f32() / SETTLE.as_secs_f32());
+        let (way, about) = match toward {
+            Side::Left => ((-1.0, 0.0), (0.0, 0.0)),
+            Side::Right => ((1.0, 0.0), (area.0, 0.0)),
+            Side::Below => ((0.0, -1.0), (0.0, 0.0)),
+        };
+        Appear { opacity, by: (way.0 * NEAR * left, way.1 * NEAR * left), size: 1.0 - (1.0 - FROM) * left, about }
+    }
+
+    /// Whether it is in place, seen whole.
+    fn done(&self) -> bool {
+        self.opacity >= 1.0 && self.by == (0.0, 0.0) && self.size >= 1.0
+    }
+
+    /// How its page is placed (DIPs, from the page's corner): made as large as it is about its point, then moved.
+    fn matrix(&self) -> windows_numerics::Matrix3x2 {
+        use windows_numerics::Matrix3x2;
+        let (x, y) = self.about;
+        Matrix3x2::translation(-x, -y) * Matrix3x2 { M11: self.size, M12: 0.0, M21: 0.0, M22: self.size, M31: 0.0, M32: 0.0 } * Matrix3x2::translation(x + self.by.0, y + self.by.1)
+    }
+}
+
 /// `hwnd` told (`WM_MOUSELEAVE`) as the pointer goes off it, or at once where it is off it already.
 fn told_as_it_leaves(hwnd: HWND) {
     let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -198,6 +252,25 @@ static SOUND_UP: AtomicBool = AtomicBool::new(false);
 /// The window the sound's page up was opened from (what opened it shows so).
 pub fn sound_owner() -> Option<isize> {
     (is_up() && SOUND_UP.load(Ordering::Acquire)).then(|| OWNER.load(Ordering::Acquire))
+}
+
+/// The sound's page on the screen and the output's name it opened from (see `Page::Sound`), while it is up.
+static SOUND_AT: Mutex<Option<(RECT, RECT)>> = Mutex::new(None);
+
+/// Whether the pointer at `at` (on the screen) keeps the sound's page up: on it, on the name it opened from, or on its
+/// way between them (across from the name to the page, as high as the name and a half more each way; down from it to
+/// the page under the top edge's panel, as wide).
+pub fn sound_holds(at: POINT) -> bool {
+    let Some((page, about)) = *SOUND_AT.lock().unwrap() else { return false };
+    let within = |area: RECT| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom;
+    let way = if page.left >= about.right || page.right <= about.left {
+        let slack = (about.bottom - about.top) / 2;
+        RECT { left: page.left.min(about.left), right: page.right.max(about.right), top: about.top - slack, bottom: about.bottom + slack }
+    } else {
+        let slack = (about.right - about.left) / 4;
+        RECT { left: about.left - slack, right: about.right + slack, top: page.top.min(about.top), bottom: page.bottom.max(about.bottom) }
+    };
+    within(page) || within(about) || within(way)
 }
 
 /// Whether the sound's page is up, opened from `window`.
@@ -334,6 +407,11 @@ struct Beside {
     /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
     /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
     shown: bool,
+    /// When it was shown, coming in from what it opened from (see `Appear`); none, in at once (motion turned off).
+    came: Option<std::time::Instant>,
+    /// Closed, when it began to go back into what it opened from (as it came, backwards), no longer the page up: its
+    /// window kept for that, taking nothing (see `GOING`).
+    going: Option<std::time::Instant>,
     /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
     /// The sound's page's own (see `outputs`).
@@ -386,6 +464,8 @@ enum Hit {
 
 thread_local! {
     static BESIDE: RefCell<Option<Beside>> = const { RefCell::new(None) };
+    /// The page closed, going (see `Beside::going`).
+    static GONE: RefCell<Option<Beside>> = const { RefCell::new(None) };
     /// What a note's words' box answers the page's messages with while the page shows one (see `note::Writing::answer`):
     /// reached by them whatever the page is in the middle of (see `write`), and how deep they are in it.
     static ANSWER: RefCell<Option<super::note::Answer>> = const { RefCell::new(None) };
@@ -513,7 +593,7 @@ fn placed(opening: &Opening) -> (RECT, f32) {
         let _ = GetMonitorInfoW(monitor, &mut screen);
         let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
     }
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi.max(96) as f32 / 96.0 * opening.zoom;
     (placed_in(opening, screen.rcWork, scale), scale)
 }
 
@@ -524,7 +604,7 @@ fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
     // (The sound's page as wide as a column of the panel, as tall as what it lists, along what it opens from where its
     // row is: see `Page::Sound`.)
     let (wide, sound) = match opening.page {
-        Page::Sound { along } => (super::outputs::WIDTH, Some((along, (super::outputs::height_of(&crate::audio::mixer()) * scale).round() as i32))),
+        Page::Sound { along, .. } => (super::outputs::WIDTH, Some((along, (super::outputs::height_of(&crate::audio::mixer()) * scale).round() as i32))),
         _ => (WIDTH, None),
     };
     let (wide, gap) = ((wide * scale).round() as i32, (GAP * scale).round() as i32);
@@ -555,6 +635,8 @@ fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
 
 /// The page `opening` asks for, up beside what it opens from.
 fn show(opening: Opening) {
+    // (One closed and going, gone at once: another comes.)
+    gone_now();
     // (The page up before it gone, not told: the windows that give way to a page would else come over for a moment
     // between the two.)
     let_go(false);
@@ -612,6 +694,8 @@ fn show(opening: Opening) {
             opening: Some(opening.clone()),
             moved_from: None,
             shown: false,
+            came: None,
+            going: None,
             marks: super::thumb::Dots::new(),
             sound: super::outputs::Sound::default(),
         };
@@ -662,6 +746,9 @@ fn show(opening: Opening) {
             let _ = SetTimer(Some(hwnd), SOUND_TICK, SOUND_TICK_MS, None);
         }
         SOUND_UP.store(matches!(opening.page, Page::Sound { .. }), Ordering::Release);
+        if let Page::Sound { about, .. } = opening.page {
+            *SOUND_AT.lock().unwrap() = Some((placed(&opening).0, about));
+        }
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
         let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
         // Shown once drawn whole (see `Beside::shown`), or after a while drawn as it can be.
@@ -734,17 +821,26 @@ fn let_go(told: bool) {
         beside.writing = None;
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
-            let _ = DestroyWindow(beside.hwnd);
         }
         DROP_TARGET.with(|held| held.borrow_mut().take());
-        BEHIND.with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(scene) = held.0.as_mut() {
-                scene.rest();
+        // Closed (not given way to another), shown, come in as it moves: going back as it came, its window taking
+        // nothing meanwhile; else gone at once.
+        if told && beside.shown && beside.came.is_some() {
+            beside.going = Some(std::time::Instant::now());
+            unsafe {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(beside.hwnd, false);
+                // (Its own timers stopped: theirs act on the page up, which may soon be another.)
+                for timer in [BLINK, AGAIN, KEEP, FOLLOW, SHOW, SLIDING, SOUND_TICK, APPEARING] {
+                    let _ = KillTimer(Some(beside.hwnd), timer);
+                }
+                let _ = SetTimer(Some(beside.hwnd), GOING, 15, None);
             }
-            held.1 = None;
-            held.2 = None;
-        });
+            beside.draw();
+            gone_now();
+            GONE.with(|gone| *gone.borrow_mut() = Some(beside));
+        } else {
+            window_gone(beside);
+        }
         if told {
             crate::app().controller.page_front(None);
         }
@@ -752,14 +848,53 @@ fn let_go(told: bool) {
     PAGE.store(0, Ordering::Release);
     UP.store(false, Ordering::Release);
     SOUND_UP.store(false, Ordering::Release);
+    *SOUND_AT.lock().unwrap() = None;
     *WRITING.lock().unwrap() = None;
+}
+
+/// A page's window gone, and what is behind it as it was taken let go of.
+fn window_gone(beside: Beside) {
+    unsafe {
+        let _ = DestroyWindow(beside.hwnd);
+    }
+    BEHIND.with(|held| {
+        let mut held = held.borrow_mut();
+        if let Some(scene) = held.0.as_mut() {
+            scene.rest();
+        }
+        held.1 = None;
+        held.2 = None;
+    });
+}
+
+/// The page closed before, going (see `Beside::going`), gone now: as another comes, or as it has gone back.
+fn gone_now() {
+    if let Some(beside) = GONE.with(|gone| gone.borrow_mut().take()) {
+        window_gone(beside);
+    }
+}
+
+/// The page closed, a frame on as it goes: gone, once it has gone back as far as it came.
+fn going_on() {
+    let over = GONE.with(|gone| {
+        let mut gone = gone.borrow_mut();
+        let Some(beside) = gone.as_mut() else { return false };
+        if beside.going.is_some_and(|going| going.elapsed() >= SETTLE) {
+            return true;
+        }
+        beside.draw();
+        false
+    });
+    if over {
+        gone_now();
+    }
 }
 
 /// A message for a note's words' box, given it where it is one of its (see `note::Writing::answer`): what it answers
 /// (none: not its, the page's own, its own timers among them, or the system's to answer as well). The page's own part is
 /// done then too, or as soon as the page is free.
 fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<Option<LRESULT>> {
-    if message == WM_TIMER && matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING | SOUND_TICK) {
+    if message == WM_TIMER && matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING | SOUND_TICK | APPEARING | GOING) {
         return None;
     }
     let answer = ANSWER.with(|held| held.borrow().clone())?;
@@ -779,6 +914,11 @@ fn ours(window: HWND) -> bool {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let point = || ((lparam.0 & 0xFFFF) as i16 as f32, ((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
+    // (The page closed, going: a frame on.)
+    if message == WM_TIMER && wparam.0 == GOING {
+        going_on();
+        return LRESULT(0);
+    }
     // A note's words' box: the keys, the input method's, what the pointer does over it, its own timers.
     if let Some(Some(answered)) = write(hwnd, message, wparam, lparam) {
         return answered;
@@ -922,6 +1062,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                         beside.sound_tick();
                         return;
                     }
+                    APPEARING => {
+                        beside.redraw();
+                        return;
+                    }
                     SHOW => {
                         let _ = unsafe { KillTimer(Some(hwnd), SHOW) };
                         beside.show_now();
@@ -1022,7 +1166,15 @@ impl Beside {
         if let Some(writing) = &mut self.writing {
             writing.place(super::note::words_box(room, room, wide, tall, self.scale));
         }
+        self.sound_at(page);
         self.redraw();
+    }
+
+    /// Where its page is told, as the sound's (see `sound_holds`).
+    fn sound_at(&self, page: RECT) {
+        if let Page::Sound { about, .. } = self.page {
+            *SOUND_AT.lock().unwrap() = Some((page, about));
+        }
     }
 
     /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
@@ -1039,6 +1191,14 @@ impl Beside {
         }
         self.shown = true;
         crate::perf::mark(|| "beside shown".into());
+        // (Come in from what it opened from, as the first frame drawn whole shows: see `Appear`.)
+        if !crate::panel::reduced_motion() {
+            self.came = Some(std::time::Instant::now());
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd), APPEARING, 15, None);
+            }
+            self.redraw();
+        }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), SHOW);
             let _ = ShowWindow(self.hwnd, SW_SHOW);
@@ -1047,6 +1207,19 @@ impl Beside {
         }
         // (Told again as it comes in front: the panels come over it again, the front having taken it over them.)
         crate::app().controller.page_front(Some(self.hwnd));
+    }
+
+    /// Which way what it opened from is, from its page (as it was placed: on its side, else the other, else under it).
+    fn toward(&self) -> Side {
+        let Some(opening) = &self.opening else { return Side::Below };
+        let page = self.page_on_screen();
+        if page.left >= opening.by.right {
+            Side::Left
+        } else if page.right <= opening.by.left {
+            Side::Right
+        } else {
+            Side::Below
+        }
     }
 
     /// The point (`x`, `y`) physical px in its window, on its page (DIPs from the page's corner, past its shadow's room).
@@ -1504,7 +1677,9 @@ impl Beside {
         let gfx = self.gfx.clone();
         let inset = self.inset;
         let area = (size.0 as f32 / self.scale - 2.0 * inset, size.1 as f32 / self.scale - 2.0 * inset);
-        self.look_behind();
+        if self.going.is_none() {
+            self.look_behind();
+        }
         // (A mark sliding: drawn again a frame on, till it is where it is to be.)
         let sliding = self.marks.choose(std::time::Instant::now(), &[(0, self.kind)]);
         unsafe {
@@ -1514,13 +1689,25 @@ impl Beside {
                 let _ = KillTimer(Some(self.hwnd), SLIDING);
             }
         }
+        // (Coming in: as far in as it is now, from what it opened from; not shown yet, as it starts.)
+        let since = match self.going {
+            Some(going) => Some(SETTLE.saturating_sub(going.elapsed())),
+            None if self.shown => self.came.map(|came| came.elapsed()),
+            None => Some(std::time::Duration::ZERO),
+        };
+        let appear = Appear::at(since, self.toward(), area);
+        unsafe {
+            if appear.done() {
+                let _ = KillTimer(Some(self.hwnd), APPEARING);
+            }
+        }
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
             let mut was = windows_numerics::Matrix3x2::default();
             unsafe {
                 frame.dc.GetTransform(&mut was);
-                frame.dc.SetTransform(&(windows_numerics::Matrix3x2::translation(inset, inset) * was));
+                frame.dc.SetTransform(&(appear.matrix() * windows_numerics::Matrix3x2::translation(inset, inset) * was));
             }
-            self.paint(frame, area);
+            frame.faded(appear.opacity, || self.paint(frame, area));
             unsafe { frame.dc.SetTransform(&was) };
         });
         if drawn.is_ok() {
@@ -2148,6 +2335,8 @@ otepad.exe"),
                             opening: None,
                             moved_from: None,
                             shown: false,
+                            came: None,
+                            going: None,
                             marks: super::super::thumb::Dots::new(),
                             sound: super::super::outputs::Sound::default(),
                         };
@@ -2200,7 +2389,7 @@ otepad.exe"),
                             scale: 1.5,
                             theme: Rc::new(Theme::new(skin, dark)),
                             lang: super::super::text::Lang::Zh,
-                            page: Page::Sound { along: 0 },
+                            page: Page::Sound { along: 0, about: RECT::default() },
                             inset: 0.0,
                             frost: 0.0,
                             pressed: None,
@@ -2222,6 +2411,8 @@ otepad.exe"),
                             opening: None,
                             moved_from: None,
                             shown: false,
+                            came: None,
+                            going: None,
                             marks: super::super::thumb::Dots::new(),
                             sound: super::super::outputs::Sound::default(),
                         };
@@ -2250,6 +2441,27 @@ otepad.exe"),
 #[cfg(test)]
 mod tests {
     use super::goes_now;
+
+    /// A page comes in from what it opened from: clear, nearer it and a little smaller as it is shown, about its corner
+    /// nearest it; seen whole a while before it settles, then in place. Shown with motion turned off, in place at once.
+    #[test]
+    fn a_page_comes_in_from_what_it_opened_from() {
+        use super::{Appear, Side, FROM, NEAR, SETTLE};
+        use std::time::Duration;
+        let area = (356.0, 400.0);
+        let start = Appear::at(Some(Duration::ZERO), Side::Right, area);
+        assert_eq!((start.opacity, start.by, start.size, start.about), (0.0, (NEAR, 0.0), FROM, (area.0, 0.0)), "the panel on its right");
+        assert_eq!(Appear::at(Some(Duration::ZERO), Side::Left, area).by, (-NEAR, 0.0));
+        assert_eq!(Appear::at(Some(Duration::ZERO), Side::Below, area).by, (0.0, -NEAR));
+        let seen = Appear::at(Some(Duration::from_millis(170)), Side::Right, area);
+        assert!(seen.opacity == 1.0 && seen.by.0 > 0.0 && seen.by.0 < 1.0 && !seen.done(), "{seen:?}");
+        assert!(Appear::at(Some(SETTLE), Side::Right, area).done());
+        assert!(Appear::at(None, Side::Right, area).done());
+        // (Its corner nearest the panel stays where it comes to be, as it grows: only moved.)
+        let m = start.matrix();
+        let corner = (area.0 * m.M11 + m.M31, 0.0 * m.M22 + m.M32);
+        assert!((corner.0 - (area.0 + NEAR)).abs() < 1e-3 && corner.1.abs() < 1e-3, "{corner:?}");
+    }
 
     /// The screens changed, the scene kept from page to page on a device no screen would be drawn for any longer (a
     /// laptop's discrete card, its screen unplugged as no page was up) is let go of, and that device with it: kept, it
@@ -2287,7 +2499,7 @@ mod tests {
         let room = RECT { left: 0, top: 0, right: 1080, bottom: 1920 };
         let by = RECT { left: 700, top: 300, right: 1080, bottom: 900 };
         for side in [Side::Left, Side::Right, Side::Below] {
-            let opening = Opening { page: Page::Note(Some("a.md".into())), by, side, skin: Skin::Paper, dark: false, folder: None, owner: 0 };
+            let opening = Opening { page: Page::Note(Some("a.md".into())), by, side, skin: Skin::Paper, dark: false, folder: None, owner: 0, zoom: 1.0 };
             let page = placed_in(&opening, room, 3.5);
             assert!(page.left >= room.left && page.right <= room.right && page.top >= room.top && page.bottom <= room.bottom, "{side:?}: {:?}", (page.left, page.top, page.right, page.bottom));
         }
@@ -2341,7 +2553,7 @@ mod timed {
             for _ in 0..5 {
                 crate::perf::mark(|| format!("round {skin:?}"));
                 let began = std::time::Instant::now();
-                open(Opening { page: Page::Note(Some("a.md".into())), by: RECT { left: 200, top: 200, right: 400, bottom: 320 }, side: Side::Right, skin, dark: false, folder: Some(folder.clone()), owner: 0 });
+                open(Opening { page: Page::Note(Some("a.md".into())), by: RECT { left: 200, top: 200, right: 400, bottom: 320 }, side: Side::Right, skin, dark: false, folder: Some(folder.clone()), owner: 0, zoom: 1.0 });
                 wait(&shown);
                 took.push(began.elapsed().as_secs_f64() * 1000.0);
                 close();

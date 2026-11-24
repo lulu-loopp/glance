@@ -2415,6 +2415,19 @@ impl<'a> Frame<'a> {
         painted
     }
 
+    /// What `draw` draws, seen through as much as `opacity` says (1: as it is).
+    pub fn faded<T>(&self, opacity: f32, draw: impl FnOnce() -> T) -> T {
+        if opacity >= 1.0 {
+            return draw();
+        }
+        let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+        let layer = windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: opacity.max(0.0), ..Default::default() };
+        unsafe { self.dc.PushLayer(&layer, None) };
+        let drawn = draw();
+        unsafe { self.dc.PopLayer() };
+        drawn
+    }
+
     /// Draws what `paint` draws `scale` times as large about `(x, y)` (DIPs), placed as it is now otherwise.
     pub fn scaled(&self, x: f32, y: f32, scale: f32, paint: impl FnOnce(&Frame)) {
         let mut was = Matrix3x2::default();

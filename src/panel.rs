@@ -2730,6 +2730,9 @@ struct Panel<'a> {
     /// The card beside it shown, of what the pointer rests on (see `follow_card`), and what that is.
     carding: bool,
     resting: crate::ui::hover_card::Resting,
+    /// The pointer on the output's name, resting there and leaving: the sound's page opened and closed so (see
+    /// `outputs::Rest`).
+    sound_rest: crate::ui::outputs::Rest,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
@@ -2915,6 +2918,7 @@ impl<'a> Panel<'a> {
             saying: false,
             carding: false,
             resting: Default::default(),
+            sound_rest: Default::default(),
             pinned: false,
             full_asked: None,
             game: None,
@@ -3423,7 +3427,7 @@ impl<'a> Panel<'a> {
         // (Where it is in the window, physical px.)
         let client = POINT { x: cursor.x - placement.window.left, y: cursor.y - placement.window.top };
         // (The card beside the AI component's dock, and the way to it from its ring, are the panel's while it is up.)
-        let carded = self.carding && crate::ui::hover_card::holds(cursor);
+        let carded = (self.carding && crate::ui::hover_card::holds(cursor)) || (crate::ui::beside::sound_up_for(self.window.hwnd) && crate::ui::beside::sound_holds(cursor));
         let in_reach = contains(&placement.reach, cursor) || carded;
         let close_delay = self.controller.config.lock().unwrap().close_delay;
         // Down now, or pressed (and perhaps let go) since it last looked; and of those presses, any not on it nor its
@@ -3452,6 +3456,7 @@ impl<'a> Panel<'a> {
         if on_panel && self.window.lets_clicks_through() {
             self.hover_at(client);
         }
+        self.follow_sound(cursor, client, on_panel, now);
         // Around the panel the window is only shadow; clicks there belong
         // to whatever is underneath.
         self.window.set_click_through(!on_panel);
@@ -3700,12 +3705,32 @@ impl<'a> Panel<'a> {
             crate::ui::beside::close();
             return;
         }
+        self.open_sound();
+    }
+
+    /// The sound's page opened beside it, its first line level with the output's name (in line with it, under the top
+    /// edge's panel).
+    fn open_sound(&self) {
         let (Some(placement), Some(row)) = (&self.placement, self.hit_on_screen(Hit::Outputs)) else { return };
         let along = match self.edge {
             Edge::Top => row.left - placement.panel.left - (crate::ui::outputs::FIRST_COLUMN * placement.px).round() as i32,
             Edge::Left | Edge::Right => row.top - placement.panel.top - (crate::ui::outputs::FIRST_LINE * placement.px).round() as i32,
         };
-        self.open_beside(crate::ui::beside::Page::Sound { along });
+        self.open_beside(crate::ui::beside::Page::Sound { along, about: row });
+    }
+
+    /// The pointer at `cursor` (on the screen; at `client` in its window, `on_panel` or not) as it rests on the output's
+    /// name and leaves: the sound's page opened or closed so (see `outputs::Rest`).
+    fn follow_sound(&mut self, cursor: POINT, client: POINT, on_panel: bool, now: Instant) {
+        let up = crate::ui::beside::sound_up_for(self.window.hwnd);
+        let on_name = on_panel && self.hit_at(client) == Some(Hit::Outputs);
+        let holds = up && crate::ui::beside::sound_holds(cursor);
+        match self.sound_rest.follow(on_name, holds, up, now) {
+            crate::ui::outputs::Act::Open => self.open_sound(),
+            crate::ui::outputs::Act::Close => crate::ui::beside::close(),
+            crate::ui::outputs::Act::Wait(due) => self.next_frame = self.next_frame.min(due),
+            crate::ui::outputs::Act::Nothing => {}
+        }
     }
 
     /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.
@@ -3717,7 +3742,8 @@ impl<'a> Panel<'a> {
             Edge::Right => Side::Left,
             Edge::Top => Side::Below,
         };
-        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark, folder: None, owner: self.window.hwnd.0 as isize });
+        let zoom = placement.px / placement.contact.scale;
+        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark, folder: None, owner: self.window.hwnd.0 as isize, zoom });
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
@@ -4821,6 +4847,11 @@ impl<'a> Panel<'a> {
         if let Some(due) = self.hint.due(now) {
             self.next_frame = self.next_frame.min(due);
         }
+        // The sound's page due to open or close as the pointer rests on the output's name or has left it (see
+        // `outputs::Rest`).
+        if let Some(due) = self.sound_rest.due() {
+            self.next_frame = self.next_frame.min(due);
+        }
         // The card of what the pointer rests on, due; or due sooner.
         if !self.carding && self.resting.due().is_some() {
             self.follow_card();
@@ -5150,6 +5181,8 @@ impl<'a> Panel<'a> {
         match (hover, self.hover) {
             // (Not on its buttons, which may lie on that way: see `DOCK_RACK`.)
             (hover, Some(kept)) if kept.carded() && !hover.is_some_and(|hover| hover.carded() || matches!(hover, Hit::Pin | Hit::Settings)) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::hover_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(kept),
+            // (On the way from the output's name to the sound's page beside it, or on the page: the name still.)
+            (hover, Some(Hit::Outputs)) if hover != Some(Hit::Outputs) && crate::ui::beside::sound_up_for(self.window.hwnd) && self.placement.as_ref().is_some_and(|placement| crate::ui::beside::sound_holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) && !hover.is_some_and(|hover| hover.slider().is_some() || matches!(hover, Hit::Media(crate::playing::Key::Mute, _))) => Some(Hit::Outputs),
             (hover, _) => hover,
         }
     }
@@ -5276,7 +5309,10 @@ impl<'a> Panel<'a> {
                 crate::station::select::turned(self.window.hwnd.0 as isize, tab);
             }
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
-            Some(Hit::Outputs) => self.toggle_sound(),
+            Some(Hit::Outputs) => {
+                self.sound_rest.pressed();
+                self.toggle_sound();
+            }
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
             Some(Hit::Search) => crate::ui::find::toggle(),
             Some(Hit::Note(number)) => {

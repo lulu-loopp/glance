@@ -8,7 +8,7 @@
 //! moved from under the pointer); one come since goes after them, before Windows' own sounds.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::canvas::{Align, Canvas, Point};
 use super::icons::Icon;
@@ -65,6 +65,79 @@ pub fn height(outputs: usize, apps: usize) -> f32 {
 /// How tall it is for `mixer` (see `height`).
 pub fn height_of(mixer: &Mixer) -> f32 {
     height(mixer.outputs.len(), mixer.apps.len())
+}
+
+/// The output's name rested on and left (see `Rest`): how long the pointer rests on it before the page opens (as a
+/// card beside the dock does), and how long it may be off the name and the page and their way between before it closes.
+pub const REST: Duration = Duration::from_millis(260);
+pub const LEAVE: Duration = Duration::from_millis(300);
+
+/// What the pointer on the output's name asks of the sound's page (see `Rest::follow`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Act {
+    Open,
+    Close,
+    /// Nothing yet: looked at again then.
+    Wait(Instant),
+    Nothing,
+}
+
+/// The pointer on the output's name of a panel or a widget, as it rests there and leaves: the page opened as it has
+/// rested, closed as it has been off the name, the page and their way between a moment (a hand wavering does not close
+/// it). Pressed, the name opens or closes it at once, and resting on it then opens it no more till the pointer has left.
+#[derive(Default)]
+pub struct Rest {
+    on_since: Option<Instant>,
+    away_since: Option<Instant>,
+    /// Opened or closed while the pointer is on the name: not opened by its resting there again till it leaves.
+    held_off: bool,
+}
+
+impl Rest {
+    /// The pointer is on the name (`on_name`) or not, where it keeps the page up (`holds`: see `beside::sound_holds`),
+    /// the page `up` from here or not: what is to be done.
+    pub fn follow(&mut self, on_name: bool, holds: bool, up: bool, now: Instant) -> Act {
+        if !on_name {
+            self.on_since = None;
+            self.held_off = false;
+        }
+        if up {
+            self.on_since = None;
+            if on_name || holds {
+                self.away_since = None;
+                return Act::Nothing;
+            }
+            let since = *self.away_since.get_or_insert(now);
+            if now >= since + LEAVE {
+                self.away_since = None;
+                return Act::Close;
+            }
+            return Act::Wait(since + LEAVE);
+        }
+        self.away_since = None;
+        if !on_name || self.held_off {
+            return Act::Nothing;
+        }
+        let since = *self.on_since.get_or_insert(now);
+        if now >= since + REST {
+            self.on_since = None;
+            self.held_off = true;
+            return Act::Open;
+        }
+        Act::Wait(since + REST)
+    }
+
+    /// When the page is due to open or close, the pointer staying where it is: looked at again then.
+    pub fn due(&self) -> Option<Instant> {
+        self.on_since.map(|since| since + REST).or(self.away_since.map(|since| since + LEAVE))
+    }
+
+    /// The name pressed: the page opened or closed by it, not by resting there again till the pointer leaves.
+    pub fn pressed(&mut self) {
+        self.held_off = true;
+        self.on_since = None;
+        self.away_since = None;
+    }
 }
 
 /// How far down its first line is from its top, and how far in from its side what it lists is: what it is placed by,
@@ -167,7 +240,7 @@ impl Sound {
             let quiet = !app.sounding && !app.system;
             // Its picture (Windows' own sounds: the volume's mark), greyed where it does not sound now; its name.
             let face = (SIDE, middle - FACE / 2.0);
-            let faded = if quiet { 0.45 } else { 1.0 };
+            let faded = if quiet { 0.6 } else { 1.0 };
             match app.file.as_ref().filter(|_| !app.system) {
                 Some(file) => match crate::station::thumbs::icon(file, super::view::APP_PIXELS) {
                     Some(picture) => frame.picture(&picture, face.0, face.1, FACE, FACE, 4.0, faded),
@@ -182,7 +255,8 @@ impl Sound {
             frame.text(name, theme.small, if quiet { theme.text3 } else { theme.text2 }, SIDE + FACE + FACE_GAP, frame.line_top(theme.small, middle), LABEL - FACE - FACE_GAP, Align::Start);
             // Its track (in the panel's ink for the volume, grey where it is muted or does not sound), and under it how
             // loud it sounds this moment.
-            let colour = if app.muted || quiet { theme.text3 } else { ink };
+            // (Every program's track as it can be moved, as Windows' own mixer draws it: grey only where it is muted.)
+            let colour = if app.muted { theme.text3 } else { ink };
             let level_hit = Hit::Level(at as u16);
             slider(frame, theme, colour, plot_left, middle, track, app.level as f32 / 100.0, Some(self.dots.of(level_hit)));
             if let Some(peak) = peaks.get(&app.key).filter(|_| app.sounding && !app.muted) {
@@ -191,7 +265,7 @@ impl Sound {
             }
             hits.push((plot_left, row, track, MEDIA_ROW, level_hit));
             let said = format!("{}%", app.level);
-            frame.text(&said, theme.small, if app.muted || quiet { theme.text3 } else { theme.text2 }, mute_x - 6.0 - said_width, frame.line_top(theme.small, middle), said_width, Align::End);
+            frame.text(&said, theme.small, if app.muted { theme.text3 } else { theme.text2 }, mute_x - 6.0 - said_width, frame.line_top(theme.small, middle), said_width, Align::End);
             // Its mute, as the panel's: on a plate under the pointer, or while it is muted.
             let mute = (mute_x, row, MEDIA_ROW, MEDIA_ROW);
             let lit = app.muted || over(mute);
@@ -288,6 +362,37 @@ pub fn icon_of(form: Form) -> Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page opens once the pointer has rested on the output's name, and not as it only passes; it stays while the
+    /// pointer is on the name, on the page or on its way between, and closes once it has been off them a moment (back
+    /// within that, it stays). Pressed, the name opens or closes it at once, and resting there then opens it no more
+    /// till the pointer has left the name.
+    #[test]
+    fn the_page_opens_as_the_name_is_rested_on_and_closes_as_it_is_left() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut rest = Rest::default();
+        // (Passing over it.)
+        assert_eq!(rest.follow(true, false, false, at(0)), Act::Wait(at(0) + REST));
+        assert_eq!(rest.follow(false, false, false, at(100)), Act::Nothing);
+        assert_eq!(rest.follow(true, false, false, at(200)), Act::Wait(at(200) + REST));
+        // (Rested on.)
+        assert_eq!(rest.follow(true, false, false, at(200) + REST), Act::Open);
+        // (Off the name, on its way and on the page: kept; off them all a while: closed, unless it came back.)
+        assert_eq!(rest.follow(false, true, true, at(600)), Act::Nothing);
+        assert_eq!(rest.follow(false, false, true, at(700)), Act::Wait(at(700) + LEAVE));
+        assert_eq!(rest.follow(false, true, true, at(800)), Act::Nothing);
+        assert_eq!(rest.follow(false, false, true, at(900)), Act::Wait(at(900) + LEAVE));
+        assert_eq!(rest.follow(false, false, true, at(900) + LEAVE), Act::Close);
+        // (Pressed to close as it rests there: not opened again by resting, till it has left and rested again.)
+        let mut rest = Rest::default();
+        rest.pressed();
+        assert_eq!(rest.follow(true, false, false, at(0)), Act::Nothing);
+        assert_eq!(rest.follow(true, false, false, at(1000)), Act::Nothing);
+        assert_eq!(rest.follow(false, false, false, at(1100)), Act::Nothing);
+        assert_eq!(rest.follow(true, false, false, at(1200)), Act::Wait(at(1200) + REST));
+        assert_eq!(rest.follow(true, false, false, at(1200) + REST), Act::Open);
+    }
     use crate::audio::App;
 
     fn app(key: &str, sounding: bool, system: bool) -> App {
