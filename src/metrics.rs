@@ -102,6 +102,8 @@ pub struct Sampler {
     /// Each logical processor's performance and nominal clock, and, on a
     /// processor with cores of more than one kind, its kind (see `Cores`).
     cores: Cores,
+    /// The clock the nominal one is as this machine runs it (see `Reference`).
+    reference: Reference,
     gpu_engine: Option<PDH_HCOUNTER>,
     gpu_dedicated: Option<PDH_HCOUNTER>,
     gpu_shared: Option<PDH_HCOUNTER>,
@@ -322,6 +324,7 @@ impl Sampler {
             cpu_performance,
             cpu_nominal,
             cores,
+            reference: Reference::of_this_machine(),
             gpu_engine,
             gpu_dedicated,
             gpu_shared,
@@ -493,8 +496,14 @@ impl Sampler {
                 }
             }
         }
+        // The clock now, the nominal clock times the share of it the processors ran at, as Task Manager's speed is; the
+        // nominal clock as this machine runs it (see `Reference`). (Without either counter the clock is not read: shown
+        // as its nominal, it looked read when it was not.)
+        let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
+        let nominal = counter(self.cpu_nominal).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).filter(|mhz| *mhz > 0.0);
+        let reference = nominal.map_or(1.0, |nominal| self.reference.scale(nominal));
         // Each thread's clock, and each kind of core's.
-        let (kinds_ghz, threads_ghz) = if collected { self.cores.read(&group_starts, processors, &mut self.buf) } else { (Vec::new(), Vec::new()) };
+        let (kinds_ghz, threads_ghz) = if collected { self.cores.read(&group_starts, processors, reference, &mut self.buf) } else { (Vec::new(), Vec::new()) };
         // Without the counters, the whole processor's use from the kernel's
         // own account of its time (and no per-thread grid).
         let times = system_times();
@@ -504,10 +513,6 @@ impl Sampler {
             (total > 0).then(|| ((busy - busy_before) as f64 / total as f64 * 100.0) as f32)
         });
         self.system_times = times;
-        // The clock now, the nominal clock times the share of it the processors ran at, as Task Manager's speed is.
-        // (Without either counter the clock is not read: shown as its nominal, it looked read when it was not.)
-        let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
-        let nominal = counter(self.cpu_nominal).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).filter(|mhz| *mhz > 0.0);
         let utility = counter(self.cpu_utility).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).map(|utility| utility as f32);
 
         // The driver installed meanwhile: what reads through it, not had without it, opened now.
@@ -560,7 +565,7 @@ impl Sampler {
             cpu,
             cpu_utility: utility,
             threads,
-            ghz: nominal.zip(performance).map(|(nominal, performance)| (nominal * performance / 100_000.0) as f32),
+            ghz: nominal.zip(performance).map(|(nominal, performance)| clock_ghz(nominal, performance, reference) as f32),
             kinds_ghz,
             threads_ghz,
             memory: MemorySample {
@@ -995,11 +1000,12 @@ impl Cores {
     /// Each kind's clock now (GHz), the most capable first (none for a
     /// processor whose cores are alike), and each of the `processors`
     /// logical processors' (placed as `group_starts` say, as the threads'
-    /// loads are).
-    fn read(&self, group_starts: &[usize], processors: usize, buf: &mut Vec<u64>) -> (Vec<Option<f32>>, Vec<Option<f32>>) {
+    /// loads are), their nominal clocks as `reference` scales them (see
+    /// `clock_ghz`).
+    fn read(&self, group_starts: &[usize], processors: usize, reference: f64, buf: &mut Vec<u64>) -> (Vec<Option<f32>>, Vec<Option<f32>>) {
         let performance = self.performance.and_then(|c| read_array(c, buf)).unwrap_or_default();
         let nominal: HashMap<String, f64> = self.nominal.and_then(|c| read_array(c, buf)).unwrap_or_default().into_iter().filter_map(|(name, mhz)| Some((name, mhz?))).collect();
-        let clocks: Vec<(String, f64)> = performance.into_iter().filter_map(|(name, share)| Some((name.clone(), share? / 100.0 * nominal.get(&name)? / 1000.0))).collect();
+        let clocks: Vec<(String, f64)> = performance.into_iter().filter_map(|(name, share)| Some((name.clone(), clock_ghz(*nominal.get(&name)?, share?, reference)))).collect();
         let mut threads = vec![None; processors];
         for (name, ghz) in &clocks {
             let Some((group, index)) = name.split_once(',') else { continue };
@@ -1014,6 +1020,61 @@ impl Cores {
         };
         (kinds, threads)
     }
+}
+
+/// The clock the processors' performance is counted against, as it runs on this machine: on an AMD processor (its
+/// timestamp counter invariant), the timestamp counter's, which runs at the processor's first performance state as
+/// MPERF does, both from its base clock; Windows' nominal clock is that state's clock at a base clock of 100 MHz, so
+/// a base clock raised (to 105 MHz, say) leaves every clock read from it that much short (HWiNFO's, read from the
+/// cores, are not). Intel's timestamp counter runs from a crystal of its own, not from the base clock MPERF follows:
+/// there the nominal clock is taken as Windows says.
+struct Reference {
+    /// The timestamp counter's count when it was first read, and when that was; none where it is not the reference.
+    from: Option<(u64, Instant)>,
+}
+
+impl Reference {
+    fn of_this_machine() -> Self {
+        Reference { from: counter_is_reference().then(|| (timestamp(), Instant::now())) }
+    }
+
+    /// How much faster than `nominal_mhz` (as Windows says it) the reference runs: its timestamp counter's rate
+    /// (MHz) since it was first read, over that; 1 where that is not the reference, or no time has gone by.
+    fn scale(&self, nominal_mhz: f64) -> f64 {
+        let Some((count, at)) = self.from else { return 1.0 };
+        let seconds = at.elapsed().as_secs_f64();
+        if seconds <= 0.0 {
+            return 1.0;
+        }
+        Self::scale_of(timestamp().wrapping_sub(count) as f64 / seconds / 1e6, nominal_mhz)
+    }
+
+    /// How much faster a reference running at `counter_mhz` is than `nominal_mhz`.
+    fn scale_of(counter_mhz: f64, nominal_mhz: f64) -> f64 {
+        counter_mhz / nominal_mhz
+    }
+}
+
+/// Whether the timestamp counter runs at the clock the processors' performance is counted against: an AMD processor's
+/// (Hygon's, of the same make), invariant (counting alike in every state, as it says: CPUID 0x80000007, EDX bit 8).
+fn counter_is_reference() -> bool {
+    let vendor = std::arch::x86_64::__cpuid(0);
+    let name: Vec<u8> = [vendor.ebx, vendor.edx, vendor.ecx].into_iter().flat_map(u32::to_le_bytes).collect();
+    let amd = name == b"AuthenticAMD" || name == b"HygonGenuine";
+    let invariant = std::arch::x86_64::__cpuid(0x8000_0000).eax >= 0x8000_0007 && std::arch::x86_64::__cpuid(0x8000_0007).edx & (1 << 8) != 0;
+    amd && invariant
+}
+
+/// The timestamp counter now.
+fn timestamp() -> u64 {
+    unsafe { std::arch::x86_64::_rdtsc() }
+}
+
+/// A processor's clock (GHz): its nominal clock (MHz, as Windows tells it), times the share of it (%) it ran at, as Task
+/// Manager's speed is; the nominal clock as the processor's reference clock runs it, `reference` times what Windows
+/// says (see `Reference`).
+fn clock_ghz(nominal_mhz: f64, share: f64, reference: f64) -> f64 {
+    nominal_mhz * reference * share / 100_000.0
 }
 
 /// Each class's average of `clocks` (class, GHz), the highest class first;
@@ -2115,7 +2176,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         unsafe { PdhCollectQueryData(query) };
         let (starts, processors) = processor_groups();
-        let (read, threads) = kinds.read(&starts, processors, &mut Vec::new());
+        let (read, threads) = kinds.read(&starts, processors, 1.0, &mut Vec::new());
         println!("{read:?} {threads:?}");
         assert!(read.len() == 2 && read.iter().all(|ghz| ghz.is_some_and(|ghz| (0.4..8.0).contains(&ghz))));
         assert!(threads.len() == processors && threads.iter().all(Option::is_some));
@@ -2170,6 +2231,19 @@ mod tests {
         let since = last_boot().expect("the last start in the event log");
         assert!(since <= unsafe { GetTickCount64() } + 1000, "{since} ms ago, the tick count {}", unsafe { GetTickCount64() });
         assert!(sample.system.uptime_s.abs_diff(since / 1000) <= 2);
+    }
+
+    /// A Ryzen whose base clock was raised from 100 to 105 MHz (as a user's 9950X3D was, HWiNFO's cores at 5,460 MHz):
+    /// Windows still says its nominal clock is 4,300 MHz, and counts the share it ran at (120.93 %, 5.20 GHz of that)
+    /// against the clock its timestamp counter runs at, 4,515 MHz. Its clock is that share of 4,515, 5.46 GHz. Where the
+    /// reference is as Windows says (an AMD at its base clock, any Intel), what Task Manager says.
+    #[test]
+    fn a_raised_base_clock_raises_the_clock() {
+        let reference = Reference::scale_of(4515.0, 4300.0);
+        assert!((super::clock_ghz(4300.0, 120.93, reference) - 5.46).abs() < 0.005, "{}", super::clock_ghz(4300.0, 120.93, reference));
+        assert!((super::clock_ghz(4300.0, 120.93, 1.0) - 5.20).abs() < 0.005);
+        // (This PC's 9950X at its base clock: its counter's 4,299.82 MHz is the nominal 4,300 to within a ten-thousandth.)
+        assert!((super::clock_ghz(4300.0, 123.7, Reference::scale_of(4299.82, 4300.0)) - 5.319).abs() < 0.001);
     }
 
     #[test]
