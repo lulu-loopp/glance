@@ -4755,23 +4755,25 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let (row, middle) = (y + MEDIA_GAP, y + MEDIA_GAP + MEDIA_ROW / 2.0);
                 part("label");
                 match output {
-                    // Named by the output it plays on, an arrow after: pressed, the outputs and the programs' sound
-                    // open beside (pressed again, they close). Its plate as round as a button's, as wide as the name and
-                    // the arrow are, under the pointer and while they are open.
+                    // Named by the output it plays on, an arrow after pointing on to more (as Windows' own volume does):
+                    // rested on or pressed, the outputs and the programs' sound open beside (pressed again, they close).
+                    // Its plate as round as a button's, as wide as the name and the arrow are, under the pointer and
+                    // while they are open. (The arrow as narrow as it is drawn: the name has the rest.)
                     Some(name) => {
                         let hit = Hit::Outputs;
                         let lit = *open || scene.hover == Some(hit);
                         let (pad, arrow, gap) = (OUTPUT_PAD, OUTPUT_ARROW, 2.0);
+                        let arrow_width = arrow / 2.0;
                         let plate_left = left - pad;
-                        let most = LABEL - gap - arrow - 6.0;
+                        let most = LABEL - gap - arrow_width - 6.0;
                         let name_width = frame.measure(name, theme.small).min(most);
-                        let plate_width = pad + name_width + gap + arrow + 6.0;
+                        let plate_width = pad + name_width + gap + arrow_width + 6.0;
                         if lit {
                             frame.fill_rounded(theme.hover, plate_left, row, plate_width, MEDIA_ROW, theme.control_radius.min(MEDIA_ROW / 2.0));
                         }
                         let ink = if lit { theme.text } else { theme.text2 };
                         frame.text(name, theme.small, ink, left, frame.line_top(theme.small, middle), name_width, Align::Start);
-                        frame.icon(if *open { Icon::ChevronUp } else { Icon::ChevronDown }, Point { x: left + name_width + gap + arrow / 2.0, y: middle }, arrow, ink);
+                        frame.icon(Icon::ChevronRight, Point { x: left + name_width + gap + arrow_width / 2.0, y: middle }, arrow, ink);
                         hits.push((plate_left, row, plate_width, MEDIA_ROW, hit));
                     }
                     None => frame.text(scene.lang.pick("音量", "Volume"), theme.small, theme.text2, left, frame.line_top(theme.small, middle), LABEL, Align::Start),
