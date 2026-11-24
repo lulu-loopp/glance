@@ -5177,7 +5177,7 @@ impl<'a> Panel<'a> {
     /// rows are), or, on its way from a spot of the AI component's dock to the card beside it (over the rest of the
     /// dock, across to the card), that spot still, its card up.
     fn lit_at(&self, client: POINT) -> Option<Hit> {
-        let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
+        let hover = self.hit_at(client).filter(|hit| hit.lights());
         match (hover, self.hover) {
             // (Not on its buttons, which may lie on that way: see `DOCK_RACK`.)
             (hover, Some(kept)) if kept.carded() && !hover.is_some_and(|hover| hover.carded() || matches!(hover, Hit::Pin | Hit::Settings)) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::hover_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(kept),

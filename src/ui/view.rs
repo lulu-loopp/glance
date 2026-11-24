@@ -315,10 +315,10 @@ impl Hit {
         !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(..) | Hit::Choice(..))
     }
 
-    /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
-    /// beside the dock as the pointer rests there).
+    /// Whether it is lit as the pointer is over it, in a panel and in a widget alike: all but a list's rows and its bar,
+    /// which only scroll (a thread's cell told of over it, an AI source in the dock its card shown beside it).
     pub fn lights(self) -> bool {
-        self.takes_press() || matches!(self, Hit::AiSlot(_))
+        self.list().is_none()
     }
 
     /// Whether a card tells of it beside the window it is drawn in as the pointer rests on it (see `ui::hover_card`).
@@ -7435,6 +7435,17 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    /// What the pointer is over is lit (and told of, a thread's clock and load over its cell) the same in a panel and in
+    /// a widget torn off it: all but a list's rows and bar, which only scroll.
+    #[test]
+    fn a_thread_s_cell_is_lit_wherever_it_shows() {
+        assert!(Hit::Thread(5).lights());
+        assert!(Hit::AiSlot(ai::Spot::Today).lights());
+        assert!(Hit::Settings.lights());
+        assert!(!Hit::List(List::Processes, 0).lights());
+        assert!(!Hit::Bar(List::Processes, 0, 0).lights());
+    }
 
     /// What was copied lately as `view` shows it, all of it, nothing of it apart.
     fn copies_page(view: ShelfView) -> LanePage {
