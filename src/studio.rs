@@ -1480,14 +1480,16 @@ pub(crate) fn save_png(path: &PathBuf, width: u32, height: u32, pixels: &[u8]) -
 /// `wallpaper` as the desktop: each form on glass, left alone, with a new
 /// sample every frame, and moved; each frame's time part by part (the
 /// surface given, the ground, the readings, the surface handed back), the
-/// middle one of them and the slowest twentieth's. Once as the widget
-/// draws, and once with what was drawn sent to the graphics card after each
-/// part, so that each part's time is its own.
+/// middle one of them and the slowest twentieth's, and how long after it was
+/// handed back the graphics card was done with it. Once as the widget draws,
+/// and once with what was drawn sent to the graphics card after each part, so
+/// that each part's time is its own. On a laptop's screen of 3200 x 2000 at
+/// 200 % (a report's: RAQ78C).
 pub fn frames(wallpaper: &str) -> Result<(), String> {
     use std::time::{Duration, Instant};
     use windows::core::w;
     use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE};
-    let (width, height, px) = (2560u32, 1440u32, 1.5f32);
+    let (width, height, px) = (3200u32, 2000u32, 2.0f32);
     let info = crate::metrics::Sampler::new().info.clone();
     let gfx = Gfx::new().map_err(|e| e.to_string())?;
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
@@ -1498,7 +1500,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let history: Vec<Arc<Sample>> = (0..400).map(|i| Arc::new(made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None))).collect();
     let theme = Theme::new(Skin::Glass, true);
     let work = (width as f32 / px, height as f32 / px);
-    let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 200, 200, 1400, 1200, None, None, None, None) }.map_err(|e| e.to_string())?;
+    let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 200, 200, 2400, 1800, None, None, None, None) }.map_err(|e| e.to_string())?;
     // Cloaked: timed on whoever's desktop it runs on, it shows nothing there (what is drawn is drawn all the same).
     unsafe {
         let cloak: windows::core::BOOL = true.into();
@@ -1510,16 +1512,19 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
         ("corner", Form::Small(Small::Corner)),
         ("tiles", Form::Small(Small::Tiles { across: 3, down: 2 })),
         ("compact-2", Form::Lanes { detail: view::Detail::Compact, columns: 2 }),
+        ("full-3", Form::Lanes { detail: view::Detail::Full, columns: 3 }),
     ];
-    println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7}   (ms: middle / slowest twentieth)", "form", "frames", "sent", "given", "ground", "reads", "handed", "all");
+    println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}   (ms: middle / slowest twentieth)", "form", "frames", "sent", "given", "ground", "reads", "handed", "all", "card");
+    // (The adapter it is timed on: Windows' least power one, as `Gfx::new` takes.)
+    println!("on {:?}", gfx.adapter);
     for (name, form) in forms {
         for sent in [false, true] {
-            for case in ["still", "sample", "moved", "rough", "second"] {
+            for case in ["still", "sample", "moved", "rough", "second", "woken"] {
                 let mut filming = Filming::new(Choice { form, scale: 0.79, extra: (0.0, 0.0) }, (40.0, 40.0));
                 let mut bitmap = None;
-                let mut times: Vec<[Duration; 5]> = Vec::new();
+                let mut times: Vec<[Duration; 6]> = Vec::new();
                 // (A sample a second, as a widget on the desktop has them: the frames a second apart.)
-                let paced = matches!(case, "second" | "cleared" | "trimmed");
+                let paced = matches!(case, "second" | "woken" | "cleared" | "trimmed");
                 let rounds = if paced { 14 } else { 150 };
                 for round in 0..rounds {
                     if paced {
@@ -1529,6 +1534,11 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                     match case {
                         "cleared" => gfx.clear_caches(),
                         "trimmed" => gfx.trim(),
+                        // (The card woken first, and waited for: what is left is the frame's own.)
+                        "woken" => {
+                            let _ = surface.draw(&gfx, (2400, 1800), px, |_| {});
+                            gfx.finished().map_err(|e| e.to_string())?;
+                        }
                         _ => {}
                     }
                     let read = if case == "sample" || paced { 200 + round } else { 200 };
@@ -1542,7 +1552,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                     let began = Instant::now();
                     let layers = &mut filming.layers;
                     let size = filming.surface;
-                    let drawn = surface.draw(&gfx, (1400, 1200), px, |frame| {
+                    let drawn = surface.draw(&gfx, (2400, 1800), px, |frame| {
                         if bitmap.is_none() {
                             bitmap = desktop.bitmap(&frame.dc, px * zoom).ok();
                         }
@@ -1563,10 +1573,12 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                         reads = from.elapsed();
                     });
                     drawn.map_err(|e| e.to_string())?;
+                    let all = began.elapsed();
+                    let card = gfx.finished().map_err(|e| e.to_string())?;
                     gfx.sweep();
                     // (The first frames make what the later ones keep.)
                     if round >= 10 || (paced && round >= 2) {
-                        times.push([surface.took.given, ground, reads, surface.took.handed, began.elapsed()]);
+                        times.push([surface.took.given, ground, reads, surface.took.handed, all, card]);
                     }
                 }
                 let of = |part: usize| {
@@ -1574,7 +1586,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                     all.sort_by(f64::total_cmp);
                     format!("{:.1}/{:.1}", all[all.len() / 2], all[all.len() * 19 / 20])
                 };
-                println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7}", name, case, if sent { "each" } else { "-" }, of(0), of(1), of(2), of(3), of(4));
+                println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}", name, case, if sent { "each" } else { "-" }, of(0), of(1), of(2), of(3), of(4), of(5));
             }
         }
     }

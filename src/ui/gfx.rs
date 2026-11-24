@@ -1091,6 +1091,27 @@ impl Gfx {
         self.trimmed.set(false);
     }
 
+    /// Waits till the graphics card has done all it was handed on this device: how long that took (the studio's
+    /// timing of frames, see `studio::frames`: what was drawn, as the card takes it, not as it was handed to it).
+    #[cfg(feature = "studio")]
+    pub fn finished(&self) -> Result<Duration> {
+        use windows::Win32::Graphics::Direct3D11::{ID3D11Query, D3D11_QUERY_DESC, D3D11_QUERY_EVENT};
+        let began = Instant::now();
+        let d3d: ID3D11Device = self.dxgi.cast()?;
+        let context = unsafe { d3d.GetImmediateContext()? };
+        let mut query: Option<ID3D11Query> = None;
+        unsafe { d3d.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query))? };
+        let query = query.unwrap();
+        unsafe { context.End(&query) };
+        let mut done: windows::core::BOOL = false.into();
+        // (Not yet done is a success too, S_FALSE: told by what it wrote.)
+        while !done.as_bool() {
+            unsafe { context.GetData(&query, Some(&mut done as *mut _ as *mut _), std::mem::size_of_val(&done) as u32, 0)? };
+            std::thread::yield_now();
+        }
+        Ok(began.elapsed())
+    }
+
     /// Forgets the text, and the fonts, no window has drawn for a while.
     pub fn sweep(&self) {
         self.pictures.borrow_mut().retain(|_, (_, used)| used.elapsed() < PICTURE_KEPT);
