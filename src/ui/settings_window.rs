@@ -2991,6 +2991,22 @@ fn put_slider(settings: &mut Settings, field: Field, value: f32) {
 /// be taken here (its installer not downloaded, or not passing its check: signed otherwise than this Glance trusts, as
 /// after a change of certificate), the site's download page is offered too, so that it is still had: first where
 /// trying again will not help.
+/// What the board module describes: the board, its sensors `read`, and otherwise why they are not (a switch that does
+/// nothing would look broken). On a `laptop` that is no failure: its board's temperatures and fans are its maker's
+/// embedded controller's, and most makers do not open them (some do: its fans read through its firmware are shown).
+fn board_said(read: bool, laptop: bool, board: &str, lang: Lang) -> Option<String> {
+    let said = match (read, laptop) {
+        (true, _) => return (!board.is_empty()).then(|| board.to_string()),
+        (false, true) => pick(
+            lang,
+            "笔记本的主板温度与风扇转速由厂商的嵌入式控制器管理，多数机型不对外提供，因此无法显示。CPU、显卡与磁盘的温度不受影响",
+            "A laptop's board temperatures and fan speeds are kept by its maker's embedded controller, which most models do not open to other programs, so they cannot be shown. The temperatures of the CPU, the graphics and the drives are not affected",
+        ),
+        (false, false) => pick(lang, "未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why"),
+    };
+    Some(said.to_string())
+}
+
 fn update_offer(state: update::State, lang: Lang) -> (String, Vec<(String, Target, Button)>) {
     let p = |zh, en| pick(lang, zh, en).to_string();
     let download = |kind| (p("前往下载", "Download"), Target::Download, kind);
@@ -5438,13 +5454,7 @@ It can be disconnected here at any time, and the status line command put back.",
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
             "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上点击表头即可排序", "The busiest programs. Click a heading on the panel to sort them"))),
             "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间，以及所选文件夹的大小", "Space left on each drive, and how large the folders you choose are"))),
-            // A board whose sensors are not read says so, rather than
-            // looking like a switch that does nothing.
-            "board" if crate::app().controller.seen.lock().unwrap().board.is_none() => (
-                p("主板", "Motherboard"),
-                Some(p("未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why")),
-            ),
-            "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
+            "board" => (p("主板", "Motherboard"), board_said(crate::app().controller.seen.lock().unwrap().board.is_some(), crate::laptop::this_machine(), &info.board, lang)),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
             "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),
@@ -9802,6 +9812,22 @@ mod pictures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The board's sensors not read, it is said why: on a laptop, that its maker's controller keeps them (as most
+    /// do), not that they failed to be read. Read, or on a desktop, as before.
+    #[test]
+    fn a_laptops_board_not_read_says_its_maker_keeps_it() {
+        for lang in [Lang::Zh, Lang::En] {
+            let laptop = board_said(false, true, "LENOVO LNVNB161216", lang).unwrap();
+            let desktop = board_said(false, false, "MAG B650", lang).unwrap();
+            assert_ne!(laptop, desktop);
+            assert!(laptop.contains(pick(lang, "笔记本", "laptop")), "{laptop}");
+            assert!(!laptop.contains(pick(lang, "未能读取", "could not be read")), "{laptop}");
+            assert!(desktop.contains(pick(lang, "诊断信息", "diagnostics")), "{desktop}");
+            assert_eq!(board_said(true, true, "LENOVO LNVNB161216", lang).as_deref(), Some("LENOVO LNVNB161216"));
+            assert_eq!(board_said(true, false, "", lang), None);
+        }
+    }
 
     /// An update that cannot be taken here, its installer not downloaded or not passing its check, is offered from
     /// the site's download page as well (a release Glance cannot check, whatever its signature, is still had so):
