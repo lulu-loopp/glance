@@ -81,9 +81,9 @@ fn fitting<'a>(named: &'a [(PathBuf, Song)], track: &Track) -> Vec<&'a PathBuf> 
     found
 }
 
-/// Text as titles and artists are matched: without its spaces, in lower case.
+/// Text as titles and artists are matched, as the lyrics' sources' are (see `lyrics::folded`).
 fn bare(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
+    crate::lyrics::folded(text)
 }
 
 /// Whether `song`'s length and artist do not say it is not `track`: as long to two seconds, or either not saying it;
@@ -751,6 +751,8 @@ mod tests {
         let paths = |found: Vec<&PathBuf>| found.into_iter().map(|path| path.display().to_string()).collect::<Vec<_>>();
         assert_eq!(paths(fitting(&named, &track("", 235))), ["D:/a.flac", "D:/b.flac", "D:/d.flac", "D:/e.flac"]);
         assert_eq!(paths(fitting(&named, &track("s.h.e", 235))), ["D:/a.flac", "D:/b.flac", "D:/e.flac"]);
+        // (Its artist in full-width letters, as some players write it: the same.)
+        assert_eq!(paths(fitting(&named, &track("Ｓ.Ｈ.Ｅ", 235))), ["D:/a.flac", "D:/b.flac", "D:/e.flac"]);
         assert_eq!(paths(fitting(&named, &track("", 0))).len(), 5);
     }
 

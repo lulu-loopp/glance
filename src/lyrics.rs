@@ -827,11 +827,12 @@ fn by_artist<'a>(artists: impl IntoIterator<Item = &'a str>, artist: &str) -> bo
     artist.trim().is_empty() || artists.into_iter().any(|theirs| same(theirs, artist))
 }
 
-/// The artists of a track as LRCLIB and Kugou name them, all in one ("A, B & C feat. D", "A、B"): the whole, and each
-/// between the signs that join them (the whole kept: "AC/DC" and "Simon & Garfunkel" are one each).
+/// The artists of a track as LRCLIB and Kugou name them, all in one ("A, B & C feat. D", "A、B", "A，B"): the whole, and
+/// each between the signs that join them, narrow or full-width (the whole kept: "AC/DC" and "Simon & Garfunkel" are one
+/// each).
 fn artists_in(named: &str) -> Vec<&str> {
     let mut artists = vec![named];
-    for between in [",", "、", "&", "/", ";", " feat. ", " ft. ", " x "] {
+    for between in [",", "，", "、", "&", "＆", "/", "／", ";", "；", " feat. ", " ft. ", " x "] {
         artists = artists.into_iter().flat_map(|artist| artist.split(between)).collect();
     }
     std::iter::once(named).chain(artists).map(str::trim).filter(|artist| !artist.is_empty()).collect()
@@ -920,10 +921,23 @@ fn bare_title(title: &str) -> &str {
     if bare.is_empty() { title } else { bare }
 }
 
-/// Whether two titles are the same, but for case and spaces.
+/// Whether two titles are the same, but for case, spaces and the width of letters and signs (see `folded`).
 fn same(a: &str, b: &str) -> bool {
-    let bare = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
-    bare(a) == bare(b)
+    folded(a) == folded(b)
+}
+
+/// Text as titles and artists are matched: without its spaces, in lower case, its full-width letters, digits and signs
+/// (U+FF01 to U+FF5E, as Chinese text writes "（" and "Ａ") as the ASCII ones they are wide forms of. (汽水音乐 titled a
+/// track "游京（滔滔江水）", NetEase "游京 (滔滔江水)": its lyrics were not found.)
+pub(crate) fn folded(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// `text` as a URL's query has it (RFC 3986: all but the unreserved, by their UTF-8 bytes).
@@ -1221,6 +1235,17 @@ mod tests {
         assert!(!look_again(&early, || true));
         not_on_this_pc(&late, true);
         assert!(!look_again(&late, || true));
+    }
+
+    #[test]
+    fn full_width_letters_and_signs_are_their_ascii_ones() {
+        // (汽水音乐 titles a track "游京（滔滔江水）", NetEase "游京 (滔滔江水)": not found.)
+        assert_eq!(titled("游京 (滔滔江水)", "游京（滔滔江水）"), Some(Titled::Whole));
+        assert_eq!(titled("游京", "游京（滔滔江水）"), Some(Titled::Bare));
+        assert!(same("Ｍｅｄａｌｓ　２", "medals 2"));
+        assert!(!same("勋章", "勳章"));
+        assert!(by_artist(["Ｓ.Ｈ.Ｅ"], "s.h.e"));
+        assert_eq!(artists_in("甲，乙＆丙／丁；戊"), ["甲，乙＆丙／丁；戊", "甲", "乙", "丙", "丁", "戊"]);
     }
 
     #[test]
@@ -1674,6 +1699,16 @@ mod tests {
             Has::Sung(lines) => Some(lines),
             Has::Instrumental => None,
         }
+    }
+
+    /// A track titled in full-width brackets, as 汽水音乐 titles it (network): found where NetEase titles it in narrow
+    /// ones ("游京 (滔滔江水)", 208.8 s). `cargo test -- --ignored finds_a_track_titled --nocapture`.
+    #[test]
+    #[ignore = "asks the lyrics sources over the network"]
+    fn finds_a_track_titled_in_full_width_brackets() {
+        let track = Track { netease: None, qq_music: false, title: "游京（滔滔江水）".into(), artist: "泽国同学".into(), album: String::new(), seconds: 209 };
+        let lines = find(&track).found.and_then(sung_lines).expect("its lyrics");
+        println!("{} lines: {:?}", lines.len(), lines.iter().take(4).map(|line| &line.text).collect::<Vec<_>>());
     }
 
     /// A piano piece Kugou gave another song's lyrics for (network): that it is played without words, by NetEase's
