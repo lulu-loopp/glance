@@ -96,14 +96,16 @@ fn agrees(song: &Song, track: &Track) -> bool {
 
 /// The files of music on any drive named as `track` is titled (with its extension, or with one of a file of music's:
 /// a player telling what plays by its file's name), each with what its tags say. The drives' index asked again for
-/// the same title no more often than `LOOK_AGAIN` (a track with no cover asks for one every few seconds).
+/// the same title no more often than `LOOK_AGAIN` (a track with no cover asks for one every few seconds), but at once
+/// where it was asked before every drive was listed and they are now (see `crate::search::whole`).
 fn named_as(track: &Track) -> Vec<(PathBuf, Song)> {
-    /// The files last found, for which title, when.
-    type Found = (String, std::time::Instant, Vec<(PathBuf, Song)>);
+    /// The files last found, for which title, when, and whether every drive was listed then.
+    type Found = (String, std::time::Instant, bool, Vec<(PathBuf, Song)>);
     static NAMED: Mutex<Option<Found>> = Mutex::new(None);
     let mut named = NAMED.lock().unwrap();
-    if let Some((title, at, found)) = named.as_ref() {
-        if *title == track.title && at.elapsed() < LOOK_AGAIN {
+    let whole = crate::search::whole();
+    if let Some((title, at, was_whole, found)) = named.as_ref() {
+        if *title == track.title && at.elapsed() < LOOK_AGAIN && (*was_whole || !whole) {
             return found.clone();
         }
     }
@@ -119,7 +121,7 @@ fn named_as(track: &Track) -> Vec<(PathBuf, Song)> {
             Some((path, song))
         })
         .collect();
-    *named = Some((track.title.clone(), std::time::Instant::now(), found.clone()));
+    *named = Some((track.title.clone(), std::time::Instant::now(), whole, found.clone()));
     found
 }
 

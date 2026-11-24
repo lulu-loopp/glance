@@ -95,6 +95,25 @@ enum Held {
     Unreached(Instant),
 }
 
+/// Tracks not found on this PC while its drives were not all listed (see `crate::search::whole`): looked for there
+/// again once they are (see `look_again`).
+static UNLISTED: Mutex<Option<std::collections::HashSet<Track>>> = Mutex::new(None);
+
+/// `track` looked for on this PC and not found, its drives all listed then (`whole`) or not.
+fn not_on_this_pc(track: &Track, whole: bool) {
+    if !whole {
+        UNLISTED.lock().unwrap().get_or_insert_with(Default::default).insert(track.clone());
+    }
+}
+
+/// Whether `track`, not found on this PC while its drives were not all listed, is to be looked for there again: they
+/// are now (`whole`, asked only for such a track). Once.
+fn look_again(track: &Track, whole: impl FnOnce() -> bool) -> bool {
+    let mut unlisted = UNLISTED.lock().unwrap();
+    let Some(tracks) = unlisted.as_mut().filter(|tracks| tracks.contains(track)) else { return false };
+    whole() && tracks.remove(track)
+}
+
 /// How long lyrics a source could not be reached for are taken to be none before they are asked for again.
 const UNREACHED_FOR: Duration = Duration::from_secs(60);
 
@@ -116,6 +135,15 @@ fn held(has: Option<Has>) -> Held {
 /// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time, and again a while after
 /// a source could not be reached.
 pub fn of(track: &Track) -> Known {
+    // Not found on this PC as Glance started, its drives not yet listed: its file looked for again once they are.
+    if look_again(track, crate::search::whole) {
+        let track = track.clone();
+        std::thread::spawn(move || {
+            if let Some(lines) = crate::library::lyrics(&track) {
+                KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
+            }
+        });
+    }
     let mut known = KNOWN.lock().unwrap();
     let known = known.get_or_insert_with(HashMap::new);
     match known.get(track) {
@@ -132,10 +160,12 @@ pub fn of(track: &Track) -> Known {
     let track = track.clone();
     std::thread::spawn(move || {
         // A file of it on this PC with lyrics: those (as they are now; not kept, as the file can change).
+        let whole = crate::search::whole();
         if let Some(lines) = crate::library::lyrics(&track) {
             KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
             return;
         }
+        not_on_this_pc(&track, whole);
         let held = match kept::read(&track) {
             Some(kept) if kept.fresh() => held(kept.found),
             kept => {
@@ -1177,6 +1207,21 @@ pub mod kept {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A track not found on this PC while its drives were still being listed (Glance just started: search lists them
+    /// after the machine settles) is looked for there again once they are all listed, once; one not found once they
+    /// were, not again. (It was taken as on none of them for as long as Glance ran.)
+    #[test]
+    fn a_track_not_found_while_the_drives_were_listed_is_looked_for_again() {
+        let track = |title: &str| Track { netease: None, title: title.into(), artist: String::new(), album: String::new(), seconds: 30, qq_music: false };
+        let (early, late) = (track("looked for early"), track("looked for late"));
+        not_on_this_pc(&early, false);
+        assert!(!look_again(&early, || false));
+        assert!(look_again(&early, || true));
+        assert!(!look_again(&early, || true));
+        not_on_this_pc(&late, true);
+        assert!(!look_again(&late, || true));
+    }
 
     #[test]
     fn reads_lrc_with_its_translation() {

@@ -249,6 +249,14 @@ pub struct Found {
 }
 
 static VOLUMES: Mutex<Vec<Arc<Volume>>> = Mutex::new(Vec::new());
+/// Whether the drives there are have been found (as `drives` first looked).
+static DRIVES_FOUND: AtomicBool = AtomicBool::new(false);
+
+/// Whether every drive there is has its names listed whole (or read as kept whole): a file not found by its name then
+/// is on none of them. Not before the drives are first found.
+pub fn whole() -> bool {
+    DRIVES_FOUND.load(Ordering::Relaxed) && VOLUMES.lock().unwrap().iter().all(|volume| volume.ready.load(Ordering::Relaxed))
+}
 
 /// Starts finding the names on every drive, and keeping them current, on threads of its own, once the machine has
 /// settled (once, and again it does nothing).
@@ -311,6 +319,7 @@ fn drives() {
             come.push(Arc::new(Volume::new(Arc::new(drive), index)));
         }
         *VOLUMES.lock().unwrap() = staying.into_iter().chain(come.iter().cloned()).collect();
+        DRIVES_FOUND.store(true, Ordering::Relaxed);
         for volume in come {
             let _ = std::thread::Builder::new().name(format!("glance: search {}", &volume.drive.path[..1])).spawn(move || follow(&volume));
         }
