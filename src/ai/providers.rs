@@ -116,7 +116,8 @@ fn limit(tool: Tool, plan: Option<String>, windows: Vec<Window>, balance: Option
 fn deepseek(keys: &[String], now: u64) -> Result<Limit, Failed> {
     let (status, body) = ask("https://api.deepseek.com/user/balance", &[("Authorization", &bearer(&keys[0]))], None)?;
     passed(status, false)?;
-    Ok(limit(Tool::DeepSeek, None, Vec::new(), Some(deepseek_balance(&body)?), now))
+    let balance = deepseek_balance(&body).map_err(|_| unread(Tool::DeepSeek, "/user/balance", &body))?;
+    Ok(limit(Tool::DeepSeek, None, Vec::new(), Some(balance), now))
 }
 
 /// The balance of the answer `body`: of its currencies, the one with the most left (the dollar first among equals),
@@ -143,7 +144,10 @@ fn moonshot(keys: &[String], now: u64) -> Result<Limit, Failed> {
     for (host, currency) in [("https://api.moonshot.cn", "CNY"), ("https://api.moonshot.ai", "USD")] {
         let (status, body) = ask(&format!("{host}/v1/users/me/balance"), &[("Authorization", &auth)], None)?;
         match passed(status, true) {
-            Ok(()) => return Ok(limit(Tool::Moonshot, None, Vec::new(), Some(moonshot_balance(&body, currency)?), now)),
+            Ok(()) => {
+                let balance = moonshot_balance(&body, currency).map_err(|_| unread(Tool::Moonshot, "/v1/users/me/balance", &body))?;
+                return Ok(limit(Tool::Moonshot, None, Vec::new(), Some(balance), now));
+            }
             // (A key of the other platform's.)
             Err(Failed::Key) => failed = Failed::Key,
             Err(other) => return Err(other),
@@ -216,7 +220,7 @@ pub fn codex(token: &str, account: Option<&str>, now: u64) -> Result<Limit, Fail
     headers.extend(account.map(|account| ("chatgpt-account-id", account)));
     let (status, body) = ask("https://chatgpt.com/backend-api/wham/usage", &headers, None)?;
     passed(status, true)?;
-    codex_limit(&body, now).ok_or(Failed::Unavailable)
+    codex_limit(&body, now).ok_or_else(|| unread(Tool::Codex, "/wham/usage", &body))
 }
 
 /// The account's own limit the answer `body` tells, as it stood at `now`: its plan, and its windows (each how long it
@@ -242,7 +246,7 @@ fn kimi(keys: &[String], now: u64) -> Result<Limit, Failed> {
     passed(status, true)?;
     let windows = kimi_windows(&body);
     if windows.is_empty() {
-        return Err(Failed::Unavailable);
+        return Err(unread(Tool::Kimi, "/coding/v1/usages", &body));
     }
     Ok(limit(Tool::Kimi, None, windows, None, now))
 }
@@ -294,39 +298,130 @@ fn kimi_windows(body: &Value) -> Vec<Window> {
 static GLM_AT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const GLM: [(&str, &str); 2] = [("https://open.bigmodel.cn", "CNY"), ("https://api.z.ai", "USD")];
+/// What is asked of each: its plan's windows, its subscriptions, the account's balance.
+const GLM_QUOTA: &str = "/api/monitor/usage/quota/limit";
+const GLM_SUBSCRIPTIONS: &str = "/api/biz/subscription/list";
+const GLM_BALANCE: &str = "/api/biz/account/query-customer-account-report";
 
 fn glm(keys: &[String], now: u64) -> Result<Limit, Failed> {
     use std::sync::atomic::Ordering;
     let auth = bearer(&keys[0]);
-    let first = GLM_AT.load(Ordering::Relaxed);
-    let mut failed = Failed::Unavailable;
-    for at in [first, 1 - first] {
-        let (base, currency) = GLM[at];
-        let asked = |path: &str| ask(&format!("{base}{path}"), &[("Authorization", &auth)], None).and_then(|(status, body)| {
+    let asked = |at: usize, path: &str| {
+        ask(&format!("{}{path}", GLM[at].0), &[("Authorization", &auth)], None).and_then(|(status, body)| {
             passed(status, true)?;
             // (Its gateway answers a key refused with a code of its own.)
             match body["code"].as_i64() {
                 Some(401 | 403) => Err(Failed::Key),
                 _ => Ok(body),
             }
-        });
-        match asked("/api/monitor/usage/quota/limit") {
-            Ok(quota) => {
-                GLM_AT.store(at, Ordering::Relaxed);
-                let windows = glm_windows(&quota);
-                if windows.is_empty() {
-                    return Err(Failed::Unavailable);
-                }
-                let plan = asked("/api/biz/subscription/list").ok().and_then(|body| glm_plan(&body));
-                let amount = asked("/api/biz/account/query-customer-account-report").ok().and_then(|body| number(&body["data"]["availableBalance"]));
-                let balance = amount.map(|amount| Balance { currency: currency.into(), amount: Some(amount.max(0.0)), today: None, since: None, spent: None });
-                return Ok(limit(Tool::Glm, plan, windows, balance, now));
+        })
+    };
+    let (read, at) = glm_read(asked, GLM_AT.load(Ordering::Relaxed), now);
+    if let Some(at) = at {
+        GLM_AT.store(at, Ordering::Relaxed);
+    }
+    read
+}
+
+/// GLM's account at `now` as `asked` answers (what platform `at` of `GLM` answers to a path), platform `first` asked
+/// first; and the platform that told it. Its plan's windows, of the first platform holding one for the key (a key of
+/// one's is known to the other), with the account's balance there; else, neither holding one, the balance the first
+/// that knew the key tells, with no plan and no windows (as a plan not held). One holding none, the other not
+/// reached: not reached (its plan may be there).
+fn glm_read(asked: impl Fn(usize, &str) -> Result<Value, Failed>, first: usize, now: u64) -> (Result<Limit, Failed>, Option<usize>) {
+    let mut failed = Failed::Unavailable;
+    let mut unplanned = None;
+    for at in [first, 1 - first] {
+        let quota = match asked(at, GLM_QUOTA) {
+            Ok(quota) => quota,
+            Err(Failed::Key) => {
+                failed = Failed::Key;
+                continue;
             }
-            Err(Failed::Key) => failed = Failed::Key,
-            Err(other) => return Err(other),
+            Err(other) => return (Err(other), None),
+        };
+        let balance = || {
+            let amount = asked(at, GLM_BALANCE).ok().and_then(|body| number(&body["data"]["availableBalance"]))?;
+            Some(Balance { currency: GLM[at].1.into(), amount: Some(amount.max(0.0)), today: None, since: None, spent: None })
+        };
+        let subscriptions = asked(at, GLM_SUBSCRIPTIONS);
+        let windows = glm_windows(&quota);
+        if !windows.is_empty() {
+            let plan = subscriptions.ok().and_then(|body| glm_plan(&body));
+            return (Ok(limit(Tool::Glm, plan, windows, balance(), now)), Some(at));
+        }
+        let subscriptions = match subscriptions {
+            Ok(body) => body,
+            Err(other) => return (Err(other), None),
+        };
+        // No plan here: its windows refused, none of its subscriptions in force.
+        match (quota["success"] == false, glm_held(&subscriptions)) {
+            (true, Some(false)) => {
+                unplanned = unplanned.or_else(|| Some((limit(Tool::Glm, None, Vec::new(), balance(), now), at)));
+            }
+            (_, held) => {
+                if held.is_none() {
+                    unread(Tool::Glm, GLM_SUBSCRIPTIONS, &subscriptions);
+                }
+                return (Err(unread(Tool::Glm, GLM_QUOTA, &quota)), None);
+            }
         }
     }
-    Err(failed)
+    match unplanned {
+        Some((limit, at)) => (Ok(limit), Some(at)),
+        None => (Err(failed), None),
+    }
+}
+
+/// Whether the answer of its subscriptions holds one in force; none where it is no answer of them.
+fn glm_held(body: &Value) -> Option<bool> {
+    Some(body["data"].as_array()?.iter().any(|row| row["status"] == "VALID"))
+}
+
+/// An answer `body` of `tool`'s to what was `asked` that does not tell what it was asked for, noted in the log by
+/// its shape (see `shape`): taken as the provider not reached.
+fn unread(tool: Tool, asked: &str, body: &Value) -> Failed {
+    crate::journal::note(format!("AI {tool:?}: {asked} not read: {}", shape(body)));
+    Failed::Unavailable
+}
+
+/// The shape of an answer `body`, as it is noted where it is not read: its keys, in order, and the kinds of their
+/// values (`str`, `num`), the values only of keys that tell what kind of answer it is (see `CLASSIFYING`) and of
+/// truths and nulls, never what tells of the account; an array's elements each kind once (`|` between), with how
+/// many there were.
+fn shape(body: &Value) -> String {
+    shape_under(body, false)
+}
+
+/// Keys whose values tell what kind of answer it is, not what of the account: written as they are in its shape.
+const CLASSIFYING: [&str; 11] = ["code", "Code", "success", "status", "Status", "status_code", "type", "unit", "level", "Level", "model_name"];
+
+fn shape_under(value: &Value, told: bool) -> String {
+    match value {
+        Value::Null | Value::Bool(_) => value.to_string(),
+        Value::Number(_) | Value::String(_) if told => value.to_string(),
+        Value::Number(_) => "num".into(),
+        Value::String(_) => "str".into(),
+        Value::Array(items) => {
+            let mut kinds: Vec<String> = Vec::new();
+            for item in items {
+                let kind = shape_under(item, false);
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
+            match items.len() {
+                0 | 1 => format!("[{}]", kinds.join("|")),
+                many => format!("[{}]*{many}", kinds.join("|")),
+            }
+        }
+        Value::Object(members) => {
+            let mut keys: Vec<&String> = members.keys().collect();
+            keys.sort();
+            let members: Vec<String> = keys.into_iter().map(|key| format!("{key}:{}", shape_under(&members[key], CLASSIFYING.contains(&key.as_str())))).collect();
+            format!("{{{}}}", members.join(","))
+        }
+    }
 }
 
 /// The plan's windows in the answer `body`: each of its token limits, by its length (its unit: 5 minutes, 3 hours,
@@ -401,7 +496,7 @@ fn minimax(keys: &[String], now: u64) -> Result<Limit, Failed> {
             match body["base_resp"]["status_code"].as_i64() {
                 Some(1004) => return Err(Failed::Key),
                 Some(0) | None => {}
-                Some(_) => return Err(Failed::Unavailable),
+                Some(_) => return Err(unread(Tool::MiniMax, path, &body)),
             }
             passed(status, true).map(|()| body)
         };
@@ -426,7 +521,7 @@ fn minimax(keys: &[String], now: u64) -> Result<Limit, Failed> {
         match asked("/account/query_balance") {
             Ok(body) => {
                 MINIMAX_AT.store(at, Ordering::Relaxed);
-                let amount = number(&body["available_amount"]).ok_or(Failed::Unavailable)?;
+                let amount = number(&body["available_amount"]).ok_or_else(|| unread(Tool::MiniMax, "/account/query_balance", &body))?;
                 let day = super::time::local_date(now);
                 let date = format!("{:04}-{:02}-{:02}", day.year, day.month, day.day);
                 let today = asked(&format!("/account/amount?page=1&limit=10&aggregate=true&start_date={date}&end_date={date}")).ok().and_then(|body| number(&body["consume_cash_sum"]));
@@ -479,7 +574,7 @@ fn volcengine(keys: &[String], now: u64) -> Result<Limit, Failed> {
     if windows.is_empty() {
         // (Its key refused, as it tells it in a body of success.)
         let code = body["ResponseMetadata"]["Error"]["Code"].as_str().unwrap_or_default();
-        return Err(if ["AccessKey", "Signature", "Credential", "Unauthorized"].iter().any(|word| code.contains(word)) { Failed::Key } else { Failed::Unavailable });
+        return Err(if ["AccessKey", "Signature", "Credential", "Unauthorized"].iter().any(|word| code.contains(word)) { Failed::Key } else { unread(Tool::Volcengine, "GetCodingPlanUsage", &body) });
     }
     Ok(limit(Tool::Volcengine, plan, windows, None, now))
 }
@@ -611,6 +706,20 @@ mod tests {
         assert!(codex_limit(&json!({ "detail": "Unauthorized" }), now).is_none());
     }
 
+    /// The providers whose keys are set here, asked for their accounts (by hand: it asks them): each one's plan, its
+    /// windows' lengths and its balance's currency, else why it was not read.
+    #[test]
+    #[ignore]
+    fn asks_the_providers_keyed_here() {
+        let now = crate::station::now_ms();
+        for provider in &ALL {
+            let Some(keys) = provider.keys() else { continue };
+            let read = provider.read(&keys, now);
+            let told = read.as_ref().map(|limit| (&limit.plan, limit.windows.iter().map(|window| window.minutes).collect::<Vec<_>>(), limit.balance.as_ref().map(|balance| &balance.currency)));
+            println!("{:?}: {told:?}", provider.tool);
+        }
+    }
+
     /// Volcengine's request signed as token-monitor's test of it has it (its access key `ak`, its secret `sk`).
     #[test]
     fn signs_volcengines_request_as_volcengine_does() {
@@ -681,6 +790,74 @@ mod tests {
         assert_eq!(glm_windows(&body), [Window { minutes: 300, used: 75.0, resets: Some(1_780_297_200_000) }, Window { minutes: 10080, used: 12.0, resets: None }]);
         let plans = json!({"data": [{"productName": "GLM Coding Lite", "status": "EXPIRED", "inCurrentPeriod": false}, {"productName": "GLM Coding Pro", "status": "VALID", "inCurrentPeriod": true}]});
         assert_eq!(glm_plan(&plans).as_deref(), Some("GLM Coding Pro"));
+    }
+
+    /// GLM's account asked of both its platforms (a key of bigmodel.cn's is known to Z.ai's, and the other way about):
+    /// its plan's, of the first holding one, one's "no Coding Plan" not taken as GLM not reached (#39); neither holding
+    /// one, the balance the first that knew the key tells, with no plan and no windows; an answer of neither kind not
+    /// read; the other platform not reached after one held none, not reached (its plan may be there).
+    #[test]
+    fn asks_glms_other_platform_where_one_holds_no_plan() {
+        // Each platform's answers, of its quota, its subscriptions and its balance.
+        type Answers = [Result<Value, Failed>; 3];
+        let no_plan = || Ok(json!({"code": 500, "msg": "当前用户不存在coding plan", "success": false}));
+        let none = || Ok(json!({"code": 200, "data": [], "success": true}));
+        let balance = |amount: f64| Ok(json!({"code": 200, "data": {"availableBalance": amount}, "success": true}));
+        let quota = || Ok(json!({"code": 200, "success": true, "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 40}]}}));
+        let pro = || Ok(json!({"code": 200, "success": true, "data": [{"productName": "GLM Coding Pro", "status": "VALID", "inCurrentPeriod": true}]}));
+        let unasked = || [Err(Failed::Limited), Err(Failed::Limited), Err(Failed::Limited)];
+        let read = |cn: Answers, abroad: Answers, first: usize| {
+            let asked = |at: usize, path: &str| {
+                let of = [GLM_QUOTA, GLM_SUBSCRIPTIONS, GLM_BALANCE].iter().position(|asked| *asked == path).expect("one of GLM's");
+                [&cn, &abroad][at][of].clone()
+            };
+            glm_read(asked, first, 7)
+        };
+        let told = |read: &(Result<Limit, Failed>, Option<usize>)| {
+            let limit = read.0.as_ref().expect("read");
+            (limit.plan.clone(), limit.windows.len(), limit.balance.as_ref().map(|balance| (balance.currency.clone(), balance.amount)), read.1)
+        };
+        // Its plan on Z.ai's, bigmodel.cn's holding none.
+        let read_of = read([no_plan(), none(), balance(3.0)], [quota(), pro(), balance(2.0)], 0);
+        assert_eq!(told(&read_of), (Some("GLM Coding Pro".into()), 1, Some(("USD".into(), Some(2.0))), Some(1)));
+        // On the first asked: the other not asked.
+        let read_of = read([quota(), pro(), balance(3.0)], unasked(), 0);
+        assert_eq!(told(&read_of), (Some("GLM Coding Pro".into()), 1, Some(("CNY".into(), Some(3.0))), Some(0)));
+        // Neither holding one: the first's balance, no plan.
+        let read_of = read([no_plan(), none(), balance(3.0)], [no_plan(), none(), balance(2.0)], 0);
+        assert_eq!(told(&read_of), (None, 0, Some(("CNY".into(), Some(3.0))), Some(0)));
+        let read_of = read([no_plan(), none(), balance(3.0)], [no_plan(), none(), balance(2.0)], 1);
+        assert_eq!(told(&read_of), (None, 0, Some(("USD".into(), Some(2.0))), Some(1)));
+        // The other refusing the key: the first's.
+        let read_of = read([no_plan(), none(), balance(3.0)], [Err(Failed::Key), Err(Failed::Key), Err(Failed::Key)], 0);
+        assert_eq!(told(&read_of), (None, 0, Some(("CNY".into(), Some(3.0))), Some(0)));
+        // Its balance not told: no plan still.
+        let read_of = read([no_plan(), none(), Err(Failed::Unavailable)], [no_plan(), none(), Err(Failed::Unavailable)], 0);
+        assert_eq!(told(&read_of), (None, 0, None, Some(0)));
+        // The other not reached: not reached.
+        assert_eq!(read([no_plan(), none(), balance(3.0)], [Err(Failed::Unavailable), Err(Failed::Unavailable), Err(Failed::Unavailable)], 0), (Err(Failed::Unavailable), None));
+        // Both refusing the key: refused.
+        let refused = || [Err(Failed::Key), Err(Failed::Key), Err(Failed::Key)];
+        assert_eq!(read(refused(), refused(), 0), (Err(Failed::Key), None));
+        // Its quota told in a form not read, or refused with a subscription in force: not read.
+        let other = || Ok(json!({"code": 200, "success": true, "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 9, "number": 1, "percentage": 40}]}}));
+        assert_eq!(read([other(), pro(), balance(3.0)], unasked(), 0), (Err(Failed::Unavailable), None));
+        assert_eq!(read([no_plan(), pro(), balance(3.0)], unasked(), 0), (Err(Failed::Unavailable), None));
+    }
+
+    /// An answer not read is noted by its shape: its keys (in order) and the kinds of their values, the values only of
+    /// what tells what kind of answer it is (its code, a limit's type and unit …), never of what tells of the account;
+    /// an array's elements each kind once, with how many there were.
+    #[test]
+    fn notes_an_answer_not_read_by_its_shape() {
+        let body = json!({"success": false, "code": 500, "msg": "当前用户不存在coding plan", "data": {"limits": [
+            {"type": "TIME_LIMIT", "unit": 7, "usage": 100, "email": "someone@example.com"},
+            {"type": "TIME_LIMIT", "unit": 7, "usage": 3, "email": "other@example.com"},
+            {"type": "TOKENS_LIMIT", "unit": 7, "usage": 3, "email": null}], "plan": [], "user": "someone"}});
+        assert_eq!(
+            shape(&body),
+            r#"{code:500,data:{limits:[{email:str,type:"TIME_LIMIT",unit:7,usage:num}|{email:null,type:"TOKENS_LIMIT",unit:7,usage:num}]*3,plan:[],user:str},msg:str,success:false}"#
+        );
     }
 
     /// MiniMax's windows: its general models' interval and week, from how much is left, the interval's length from

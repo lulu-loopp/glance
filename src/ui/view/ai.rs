@@ -113,6 +113,11 @@ impl Source {
         }
     }
 
+    /// Whether it is read for a plan's windows (an account holding none told by none: see `account_state`).
+    fn of_a_plan(self) -> bool {
+        matches!(self, Source::Glm | Source::Volcengine | Source::Kimi)
+    }
+
     /// Whether it is a provider whose account is read by the user's key.
     pub fn keyed(self) -> bool {
         !matches!(self, Source::Claude | Source::Codex | Source::Qwen)
@@ -610,17 +615,20 @@ fn failed_words(failed: crate::ai::Failed, keyed: bool, lang: Lang) -> &'static 
 
 /// Why provider `tool`'s account (its last reading `limit`) is not shown as it stands: its key not set (said only
 /// where its records on this PC tell nothing it spent today: `spent`), refused, the provider not reached, or not read
-/// yet.
+/// yet; or, read for a plan (`of_a_plan`), that it holds none (it told no plan's windows).
 #[cfg(windows)]
-fn account_state(tool: crate::ai::Tool, usage: &crate::ai::Usage, limit: Option<&crate::ai::Limit>, spent: bool, lang: Lang) -> Option<Block> {
+fn account_state(tool: crate::ai::Tool, of_a_plan: bool, usage: &crate::ai::Usage, limit: Option<&crate::ai::Limit>, spent: bool, lang: Lang) -> Option<Block> {
     let fact = |what: &str, value: &str, hot: bool| Block::Facts { rows: vec![(what.into(), value.into(), hot)], gap: GAP };
     if usage.unkeyed.contains(&tool) {
         return (!spent).then(|| fact(lang.pick("API 密钥", "API key"), lang.pick("未设置", "Not set"), false));
     }
     match usage.failed.iter().find(|(of, _)| *of == tool) {
         Some((_, failed)) => Some(fact(lang.pick("状态", "State"), failed_words(*failed, true, lang), true)),
-        None if limit.is_none() => Some(fact(lang.pick("状态", "State"), lang.pick("正在读取", "Reading"), false)),
-        None => None,
+        None => match limit {
+            None => Some(fact(lang.pick("状态", "State"), lang.pick("正在读取", "Reading"), false)),
+            Some(limit) if of_a_plan && limit.plan.is_none() && limit.windows.is_empty() => Some(fact(lang.pick("状态", "State"), lang.pick("未订阅", "Not subscribed"), false)),
+            Some(_) => None,
+        },
     }
 }
 
@@ -1024,7 +1032,7 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     // A provider's account: why it is not shown as it stands, where it is not. Codex's account, where asking it
     // failed: why, its limits as its logs here last told them.
     if source.keyed() {
-        blocks.extend(account_state(tool, usage, limit, total.total() > 0, lang));
+        blocks.extend(account_state(tool, source.of_a_plan(), usage, limit, total.total() > 0, lang));
     } else if let Some((_, failed)) = usage.failed.iter().find(|(of, _)| *of == tool) {
         let said = match lang {
             Lang::Zh => format!("{}，额度来自本机记录", failed_words(*failed, false, lang)),
@@ -3044,6 +3052,26 @@ pub(super) mod tests {
             let prefs = Prefs::resolve(&serde_json::json!({ "ai": [{ "id": "ai:kimi", "on": true }] }), &[]).holding(crate::settings::Part::Ai);
             let kimi = dock_of(&prefs, Lang::Zh, Some(&usage), NOON).slots.into_iter().find(|slot| slot.source == Source::Kimi).expect("Kimi docked");
             assert_eq!((kimi.flag, kimi.figure.as_str(), kimi.label.as_str()), (Some(Flag::Problem), "—", ""));
+        }
+
+        /// A provider read for its plan, whose account holds none (GLM's key on neither of its platforms with a Coding
+        /// Plan): its card says so, the account's balance under it. (It said nothing, its balance alone under "Coding
+        /// Plan", as if its plan were read.) One holding a plan says nothing of it.
+        #[test]
+        fn a_plan_not_held_is_said_so() {
+            use crate::ai::{Balance, Limit, Tool};
+            let facts = |blocks: &[Block]| -> Vec<(String, String, bool)> {
+                blocks.iter().filter_map(|block| if let Block::Facts { rows, .. } = block { Some(rows.clone()) } else { None }).flatten().collect()
+            };
+            let mut usage = day();
+            let balance = Balance { currency: "CNY".into(), amount: Some(0.0), today: None, since: None, spent: None };
+            usage.limits.push(Limit { tool: Tool::Glm, id: String::new(), name: None, plan: None, windows: Vec::new(), balance: Some(balance), told: NOON - 60_000 });
+            let rows = facts(&lane("ai:glm", Some(&usage)));
+            assert!(rows.contains(&("状态".into(), "未订阅".into(), false)), "{rows:?}");
+            let blocks = lane("ai:glm", Some(&usage));
+            assert!(blocks.iter().any(|block| matches!(block, Block::Ai(AiBlock::Pairs(pairs)) if pairs.iter().any(|pair| pair.0 == "余额"))));
+            let rows = facts(&lane("ai:glm", Some(&accounts())));
+            assert!(!rows.iter().any(|row| row.1 == "未订阅"), "{rows:?}");
         }
 
         /// A provider's lane: its plan (else what of the provider it reads) and when it was read; its balance and what
