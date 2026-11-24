@@ -126,8 +126,10 @@ pub struct Overlay {
     /// What it shows, the frame rate's recent course, and how: drawn again
     /// as it is dragged.
     drawn: (Vec<overlay::Reading>, Vec<Option<f32>>, Shape),
-    /// How its glass is tinted, as the screen around it last asked.
+    /// How its glass is tinted, as the screen around it last asked, and the colours its words are written in on it
+    /// (see `overlay::words_kept`: none, to be chosen anew as it is next drawn).
     glass: Option<Glass>,
+    words: Option<overlay::Words>,
     /// The panel's theme, which holds its glass to a tone or has it follow what is behind it (see `overlay::held_to`).
     theme: crate::ui::prefs::ThemePref,
     /// The tint its last look at the screen needed, and when it looked (see `look`).
@@ -296,6 +298,7 @@ impl Overlay {
             size: 1.0,
             drawn: (Vec::new(), Vec::new(), Shape { layout: Layout::Card, rows: 1, width: f32::INFINITY }),
             glass: None,
+            words: None,
             theme: crate::ui::prefs::ThemePref::default(),
             needed: None,
             looked: Instant::now(),
@@ -317,6 +320,10 @@ impl Overlay {
         self.locked = settings.locked;
         self.theme = theme;
         let clear = settings.clear.clamp(0.0, 1.0);
+        if clear != self.clear {
+            // (Its words' colours chosen anew for as much glass as there is now.)
+            self.words = None;
+        }
         if self.shown && clear != self.clear {
             self.said = Some(clear);
             unsafe { SetTimer(Some(self.window.hwnd), SAID_TIMER, SAID_MS, None) };
@@ -450,6 +457,12 @@ impl Overlay {
         let mut behind = seen.map(|capture| capture.luminances(area, r, self.dpi.round().max(1.0) as i32)).unwrap_or_default();
         let (glass, needed) = overlay::glass(&mut behind, self.glass.zip(self.needed), overlay::held_to(self.theme));
         (self.glass, self.needed, self.looked) = (Some(glass), Some(needed), Instant::now());
+        self.words = Some(overlay::words_kept(self.drawn_glass(), self.words));
+    }
+
+    /// Its glass as it is drawn: as clear as it is made.
+    fn drawn_glass(&self) -> Glass {
+        Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None, overlay::held_to(self.theme)).0) }
     }
 
     /// Places its windows: the one that takes the pointer where the glass is, above all but the open panel; its stage
@@ -500,7 +513,8 @@ impl Overlay {
         // but for the open panel.
         self.place();
         let scale = self.scale();
-        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None, overlay::held_to(self.theme)).0) };
+        let glass = self.drawn_glass();
+        let words = self.words.get_or_insert_with(|| overlay::words_kept(glass, None)).tone;
         let (width, height, radius) = self.measures();
         self.shape(width, height, radius);
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
@@ -519,7 +533,7 @@ impl Overlay {
             frame.origin(at_x as f32 / scale, at_y as f32 / scale);
             frame.crisp_text();
             overlay::shadow(frame, readings, shape, glass, dragged, scale);
-            overlay::paint(frame, readings, frames, shape, glass, hand, scale);
+            overlay::paint(frame, readings, frames, shape, glass, words, hand, scale);
             if let Some((name, figure)) = &said {
                 overlay::say(frame, (name, figure, "%"), (width as f32 / scale, height as f32 / scale), Glass { presence: 1.0, ..glass });
             }
@@ -631,11 +645,15 @@ impl Overlay {
     pub fn watch(&mut self) {
         let now = Instant::now();
         // What is behind looked at often, between the readings: tinted again soon after it changes (a game come up),
-        // drawn again only where the tint changed.
+        // drawn again only where the tint or its words' colours changed.
         if self.shown && self.grab.is_none() && now.duration_since(self.looked) >= LOOK_EVERY {
-            let was = self.glass;
+            let was = (self.glass, self.words.map(|words| words.tone));
             self.look();
-            if self.glass != was {
+            let alike = match (was.0, self.glass) {
+                (Some(before), Some(now)) => before.drawn_alike(&now),
+                (before, now) => before.is_none() && now.is_none(),
+            };
+            if !alike || was.1 != self.words.map(|words| words.tone) {
                 self.draw();
             }
         }

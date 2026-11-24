@@ -186,6 +186,14 @@ pub struct Glass {
     pub behind: [f32; 9],
 }
 
+impl Glass {
+    /// Whether `other` is drawn as this is: the same tint, as opaque, as much of it (what was seen behind them aside,
+    /// which only chooses their words' colours: see `words_kept`).
+    pub fn drawn_alike(&self, other: &Glass) -> bool {
+        (self.tone, self.opacity, self.presence) == (other.tone, other.opacity, other.presence)
+    }
+}
+
 /// The colours of a tone.
 struct Palette {
     /// The tint.
@@ -835,15 +843,16 @@ pub enum Hand {
 
 /// Draws the glass for `readings` from the canvas's corner: its tint (over
 /// the screen behind, blurred, which the window draws), rim, and the
-/// readings on it, their words and marks in the colours that keep them legible as the glass is drawn (see `words`),
+/// readings on it, their words and marks in `words`' colours (see `words_kept`),
 /// at `px` physical pixels a DIP; dragged, in the colour
 /// that says it is being moved. Its shadow is drawn apart (see `shadow`).
-pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, hand: Hand, px: f32) {
+#[allow(clippy::too_many_arguments)]
+pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, words: Tone, hand: Hand, px: f32) {
     let dragged = hand == Hand::Dragged;
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
     let (glass, tint) = if dragged { (DRAGGED, DRAGGED_TINT) } else { (glass, glass.tone.palette().tint) };
-    let words = if dragged { DRAGGED.tone } else { words(glass) };
+    let words = if dragged { DRAGGED.tone } else { words };
     let (palette, written) = (glass.tone.palette(), words.palette());
     let (width, height) = arranged.size;
     let (x0, y0, radius) = (0.0, 0.0, arranged.radius);
@@ -1029,6 +1038,26 @@ pub fn words(glass: Glass) -> Tone {
     }
 }
 
+/// The colours `glass`'s words are written in, looked at again (see `words`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Words {
+    pub tone: Tone,
+    /// Whether the other tone's would have been chosen at this look.
+    pub doubted: bool,
+}
+
+/// The colours `glass`'s words are written in after `before`: as `words` chooses them the first time; then the same,
+/// unless the other's are chosen two looks in a row, as the glass's tint clears (what is behind changed, not something
+/// moving about the middle of it, which turned them light and dark look by look), or at once where they are legible
+/// over none of what is behind (a white page come up under light words).
+pub fn words_kept(glass: Glass, before: Option<Words>) -> Words {
+    let best = words(glass);
+    match before {
+        Some(before) if before.tone != best && !before.doubted && legible_over(before.tone, glass) > 0 => Words { tone: before.tone, doubted: true },
+        _ => Words { tone: best, doubted: false },
+    }
+}
+
 /// The glow about `glass`'s words and marks, written in `words`' colours: of the other tone's ink, as opaque as the
 /// glass is not there (see `HALO`), what the glass did of keeping them apart from what is behind done by it.
 fn halo(glass: Glass, words: Tone) -> Option<Color> {
@@ -1190,6 +1219,56 @@ mod tests {
         }
     }
 
+    /// Glass looked at again over another scene is drawn alike where its tint, opacity and presence are the same (it
+    /// was drawn again at every look a game's scene changed, nothing on it changed: a review), and not where one is not.
+    #[test]
+    fn glass_over_another_scene_is_drawn_alike() {
+        let (a, b) = (glass(&mut vec![0.02; 100], None, Some(Tone::Dark)).0, glass(&mut vec![0.03; 100], None, Some(Tone::Dark)).0);
+        assert_ne!(a, b);
+        assert!(a.drawn_alike(&b));
+        assert!(!a.drawn_alike(&Glass { opacity: a.opacity + 0.1, ..a }));
+        assert!(!a.drawn_alike(&Glass { presence: 0.5, ..a }));
+        assert!(!a.drawn_alike(&Glass { tone: Tone::Light, ..a }));
+    }
+
+    /// Its words keep their colours while what is behind it moves about the middle, the colours of either keeping them
+    /// legible over about as much of it (a review: a clear overlay over a game half dark and half bright turned its
+    /// words light and dark look by look), and change once what is behind has changed for good (a white page come up).
+    #[test]
+    fn its_words_do_not_flip_as_what_is_behind_moves_about_the_middle() {
+        let scene = |dark: usize| {
+            let mut behind = vec![0.95; 100];
+            behind[..dark].fill(0.02);
+            behind
+        };
+        for chosen in [Some(Tone::Dark), Some(Tone::Light), None] {
+            let (mut before, mut kept, mut written, mut plain) = (None, None, Vec::new(), Vec::new());
+            for look in 0..40 {
+                let dark = [40, 60][look % 2];
+                let looked = glass(&mut scene(dark), before, chosen);
+                before = Some(looked);
+                let clear = Glass { presence: 0.0, ..looked.0 };
+                plain.push(words(clear));
+                let now = words_kept(clear, kept);
+                kept = Some(now);
+                written.push(now.tone);
+            }
+            let turns = |tones: &[Tone]| tones.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            assert!(turns(&plain) > 1, "{chosen:?}: the scenes do not move it about the middle");
+            assert_eq!(turns(&written), 0, "{chosen:?}: {written:?}");
+            // A white page come up under light words: dark words, at once. A terminal under dark words: light ones.
+            let light = Words { tone: Tone::Dark, doubted: false };
+            let page = Glass { presence: 0.0, ..glass(&mut vec![1.0; 100], before, chosen).0 };
+            assert_eq!(words_kept(page, Some(light)).tone, Tone::Light, "{chosen:?}");
+            let terminal = Glass { presence: 0.0, ..glass(&mut vec![0.01; 100], before, chosen).0 };
+            assert_eq!(words_kept(terminal, Some(Words { tone: Tone::Light, doubted: false })).tone, Tone::Dark, "{chosen:?}");
+            // A screen mostly bright come up under light words, legible over its dark part: dark words at the second look.
+            let bright = Glass { presence: 0.0, ..glass(&mut scene(20), before, chosen).0 };
+            let first = words_kept(bright, Some(light));
+            assert_eq!((first.tone, words_kept(bright, Some(first)).tone), (Tone::Dark, Tone::Light), "{chosen:?}");
+        }
+    }
+
     /// What is written behind the glass is taken out of its words' way: the glass over a terminal's white words on
     /// black, or a page's black words on white, is tinted till those strokes keep no more than a faint contrast through
     /// it; over an even screen, as little as its words need, as before.
@@ -1328,7 +1407,7 @@ mod tests {
         for scale in [1.0f32, 1.25, 1.5, 1.75] {
             let drawn = |offset: i32| -> Vec<u8> {
                 gfx.draw_in_atlas((w, h), (offset, offset), scale, |frame| {
-                    paint(frame, &readings, &[], shape, glass, Hand::Free, scale);
+                    paint(frame, &readings, &[], shape, glass, words(glass), Hand::Free, scale);
                     for (place, button) in crate::ui::buttons::ALL.iter().enumerate() {
                         crate::ui::buttons::paint(frame, Point { x: 14.0 + place as f32 * 31.0, y: 47.0 }, *button, place == 1, false, true, Color::hex(0xFFFFFF, 0.3), 1.0);
                     }

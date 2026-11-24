@@ -8128,7 +8128,7 @@ It can be disconnected here at any time, and the status line command put back.",
         frame.place(placed);
         frame.crisp_text();
         super::overlay::shadow(frame, &readings, shape, glass, false, px);
-        super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::Hand::Free, px);
+        super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::words(glass), super::overlay::Hand::Free, px);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
