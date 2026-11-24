@@ -373,9 +373,11 @@ fn glm_read(asked: impl Fn(usize, &str) -> Result<Value, Failed>, first: usize, 
     }
 }
 
-/// Whether the answer of its subscriptions holds one in force; none where it is no answer of them.
+/// Whether the answer of its subscriptions holds one in force; none where it is no answer of them: not said to have
+/// succeeded, or a subscription in it without its status.
 fn glm_held(body: &Value) -> Option<bool> {
-    Some(body["data"].as_array()?.iter().any(|row| row["status"] == "VALID"))
+    let rows = body["data"].as_array().filter(|_| body["success"] == true)?;
+    rows.iter().all(|row| row["status"].is_string()).then(|| rows.iter().any(|row| row["status"] == "VALID"))
 }
 
 /// An answer `body` of `tool`'s to what was `asked` that does not tell what it was asked for, noted in the log by
@@ -843,6 +845,13 @@ mod tests {
         let other = || Ok(json!({"code": 200, "success": true, "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 9, "number": 1, "percentage": 40}]}}));
         assert_eq!(read([other(), pro(), balance(3.0)], unasked(), 0), (Err(Failed::Unavailable), None));
         assert_eq!(read([no_plan(), pro(), balance(3.0)], unasked(), 0), (Err(Failed::Unavailable), None));
+        // Its subscriptions not told (a failed answer with no rows, rows with no status): not read, not "no plan" (a
+        // review: a plan held there would have been said not to be).
+        let failed = || Ok(json!({"code": 500, "success": false, "data": []}));
+        let statusless = || Ok(json!({"code": 200, "success": true, "data": [{"productName": "GLM Coding Pro"}]}));
+        for subscriptions in [failed(), statusless(), Ok(json!({"code": 200, "data": []}))] {
+            assert_eq!(read([no_plan(), subscriptions, balance(3.0)], [no_plan(), none(), balance(2.0)], 0), (Err(Failed::Unavailable), None));
+        }
     }
 
     /// An answer not read is noted by its shape: its keys (in order) and the kinds of their values, the values only of
