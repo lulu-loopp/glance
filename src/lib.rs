@@ -97,6 +97,7 @@ mod playing;
 mod lyrics;
 #[cfg(windows)]
 mod library;
+mod simplified;
 #[cfg(windows)]
 mod sound;
 #[cfg(windows)]

@@ -90,7 +90,8 @@ const KEPT_MOST: usize = 200;
 #[derive(Clone)]
 enum Held {
     Asking,
-    Found(Option<Lyrics>),
+    /// Found, and the same in simplified characters once they were wanted so (see `known_as`).
+    Found(Option<Lyrics>, Option<Lyrics>),
     Instrumental,
     Unreached(Instant),
 }
@@ -120,7 +121,7 @@ const UNREACHED_FOR: Duration = Duration::from_secs(60);
 /// Lyrics found, as they are held: none, where they have no line (a file kept on this PC may say so; shown as
 /// lyrics, they were turned through from nothing, and Glance stopped).
 fn found(lines: Option<Vec<Line>>) -> Held {
-    Held::Found(lines.filter(|lines| !lines.is_empty()).map(Arc::new))
+    Held::Found(lines.filter(|lines| !lines.is_empty()).map(Arc::new), None)
 }
 
 /// What a source has, as it is held (see `found`).
@@ -132,9 +133,10 @@ fn held(has: Option<Has>) -> Held {
     }
 }
 
-/// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time, and again a while after
-/// a source could not be reached.
-pub fn of(track: &Track) -> Known {
+/// What is known of `track`'s lyrics, in simplified characters where they are wanted so (`simplified`, see
+/// `known_as`); asked for (on a thread of its own) the first time, and again a while after a source could not be
+/// reached.
+pub fn of(track: &Track, simplified: bool) -> Known {
     // Not found on this PC as Glance started, its drives not yet listed: its file looked for again once they are.
     if look_again(track, crate::search::whole) {
         let track = track.clone();
@@ -146,12 +148,10 @@ pub fn of(track: &Track) -> Known {
     }
     let mut known = KNOWN.lock().unwrap();
     let known = known.get_or_insert_with(HashMap::new);
-    match known.get(track) {
-        Some(Held::Asking) => return Known::Asking,
-        Some(Held::Found(found)) => return Known::Found(found.clone()),
-        Some(Held::Instrumental) => return Known::Instrumental,
-        Some(Held::Unreached(since)) if since.elapsed() < UNREACHED_FOR => return Known::Found(None),
-        _ => {}
+    match known.get_mut(track) {
+        Some(Held::Unreached(since)) if since.elapsed() >= UNREACHED_FOR => {}
+        Some(held) => return known_as(held, simplified),
+        None => {}
     }
     if known.len() >= KEPT_MOST {
         known.retain(|_, held| matches!(held, Held::Asking));
@@ -179,13 +179,72 @@ pub fn of(track: &Track) -> Known {
                     // Not found now, a source unreached: what was found before, where there was.
                     (None, Some(kept)) if !said.sure => held(kept.found),
                     (None, _) if !said.sure => Held::Unreached(Instant::now()),
-                    (None, _) => Held::Found(None),
+                    (None, _) => Held::Found(None, None),
                 }
             }
         };
         KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, held);
     });
     Known::Asking
+}
+
+/// What is known of lyrics as they are `held`, in simplified characters where they are wanted so (`simplified`): the
+/// same copy of them each time, made the first time (the lyrics themselves, where they are in simplified characters
+/// already, see `simplified_lines`).
+fn known_as(held: &mut Held, simplified: bool) -> Known {
+    match held {
+        Held::Asking => Known::Asking,
+        Held::Instrumental => Known::Instrumental,
+        Held::Unreached(_) => Known::Found(None),
+        Held::Found(None, _) => Known::Found(None),
+        Held::Found(Some(lines), _) if !simplified => Known::Found(Some(lines.clone())),
+        Held::Found(Some(lines), shown) => Known::Found(Some(shown.get_or_insert_with(|| simplified_lines(lines).map_or_else(|| lines.clone(), Arc::new)).clone())),
+    }
+}
+
+/// `lines` in simplified characters (see `crate::simplified`), none where they are so already: what is sung, word by
+/// word (each word as many characters as it was), and behind it, unless that is Japanese (has kana, see
+/// `simplified::kana`: its kanji are not traditional Chinese); its translation, unless that is.
+fn simplified_lines(lines: &[Line]) -> Option<Vec<Line>> {
+    use crate::simplified::{kana, simplified};
+    let sung_japanese = lines.iter().any(|line| kana(&line.text) || line.backing.as_deref().is_some_and(kana));
+    let translated_japanese = lines.iter().any(|line| line.translation.as_deref().is_some_and(kana));
+    let written = |text: &str, japanese: bool| if japanese { None } else { simplified(text) };
+    let mut changed = false;
+    let shown = lines
+        .iter()
+        .map(|line| {
+            let mut line = line.clone();
+            if let Some(text) = written(&line.text, sung_japanese) {
+                line.text = text;
+                changed = true;
+            }
+            // (Its words as one, written so, cut again where they were: a phrase across words is written as one.)
+            let whole: String = line.words.iter().map(|word| word.text.as_str()).collect();
+            if let Some(whole) = written(&whole, sung_japanese) {
+                let mut rest = whole.chars();
+                for word in &mut line.words {
+                    let length = word.text.chars().count();
+                    word.text = rest.by_ref().take(length).collect();
+                }
+                changed = true;
+            }
+            if let Some(text) = line.backing.as_mut() {
+                if let Some(written) = written(text, sung_japanese) {
+                    *text = written;
+                    changed = true;
+                }
+            }
+            if let Some(text) = line.translation.as_mut() {
+                if let Some(written) = written(text, translated_japanese) {
+                    *text = written;
+                    changed = true;
+                }
+            }
+            line
+        })
+        .collect();
+    changed.then_some(shown)
 }
 
 /// A source that could not be reached, or would not answer: what it has is not known.
@@ -1285,10 +1344,42 @@ mod tests {
     /// Lyrics with no line are held as none found, wherever they come from.
     #[test]
     fn lyrics_with_no_line_are_none() {
-        assert!(matches!(found(Some(Vec::new())), Held::Found(None)));
-        assert!(matches!(found(None), Held::Found(None)));
+        assert!(matches!(found(Some(Vec::new())), Held::Found(None, _)));
+        assert!(matches!(found(None), Held::Found(None, _)));
         let line = Line { at: 1.0, end: None, text: "kept".into(), words: Vec::new(), backing: None, translation: None };
-        assert!(matches!(found(Some(vec![line])), Held::Found(Some(lines)) if lines.len() == 1));
+        assert!(matches!(found(Some(vec![line])), Held::Found(Some(lines), _) if lines.len() == 1));
+    }
+
+    /// Lyrics in traditional characters shown where simplified ones are wanted (a Chinese Glance) in those: their lines,
+    /// their words (cut where they were), what is sung behind and their translations, the same copy each time; and as
+    /// they are where they are not wanted so. Japanese lyrics (with kana) as they are, their Chinese translation in
+    /// simplified characters. Lyrics in simplified characters already, as they are, the same lyrics.
+    #[test]
+    fn lyrics_in_traditional_characters_are_shown_in_simplified_ones() {
+        let line = |text: &str, words: &[&str], translation: Option<&str>| Line {
+            at: 0.0,
+            end: None,
+            text: text.into(),
+            words: words.iter().map(|word| Word { at: 0.0, end: 1.0, text: (*word).into() }).collect(),
+            backing: Some("受過".into()),
+            translation: translation.map(Into::into),
+        };
+        let texts = |lines: &[Line]| lines.iter().map(|line| (line.text.clone(), line.words.iter().map(|word| word.text.clone()).collect::<Vec<_>>(), line.backing.clone(), line.translation.clone())).collect::<Vec<_>>();
+        let lyrics = |held: &mut Held, simplified: bool| match known_as(held, simplified) {
+            Known::Found(Some(lines)) => lines,
+            _ => panic!("lyrics"),
+        };
+        let mut held = found(Some(vec![line("我會像奧德修斯一樣", &["我會", "像", "奧", "德修斯", "一樣 "], Some("I will be like Odysseus"))]));
+        let shown = lyrics(&mut held, true);
+        let words: Vec<String> = ["我会", "像", "奥", "德修斯", "一样 "].map(String::from).to_vec();
+        assert_eq!(texts(&shown), [("我会像奥德修斯一样".to_string(), words, Some("受过".to_string()), Some("I will be like Odysseus".to_string()))]);
+        assert!(Arc::ptr_eq(&shown, &lyrics(&mut held, true)));
+        assert_eq!(lyrics(&mut held, false)[0].text, "我會像奧德修斯一樣");
+        let mut japanese = found(Some(vec![line("夢を見る會", &[], Some("夢見會"))]));
+        let shown = lyrics(&mut japanese, true);
+        assert_eq!((shown[0].text.as_str(), shown[0].backing.as_deref(), shown[0].translation.as_deref()), ("夢を見る會", Some("受過"), Some("梦见会")));
+        let mut plain = found(Some(vec![Line { backing: None, ..line("又站在你家的门口", &[], None) }]));
+        assert!(Arc::ptr_eq(&lyrics(&mut plain, true), &lyrics(&mut plain, false)));
     }
 
     /// A track found is by the artist asked about: one of its artists, however they are joined.

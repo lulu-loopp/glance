@@ -77,6 +77,14 @@ Unicode Character Database (Unihan, Chinese characters' Mandarin readings, for
   Unihan_Readings.txt (scripts/pinyin.py, scripts/readings.py) are built into
   glance.exe.
 
+OpenCC (Open Chinese Convert), version 1.4.2 (traditional Chinese characters
+  in lyrics written in simplified ones)
+  Copyright Carbo Kuo (BYVoid) and the OpenCC contributors.
+  Licence: Apache License, version 2.0 (OpenCC-Apache-2.0.txt). A table
+  derived from its dictionaries TSPhrases.txt and TSCharacters.txt (changed:
+  each text kept with the first of what it is written as, scripts/simplified.py)
+  is built into glance.exe. Its source: https://github.com/BYVoid/OpenCC
+
 OpenRGB, version 1.0 (not shipped with Glance)
   OpenRGB - open source RGB lighting control. Copyright (C) Adam Honse and
   the OpenRGB contributors. Licence: GNU General Public License, version 2

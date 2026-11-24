@@ -408,7 +408,9 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
     let artist = playing.artist.split(" / ").next().unwrap_or_default().to_string();
     let qq_music = playing.app_id.eq_ignore_ascii_case("QQMusic.exe");
     let track = crate::lyrics::Track { netease, title: playing.title.clone(), artist, album: playing.album.clone(), seconds: length.round() as u32, qq_music };
-    match crate::lyrics::of(&track) {
+    // (In simplified characters, in a Chinese Glance: a source's in traditional ones are written so.)
+    let simplified = crate::update::language() == crate::ui::text::Lang::Zh;
+    match crate::lyrics::of(&track, simplified) {
         crate::lyrics::Known::Asking => (Some(Sung::Asking), None),
         crate::lyrics::Known::Found(None) => (Some(Sung::Unknown), None),
         crate::lyrics::Known::Instrumental => (Some(Sung::Instrumental), None),
