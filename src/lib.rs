@@ -436,6 +436,16 @@ pub fn run() {
     };
     let done = |result: Result<(), elevation::InstallFolder>| std::process::exit(result.map_or_else(code, |_| 0));
     match args.as_slice() {
+        // The running Glance asked for its report (what "复制诊断信息" copies, the sensors' lines in it) into `file`, an
+        // absolute path: written whole there once it is ready, which takes a second or two (see `tray::ask_for_report`).
+        // Exit codes: 0 asked, 1 no Glance running, 2 the path not absolute.
+        [_, flag, file] if flag == "--report" => {
+            let file = std::path::Path::new(file);
+            if !file.is_absolute() {
+                std::process::exit(2);
+            }
+            std::process::exit(if already_running() && tray::ask_for_report(file) { 0 } else { 1 })
+        }
         [_, flag, folder] if flag == "--check-install-folder" => {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }

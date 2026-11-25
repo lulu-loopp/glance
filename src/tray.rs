@@ -28,6 +28,8 @@ use crate::settings::Shortcut;
 /// What another start of Glance gives the running one by `WM_COPYDATA` (its `dwData`): paths to send to devices
 /// nearby (UTF-16, each ended by a nought), from Explorer's Send to.
 const SEND_PATHS: usize = 0x474C_5344;
+/// Another start asking for the report (see `ask_for_report`): the file to write it to (UTF-16).
+const REPORT_TO: usize = 0x474C_5250;
 
 /// The icon's messages to its window, and another start of Glance asking
 /// for the settings.
@@ -144,7 +146,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Paths another start was given to send (see `ask_to_send`): chosen in the settings to send.
         windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA => {
             let data = unsafe { &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT) };
-            if data.dwData != SEND_PATHS || data.lpData.is_null() {
+            if data.lpData.is_null() {
+                return LRESULT(0);
+            }
+            if data.dwData == REPORT_TO {
+                let units = unsafe { std::slice::from_raw_parts(data.lpData as *const u16, data.cbData as usize / 2) };
+                let file = std::path::PathBuf::from(<std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(units));
+                if !file.is_absolute() {
+                    return LRESULT(0);
+                }
+                // (Off this thread: the sensors are asked their lines, and answer within a second or two.)
+                std::thread::spawn(move || write_report(&file));
+                return LRESULT(1);
+            }
+            if data.dwData != SEND_PATHS {
                 return LRESULT(0);
             }
             let units = unsafe { std::slice::from_raw_parts(data.lpData as *const u16, data.cbData as usize / 2) };
@@ -262,6 +277,39 @@ pub fn ask_to_send(paths: &[std::path::PathBuf]) {
             10_000,
             None,
         );
+    }
+}
+
+/// Asks the running Glance for its report (see `diagnostics::report`), written to `file` (absolute) once it is ready;
+/// whether it was asked.
+pub fn ask_for_report(file: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS, None) }) else { return false };
+    let units: Vec<u16> = file.as_os_str().encode_wide().collect();
+    let data = windows::Win32::System::DataExchange::COPYDATASTRUCT { dwData: REPORT_TO, cbData: (units.len() * 2) as u32, lpData: units.as_ptr() as *mut _ };
+    let mut answer = 0usize;
+    let sent = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&data as *const _ as isize),
+            windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG,
+            10_000,
+            Some(&mut answer),
+        )
+    };
+    sent.0 != 0 && answer == 1
+}
+
+/// The report written to `file`, whole: to a file beside it first, then put in its place, so that what waits for it
+/// never reads it half written.
+fn write_report(file: &std::path::Path) {
+    let report = crate::diagnostics::report();
+    let mut writing = file.as_os_str().to_owned();
+    writing.push(".writing");
+    if std::fs::write(&writing, report).is_ok() {
+        let _ = std::fs::rename(&writing, file);
     }
 }
 
