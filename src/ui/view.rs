@@ -3369,7 +3369,7 @@ fn device_via(via: DeviceVia, lang: Lang) -> &'static str {
 /// The wireless devices from (`left`, `top`), `width` across, as `how` draws them (see `Devices`).
 fn paint_devices(frame: &dyn Canvas, scene: &Scene, ink: Ink, devices: &[DeviceSample], how: Devices, (left, top, width): (f32, f32, f32), part: &dyn Fn(&str)) {
     let theme = scene.theme;
-    let percent = |device: &DeviceSample| format!("{}%", device.level);
+    let percent = |device: &DeviceSample| device.level.map_or(UNREAD.to_string(), |level| format!("{level}%"));
     match how {
         Devices::Rings => {
             let (size, ..) = DEVICE_RING;
@@ -3418,10 +3418,11 @@ fn paint_devices(frame: &dyn Canvas, scene: &Scene, ink: Ink, devices: &[DeviceS
 
 /// `device`'s charge as a ring about `centre` (`size`: across, its line, its icon inside it), as an iPhone's battery
 /// widget draws one: its track all round, its charge from the top clockwise as far as it goes, in the lane's ink (the
-/// signal colour as it runs low), and charging, a gap at the top with a bolt in it.
+/// signal colour as it runs low), and charging, a gap at the top with a bolt in it. Its charge not read, the track
+/// alone, its icon dimmed.
 fn device_ring(frame: &dyn Canvas, theme: &Theme, ink: Ink, device: &DeviceSample, centre: Point, (size, line, icon): (f32, f32, f32)) {
     device_charge(frame, theme, ink, device, centre, (size, line));
-    frame.icon(device_icon(device.kind), centre, icon, theme.text);
+    frame.icon(device_icon(device.kind), centre, icon, if device.level.is_some() { theme.text } else { theme.text3 });
 }
 
 /// `device`'s charge as a ring about `centre` (`size`, across and its line), as `device_ring` draws it, without what
@@ -3434,7 +3435,12 @@ pub(crate) fn device_charge(frame: &dyn Canvas, theme: &Theme, ink: Ink, device:
     let bolt = line / 2.5;
     let gap = if device.charging { 4.6 * bolt + 1.8 * line } else { 0.0 };
     let run = round - gap;
-    let lit = (device.level as f32 / 100.0).clamp(0.001, 1.0) * run;
+    let Some(level) = device.level else {
+        // (Not read: the track alone.)
+        frame.arc(centre, radius, 0.0, TAU, theme.track, line);
+        return;
+    };
+    let lit = (level as f32 / 100.0).clamp(0.001, 1.0) * run;
     let from = gap / 2.0 / radius;
     if gap > 0.0 {
         // (Its ends round, drawn as far in again as they reach past them: the gap as wide as it is meant.)
@@ -10829,14 +10835,18 @@ seven".into()));
         use super::super::morph::{Op, Recorder};
         let theme = Theme::new(Skin::Glass, true);
         let ink = theme.ink("devices");
-        let arcs = |level, charging| {
+        let drawn = |device: &DeviceSample| {
             let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
-            device_ring(&recorder, &theme, ink, &device("a", DeviceKind::Headphones, level, charging), Point { x: 50.0, y: 50.0 }, DEVICE_RING);
+            device_ring(&recorder, &theme, ink, device, Point { x: 50.0, y: 50.0 }, DEVICE_RING);
             let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
             let arcs: Vec<(f32, f32, Color)> = ops.iter().filter_map(|op| if let Op::Arc { from, sweep, color, .. } = op { Some((*from, *sweep, *color)) } else { None }).collect();
             let bolt = ops.iter().any(|op| matches!(op, Op::Shape { .. }));
-            let icon = ops.iter().any(|op| matches!(op, Op::Icon { icon: Icon::Headphones, .. }));
+            let icon = ops.iter().find_map(|op| if let Op::Icon { icon: Icon::Headphones, color, .. } = op { Some(*color) } else { None });
             (arcs, bolt, icon)
+        };
+        let arcs = |level, charging| {
+            let (arcs, bolt, icon) = drawn(&device("a", DeviceKind::Headphones, level, charging));
+            (arcs, bolt, icon == Some(theme.text))
         };
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
         // Half charged: the track all round, the charge half of it from the top, in the lane's ink.
@@ -10856,10 +10866,15 @@ seven".into()));
         assert!(charge.0 > 0.0 && track.0 > charge.0);
         assert!(track.0 + track.1 < TAU - charge.0 && charge.0 + charge.1 < TAU);
         assert_eq!(charge.2, ink.trace);
+        // Its charge not read (joined, but not answering yet): the track alone, its icon dimmed.
+        let (unread, bolt, icon) = drawn(&DeviceSample { level: None, ..device("a", DeviceKind::Headphones, 50, false) });
+        assert!(!bolt && unread.len() == 1 && unread[0].2 == theme.track && unread[0].1 >= TAU);
+        assert_eq!(icon, Some(theme.text3));
+        assert!(!DeviceSample { level: None, ..device("a", DeviceKind::Headphones, 50, false) }.low());
     }
 
     pub(crate) fn device(key: &str, kind: DeviceKind, level: u8, charging: bool) -> DeviceSample {
-        DeviceSample { key: key.into(), name: key.into(), kind, via: DeviceVia::Bluetooth, level, charging, container: None }
+        DeviceSample { key: key.into(), name: key.into(), kind, via: DeviceVia::Bluetooth, level: Some(level), charging, container: None }
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.

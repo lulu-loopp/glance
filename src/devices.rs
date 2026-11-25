@@ -60,7 +60,7 @@ fn of(device: wireless::Device) -> DeviceSample {
             Via::Receiver => DeviceVia::Receiver,
             Via::Cable => DeviceVia::Cable,
         },
-        level: device.level.min(100),
+        level: device.level.map(|level| level.min(100)),
         charging: device.charging,
         container: device.container.map(|id| format!("{id:032x}")),
     }
@@ -83,17 +83,33 @@ impl Notices {
     /// Takes in the devices of a sample: those come down to a charge they are told at, told of, where `on` (the
     /// switch of the devices' module) asks for it.
     pub fn look(&mut self, devices: &[DeviceSample], on: bool, lang: Lang) {
+        for (device, level) in self.due(devices, on) {
+            notify(device, level, lang);
+        }
+    }
+
+    /// The devices of a sample to be told of now (each with its charge), where `on`. Off, nothing counts as told (so
+    /// that, switched on, a device already low is told of). A device whose charge is not read is passed over: what was
+    /// told of it stands.
+    fn due<'a>(&mut self, devices: &'a [DeviceSample], on: bool) -> Vec<(&'a DeviceSample, u8)> {
+        if !on {
+            self.told.clear();
+            return Vec::new();
+        }
+        let mut tell = Vec::new();
         for device in devices {
+            let Some(level) = device.level else { continue };
             let told = self.told.get(&device.key).copied();
-            let (now, tell) = step(told, device.level, device.charging);
+            let (now, now_told) = step(told, level, device.charging);
             match now {
                 Some(at) => self.told.insert(device.key.clone(), at),
                 None => self.told.remove(&device.key),
             };
-            if tell && on {
-                notify(device, lang);
+            if now_told {
+                tell.push((device, level));
             }
         }
+        tell
     }
 }
 
@@ -109,12 +125,12 @@ fn step(told: Option<u8>, level: u8, charging: bool) -> (Option<u8>, bool) {
     }
 }
 
-/// The notification of `device` running low (one for each device, the later taking its place).
-fn notify(device: &DeviceSample, lang: Lang) {
+/// The notification of `device` running low, at `level` (one for each device, the later taking its place).
+fn notify(device: &DeviceSample, level: u8, lang: Lang) {
     use crate::toast::escaped;
     let (title, line) = match lang {
-        Lang::Zh => (format!("{} 电量低", device.called(true)), format!("剩余 {}%，请及时充电。", device.level)),
-        _ => (format!("{} is low on charge", device.called(false)), format!("{}% left. Charge it soon.", device.level)),
+        Lang::Zh => (format!("{} 电量低", device.called(true)), format!("剩余 {level}%，请及时充电。")),
+        _ => (format!("{} is low on charge", device.called(false)), format!("{level}% left. Charge it soon.")),
     };
     let xml = format!(r#"<toast launch="devices:"><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>"#, escaped(&title), escaped(&line));
     if let Err(error) = crate::toast::show(&xml, &device.key, "devices", false) {
@@ -149,5 +165,18 @@ mod tests {
         assert_eq!(run(&[(15, true), (8, true)]), Vec::<u8>::new());
         // Come to be read already low: told of at once, at the lower charge it is under.
         assert_eq!(run(&[(8, false), (6, false)]), [8]);
+    }
+
+    /// The notices switched off, nothing is told and nothing counts as told: switched on, a device already low is
+    /// told of. A device whose charge is not read is not told of, and what was told of it stands.
+    #[test]
+    fn notices_off_count_nothing_as_told() {
+        let low = |level: Option<u8>| DeviceSample { key: "k".into(), name: "MX Keys".into(), kind: DeviceKind::Keyboard, via: DeviceVia::Logitech, level, charging: false, container: None };
+        let mut notices = Notices::default();
+        assert!(notices.due(&[low(Some(15))], false).is_empty());
+        assert!(notices.due(&[low(Some(9))], false).is_empty());
+        assert_eq!(notices.due(&[low(Some(9))], true).len(), 1);
+        assert!(notices.due(&[low(None)], true).is_empty());
+        assert!(notices.due(&[low(Some(9))], true).is_empty());
     }
 }

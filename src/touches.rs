@@ -10,6 +10,9 @@
 //! leaves its readings. Listening here, the mouse is heard by the panel's
 //! window, which hears it for the edges (a process hears a kind of device
 //! at one window only), and passes it on (see `mouse_input`).
+//!
+//! Its window hears keyboards for the wireless batteries' reader too, while it waits for a keyboard asleep on its
+//! receiver (see `wireless::keys_from`): which keyboard input came from, never what was pressed.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -19,6 +22,9 @@ use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{OpenEventW, WaitForSingleObject, SYNCHRONIZATION_SYNCHRONIZE};
+use windows::Win32::UI::Input::{
+    GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_HEADER, RIM_TYPEKEYBOARD,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassW, HWND_MESSAGE, MSG, PM_REMOVE, QS_ALLINPUT, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WNDCLASSW,
 };
@@ -84,9 +90,39 @@ pub fn mouse_input(input: LPARAM) {
     take(input);
 }
 
+/// The keyboard a WM_INPUT came from, told to the wireless batteries' reader (see `wireless::keys_from`): its
+/// header alone is read, which says which device, not what it said.
+fn keys(input: LPARAM) {
+    static NAMED: Mutex<Option<(isize, String)>> = Mutex::new(None);
+    let mut head = RAWINPUTHEADER::default();
+    let mut size = size_of::<RAWINPUTHEADER>() as u32;
+    let read = unsafe { GetRawInputData(HRAWINPUT(input.0 as *mut _), RID_HEADER, Some((&mut head as *mut RAWINPUTHEADER).cast()), &mut size, size) };
+    if read != size || head.dwType != RIM_TYPEKEYBOARD.0 || head.hDevice.0.is_null() {
+        return;
+    }
+    let mut named = NAMED.lock().unwrap();
+    if named.as_ref().is_none_or(|(handle, _)| *handle != head.hDevice.0 as isize) {
+        let mut name = [0u16; 512];
+        let mut length = name.len() as u32;
+        let got = unsafe { GetRawInputDeviceInfoW(Some(head.hDevice), RIDI_DEVICENAME, Some(name.as_mut_ptr().cast()), &mut length) };
+        let name = if got == u32::MAX || got == 0 { String::new() } else { String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]) };
+        *named = Some((head.hDevice.0 as isize, name));
+    }
+    if let Some((_, name)) = named.as_ref() {
+        crate::wireless::keys_from(name);
+    }
+}
+
+/// Keyboards heard at `window` (`hear`) or no longer, for the wireless batteries' reader alone.
+fn hear_keyboards(window: HWND, hear: bool) -> windows::core::Result<()> {
+    let keyboard = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: if hear { RIDEV_INPUTSINK } else { RIDEV_REMOVE }, hwndTarget: if hear { window } else { HWND::default() } };
+    unsafe { RegisterRawInputDevices(&[keyboard], size_of::<RAWINPUTDEVICE>() as u32) }
+}
+
 unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if message == WM_INPUT {
         take(lparam);
+        keys(lparam);
     }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
@@ -96,13 +132,18 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
 /// the screens out: by the sensors' process while there is one, else here.
 pub fn start() {
     std::thread::Builder::new().name("glance: touches".into()).spawn(|| unsafe {
-        let Some(shared) = crate::remote::Shared::open(w!("Local\\Glance.Touches")) else { return };
-        *SHARED.lock().unwrap() = Some(shared);
+        // (Where the remote is not there to be told, nothing is heard for it: the keyboards still are, for the
+        // wireless batteries' reader.)
+        *SHARED.lock().unwrap() = crate::remote::Shared::open(w!("Local\\Glance.Touches"));
         let class = WNDCLASSW { lpfnWndProc: Some(told), lpszClassName: w!("GlanceTouches"), ..Default::default() };
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) else { return };
         // Whether it is heard here; what the sensors' process was last asked, and over which link.
         let mut hearing = false;
+        // Whether keyboards are heard here for the wireless batteries' reader alone (while it is heard here, they are
+        // anyway: a process hears a kind of device at one window only, and taking them off for the one would take
+        // them off for the other).
+        let mut keyboards = false;
         let mut asked: Option<(bool, u64)> = None;
         // (Never yet: an `Instant` counts from the PC's start, and none is to be had before it.)
         let mut looked: Option<Instant> = None;
@@ -129,13 +170,22 @@ pub fn start() {
                         if asked.take().is_some() {
                             tell(&None, &None);
                         }
+                        // (The remote not there, it is not listened for: nothing would be told of it.)
+                        let wanted = wanted && SHARED.lock().unwrap().is_some();
                         if wanted != hearing && crate::touch::hear_but_the_mouse(window, wanted).is_ok() {
                             hearing = wanted;
+                            // (Heard now for it, or taken off with the rest: heard for the reader, if it waits, anew.)
+                            keyboards = false;
                             // (Each time anew: what was heard the last time is not of this one.)
                             *HEARD.lock().unwrap() = wanted.then(|| Listening { heard: Heard::default(), last: None });
                             tell(&None, &None);
                         }
                     }
+                }
+                // Keyboards for the wireless batteries' reader, while it waits for one and they are not heard anyway.
+                let keys = crate::wireless::hears_keys() && !hearing;
+                if keys != keyboards && hear_keyboards(window, keys).is_ok() {
+                    keyboards = keys;
                 }
             }
             MsgWaitForMultipleObjects(None, false, ASKED_EVERY.saturating_sub(looked.map_or(Duration::ZERO, |looked| looked.elapsed())).as_millis() as u32, QS_ALLINPUT);

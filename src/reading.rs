@@ -139,8 +139,8 @@ pub struct DeviceSample {
     pub name: String,
     pub kind: DeviceKind,
     pub via: DeviceVia,
-    /// Percent left.
-    pub level: u8,
+    /// Percent left: none where it is joined but its charge was not read yet (asleep since Glance started).
+    pub level: Option<u8>,
     pub charging: bool,
     /// The container Windows groups a Bluetooth device's parts in (its sound's outputs among them), as a GUID's
     /// words: what an output is matched to it by.
@@ -180,7 +180,7 @@ pub enum DeviceVia {
 impl DeviceSample {
     /// Whether it is running low: a fifth of its charge or less, while it is not charging.
     pub fn low(&self) -> bool {
-        !self.charging && self.level <= LOW_CHARGE
+        !self.charging && self.level.is_some_and(|level| level <= LOW_CHARGE)
     }
 
     /// What it is called: its name, else (one whose maker's protocol tells none) what it is.

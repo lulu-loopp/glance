@@ -1526,6 +1526,11 @@ struct Readings {
 }
 
 impl Readings {
+    /// Whether it can show the wireless devices: the readings' lanes, all of them or that one alone.
+    fn shows_devices(&self) -> bool {
+        self.lanes == crate::settings::Part::Monitor && self.only.as_deref().is_none_or(|only| only == "devices")
+    }
+
     fn new(choice: Choice) -> Self {
         Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), arranged: None, away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
     }
@@ -3418,6 +3423,10 @@ impl Widget {
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
+        // (Showing the wireless devices, it has them read as it comes, as the panel has them read as it opens.)
+        if matches!(&content, Content::Readings(readings) if readings.shows_devices()) {
+            crate::wireless::ask();
+        }
         // (On the device of its screen's adapter: see `gfx::on_screen`.)
         let gfx = gfx::for_area(contact.monitor).ok()?;
         let window = Window::new().ok()?;
@@ -5612,6 +5621,17 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A widget that can show the wireless devices (the readings' lanes, all or that one alone) has them read as it
+    /// comes, as the panel does as it opens; one that cannot, not.
+    #[test]
+    fn a_widget_showing_the_devices_has_them_read() {
+        let readings = |lanes, only: Option<&str>| Readings { lanes, only: only.map(String::from), ..Readings::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) }) };
+        assert!(readings(crate::settings::Part::Monitor, None).shows_devices());
+        assert!(readings(crate::settings::Part::Monitor, Some("devices")).shows_devices());
+        assert!(!readings(crate::settings::Part::Monitor, Some("cpu")).shows_devices());
+        assert!(!readings(crate::settings::Part::Workbench, None).shows_devices());
+    }
 
     /// The AI component's dock torn off a panel is made as large as the panel drew it, a strip across or down as it lay,
     /// and so shown as the dock's strip: not as large as all of the component, which showed as a plate. A widget of

@@ -42,8 +42,8 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE
 use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects, WaitForSingleObject};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED};
 
-/// A wireless device whose battery level is known, as last read.
-#[derive(Clone, Debug, PartialEq)]
+/// A wireless device joined to the PC, its battery level as last read.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Device {
     /// What the device is known by from one reading to the next: "bt:" and its Bluetooth address, "hidpp:" and its
     /// receiver's device instance and the receiver's slot it is paired in, or "xbox:" and Windows' id of the
@@ -54,8 +54,9 @@ pub struct Device {
     pub name: String,
     pub kind: Kind,
     pub via: Via,
-    /// Percent, 0 to 100.
-    pub level: u8,
+    /// Percent, 0 to 100: none where it is joined (its receiver holds it) but its charge was never read (asleep since
+    /// Glance started, or not telling it).
+    pub level: Option<u8>,
     /// Whether it is being charged now (a Bluetooth device's level does not say: false for them).
     pub charging: bool,
     /// The Plug and Play container of a Bluetooth device (`DEVPKEY_Device_ContainerId`), which its sound outputs
@@ -64,7 +65,7 @@ pub struct Device {
 }
 
 /// What a device is, as far as it tells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Headphones,
     Earbuds,
@@ -79,7 +80,7 @@ pub enum Kind {
 }
 
 /// How a device is joined to the PC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Via {
     Bluetooth,
     /// Through one of Logitech's receivers.
@@ -119,6 +120,49 @@ enum Wake {
 /// What the reader is woken by, once it runs.
 static WAKE: OnceLock<Sender<Wake>> = OnceLock::new();
 
+/// The receivers (by vendor and product, as `hardware` gives them) a keyboard on which went unanswered at the last
+/// reading: asleep, as it is woken by a key pressed on it (see `keys_from`).
+static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// How soon after a keyboard heard (see `keys_from`) everything is asked again, at most: a keyboard woken by a key is
+/// asked once, not at every key pressed while it is asked.
+const HEARD_AGAIN: Duration = Duration::from_secs(5);
+
+/// Whether keyboards are to be heard now (see `keys_from`): while one asleep on its receiver is waited for.
+pub fn hears_keys() -> bool {
+    !WAITING.lock().unwrap().is_empty()
+}
+
+/// A keyboard's input heard, from the raw input device named `device` (its path: nothing of what was pressed): where
+/// it came through a receiver whose keyboard went unanswered (asleep, and woken now by the key), everything is read
+/// again at once, as often as `HEARD_AGAIN`.
+pub fn keys_from(device: &str) {
+    static ASKED: Mutex<Option<Instant>> = Mutex::new(None);
+    if !waited_for(device, &WAITING.lock().unwrap()) {
+        return;
+    }
+    let mut asked = ASKED.lock().unwrap();
+    if asked.is_some_and(|at| at.elapsed() < HEARD_AGAIN) {
+        return;
+    }
+    *asked = Some(Instant::now());
+    ask();
+}
+
+/// Whether the device whose path (or instance id) is `device` is one of the receivers `waiting`.
+fn waited_for(device: &str, waiting: &[String]) -> bool {
+    hardware(device).is_some_and(|id| waiting.contains(&id))
+}
+
+/// The vendor and product a device's path or instance id carries ("vid_046d&pid_c548"), in lower case: one receiver's
+/// collections, and the keyboards that come through it, carry the same.
+fn hardware(device: &str) -> Option<String> {
+    let lower = device.to_ascii_lowercase();
+    let at = lower.find("vid_")?;
+    let id = lower.get(at..at + 17)?;
+    (id.get(8..13) == Some("&pid_")).then(|| id.to_string())
+}
+
 /// Starts the reader's thread, once (later calls do nothing).
 pub fn start() {
     static STARTED: OnceLock<()> = OnceLock::new();
@@ -137,7 +181,7 @@ pub fn ask() {
     }
 }
 
-/// The devices joined now whose level is known, as last read: by kind, then by name.
+/// The devices joined now, as last read: by kind, then by name.
 pub fn now() -> Vec<Device> {
     DEVICES.lock().unwrap().clone()
 }
@@ -152,8 +196,10 @@ fn run(told: Sender<Wake>, telling: Told<Wake>) {
     let _controllers = xbox::hear(told.clone());
     let _bluetooth = bluetooth::hear(told);
     let mut bluetooth = bluetooth::Reader::default();
-    let mut logitech = logitech::Reader::default();
-    let mut boards = pmo::Reader::default();
+    // (The receivers' devices as last read, before Glance last ended: one asleep shows so from the start.)
+    let mut saved = kept::load();
+    let mut logitech = logitech::Reader::seeded(&saved.logitech);
+    let mut boards = pmo::Reader::seeded(&saved.pmo);
     let mut boards_read: Option<(Instant, Vec<Device>)> = None;
     let mut logitech_read: Option<(Instant, Vec<Device>)> = None;
     let mut asked = false;
@@ -163,9 +209,15 @@ fn run(told: Sender<Wake>, telling: Told<Wake>) {
         }
         let mut devices = bluetooth.read();
         devices.extend(logitech_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
-        let boards_every = if boards.waiting() { EVERY } else { BOARDS_EVERY };
+        let boards_every = if boards.waiting().is_empty() { BOARDS_EVERY } else { EVERY };
         if asked || boards_read.as_ref().is_none_or(|(at, _)| at.elapsed() >= boards_every) {
             boards_read = Some((Instant::now(), boards.read()));
+        }
+        *WAITING.lock().unwrap() = boards.waiting().into_iter().chain(logitech.waiting()).collect();
+        let now_kept = kept::Kept { pmo: boards.kept(), logitech: logitech.kept() };
+        if now_kept != saved {
+            kept::save(&now_kept);
+            saved = now_kept;
         }
         devices.extend(boards_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
         devices.extend(xbox::read());
@@ -177,12 +229,41 @@ fn run(told: Sender<Wake>, telling: Told<Wake>) {
     }
 }
 
+/// The devices of the receivers as last read, kept on disk from one run of Glance to the next: a device asleep when
+/// Glance starts shows as it was last read while its receiver is plugged in (as it would have, had Glance run on).
+mod kept {
+    use super::*;
+
+    /// Each PMO board, by the path of the receiver or cable it was read through, and each Logitech device, by its
+    /// receiver's instance and its slot.
+    #[derive(Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+    pub(super) struct Kept {
+        pub pmo: Vec<(String, Device)>,
+        pub logitech: Vec<(String, u8, Device)>,
+    }
+
+    fn file() -> std::path::PathBuf {
+        crate::settings::local_dir().join("wireless.json")
+    }
+
+    /// As last saved: none where there is no file, or it does not read.
+    pub(super) fn load() -> Kept {
+        std::fs::read(file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    }
+
+    pub(super) fn save(kept: &Kept) {
+        if let Ok(text) = serde_json::to_vec(kept) {
+            let _ = std::fs::write(file(), text);
+        }
+    }
+}
+
 /// Waits `EVERY`, or for Windows' telling of devices to begin and then go quiet, or for an asking: whether it was told
 /// or asked (none where no one can tell any more).
 fn settled(telling: &Told<Wake>) -> Option<bool> {
     match telling.recv_timeout(EVERY) {
         Ok(Wake::Told) => {}
-        Ok(Wake::Asked) => return Some(true),
+        Ok(Wake::Asked) => return Some(heard_out(telling)),
         Err(RecvTimeoutError::Timeout) => return Some(false),
         Err(RecvTimeoutError::Disconnected) => return None,
     }
@@ -190,10 +271,17 @@ fn settled(telling: &Told<Wake>) -> Option<bool> {
     while since.elapsed() < SETTLING_AT_MOST {
         match telling.recv_timeout(SETTLED) {
             Ok(Wake::Told) => {}
-            Ok(Wake::Asked) | Err(_) => break,
+            Ok(Wake::Asked) => return Some(heard_out(telling)),
+            Err(_) => break,
         }
     }
     Some(true)
+}
+
+/// Takes what else was told or asked meanwhile (all of it answered by the one reading about to be done): true.
+fn heard_out(telling: &Told<Wake>) -> bool {
+    while telling.try_recv().is_ok() {}
+    true
 }
 
 /// The devices in the order they are shown: by kind, then by name, then by key (two of one name in a stable order).
@@ -355,7 +443,7 @@ mod bluetooth {
                         (false, Some(class)) => class_kind(class),
                         (false, None) => Kind::Other,
                     };
-                    Device { key: format!("bt:{:012x}", record.address), name: record.name, kind, via: Via::Bluetooth, level, charging: false, container: Some(record.container) }
+                    Device { key: format!("bt:{:012x}", record.address), name: record.name, kind, via: Via::Bluetooth, level: Some(level), charging: false, container: Some(record.container) }
                 })
                 .collect()
         }
@@ -669,42 +757,71 @@ mod pmo {
     #[derive(Default)]
     pub(super) struct Reader {
         last: HashMap<String, Device>,
-        /// Whether a board did not answer at the last reading.
-        unanswered: bool,
+        /// The receivers (by `hardware`) whose board did not answer at the last reading.
+        unanswered: Vec<String>,
     }
 
     impl Reader {
-        /// Whether a board went unanswered at the last reading (to be asked again soon).
-        pub fn waiting(&self) -> bool {
-            self.unanswered
+        /// A reader that has read `last` (see `kept`).
+        pub fn seeded(last: &[(String, Device)]) -> Reader {
+            Reader { last: last.iter().cloned().collect(), unanswered: Vec::new() }
+        }
+
+        /// The boards as last read, by where they were read through, in order.
+        pub fn kept(&self) -> Vec<(String, Device)> {
+            let mut kept: Vec<(String, Device)> = self.last.iter().map(|(path, device)| (path.clone(), device.clone())).collect();
+            kept.sort_by(|a, b| a.0.cmp(&b.0));
+            kept
+        }
+
+        /// The receivers (by `hardware`) whose board went unanswered at the last reading (to be asked again soon, and
+        /// as soon as a key is pressed on it).
+        pub fn waiting(&self) -> Vec<String> {
+            self.unanswered.clone()
         }
 
         pub fn read(&mut self) -> Vec<Device> {
-            let (mut read, mut kept, mut present) = (Vec::new(), Vec::new(), Vec::new());
-            self.unanswered = false;
+            let mut answers = Vec::new();
             for path in hid::paths(&format!("{VENDOR:04x}")) {
                 let Some(product) = hid::product(&path).filter(|product| *product == RECEIVER || BOARDS.iter().any(|(board, _)| board == product)) else { continue };
                 let Some(mut channel) = hid::Collection::open(&path, |caps| caps.UsagePage == 0xFF60 && caps.Usage == 0x61 && matches!(caps.OutputReportByteLength, 33 | 65))
                 else {
                     continue;
                 };
-                present.push(path.clone());
-                match battery(&mut channel) {
-                    Some((board, level)) => {
-                        let board = board.unwrap_or(product);
-                        let name = BOARDS.iter().find(|(id, _)| *id == board).map_or("", |(_, name)| name).to_string();
-                        let via = if product == RECEIVER { Via::Receiver } else { Via::Cable };
-                        let device = Device { key: format!("pmo:{board:04x}"), name, kind: Kind::Keyboard, via, level, charging: false, container: None };
-                        self.last.insert(path, device.clone());
-                        read.push(device);
-                    }
-                    None => {
-                        self.unanswered = true;
-                        kept.extend(self.last.get(&path).cloned());
-                    }
-                }
+                let answer = battery(&mut channel);
+                answers.push((path, product, answer));
             }
-            self.last.retain(|path, _| present.contains(path));
+            self.took(answers)
+        }
+
+        /// Takes in what each receiver or cable plugged in answered (its path, its product, and the board it named and
+        /// that board's charge, as `battery` gives them): the boards shown. A board joined is shown whether or not it
+        /// answered: as read now; else as last read (through there); else unread, as the board its receiver names, or
+        /// a keyboard where it names none.
+        pub(super) fn took(&mut self, answers: Vec<Answered>) -> Vec<Device> {
+            let (mut read, mut kept) = (Vec::new(), Vec::new());
+            self.unanswered.clear();
+            for (path, product, (board, level)) in &answers {
+                let board = board.unwrap_or(*product);
+                let name = BOARDS.iter().find(|(id, _)| *id == board).map_or("", |(_, name)| name).to_string();
+                let via = if *product == RECEIVER { Via::Receiver } else { Via::Cable };
+                // (On its cable, it is charged by it.)
+                let device = Device { key: format!("pmo:{board:04x}"), name, kind: Kind::Keyboard, via, level: *level, charging: via == Via::Cable, container: None };
+                if level.is_some() {
+                    // (Kept as last read through another way in, it is as read now there too.)
+                    for other in self.last.values_mut().filter(|other| other.key == device.key) {
+                        other.level = device.level;
+                    }
+                    self.last.insert(path.clone(), device.clone());
+                    read.push(device);
+                    continue;
+                }
+                if *product == RECEIVER {
+                    self.unanswered.extend(hardware(path));
+                }
+                kept.push(self.last.get(path).map_or(Device { charging: false, ..device }, |last| Device { charging: false, ..last.clone() }));
+            }
+            self.last.retain(|path, _| answers.iter().any(|(there, ..)| there == path));
             // (A board read on its cable, and kept as last read on its receiver: as read.)
             kept.retain(|device: &Device| !read.iter().any(|fresh: &Device| fresh.key == device.key));
             read.extend(kept);
@@ -712,9 +829,13 @@ mod pmo {
         }
     }
 
-    /// The board's battery (percent), and the board the receiver says is paired to it (none on a cable), asked of
-    /// `channel` in a session of its own; none where it did not answer.
-    fn battery(channel: &mut hid::Collection) -> Option<(Option<u16>, u8)> {
+    /// What a receiver or cable plugged in answered: its path, its product, and the board it named and that board's
+    /// charge (see `battery`).
+    pub(super) type Answered = (String, u16, (Option<u16>, Option<u8>));
+
+    /// Asked of `channel` in a session of its own: the board the receiver says is paired to it (none on a cable, or
+    /// where it did not say), and the board's battery (percent; none where it did not answer).
+    fn battery(channel: &mut hid::Collection) -> (Option<u16>, Option<u8>) {
         // (The length a session is opened and closed with: the report's less the frame's head, as PMO Hub's.)
         let length = channel.output.saturating_sub(9) as u8;
         // (Asked twice: the first may wake the link.)
@@ -722,11 +843,11 @@ mod pmo {
         let Some(started) = started else {
             // (Closed all the same, in case it was opened.)
             channel.write(&frame(channel.output, STOP, length), WAITED);
-            return None;
+            return (None, None);
         };
         let level = done(&started).then(|| ask(channel, BATTERY, BATTERY_LENGTH)).flatten().and_then(|reply| level(&reply));
         ask(channel, STOP, length);
-        Some((paired(&started), level?))
+        (paired(&started), level)
     }
 
     /// Asks `command` of `channel` (with `length`): its reply's payload (the report id taken off), where it came in time.
@@ -847,6 +968,27 @@ mod logitech {
         name: String,
         kind: Kind,
         battery: Option<Battery>,
+        /// Its wireless id, as its receiver's pairing register told it when it was asked (none where that is not told):
+        /// another id there since, another device was paired in its slot.
+        wpid: Option<u16>,
+    }
+
+    /// What a receiver's pairing register tells of the device paired in a slot.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct Paired {
+        pub kind: Kind,
+        pub wpid: u16,
+    }
+
+    impl Battery {
+        /// The feature it is read through, and that feature's index on the device.
+        fn feature(self) -> (u16, u8) {
+            match self {
+                Battery::Unified(index) => (UNIFIED_BATTERY, index),
+                Battery::Status(index) => (BATTERY_STATUS, index),
+                Battery::Voltage(index) => (BATTERY_VOLTAGE, index),
+            }
+        }
     }
 
     /// Reads the receivers' devices, keeping what is asked once of each (by its receiver and slot), and each as it was
@@ -855,6 +997,8 @@ mod logitech {
     pub(super) struct Reader {
         known: HashMap<(String, u8), Known>,
         last: HashMap<(String, u8), Device>,
+        /// The receivers (by `hardware`) a keyboard on which went unanswered at the last reading.
+        unanswered: Vec<String>,
         /// The software id the next question carries (2 to 15, in turn: 0 is the devices' own notifications', 1 is
         /// left to others), and the byte the next ping carries, which its answer gives back.
         software: u8,
@@ -862,9 +1006,29 @@ mod logitech {
     }
 
     impl Reader {
+        /// A reader that has read `last` (see `kept`).
+        pub fn seeded(last: &[(String, u8, Device)]) -> Reader {
+            Reader { last: last.iter().map(|(receiver, slot, device)| ((receiver.clone(), *slot), device.clone())).collect(), ..Reader::default() }
+        }
+
+        /// The devices as last read, by their receiver and slot, in order.
+        pub fn kept(&self) -> Vec<(String, u8, Device)> {
+            let mut kept: Vec<(String, u8, Device)> = self.last.iter().map(|((receiver, slot), device)| (receiver.clone(), *slot, device.clone())).collect();
+            kept.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            kept
+        }
+
+        /// The receivers (by `hardware`) a keyboard on which went unanswered at the last reading (asked again as soon as
+        /// a key is pressed on it).
+        pub fn waiting(&self) -> Vec<String> {
+            self.unanswered.clone()
+        }
+
+        /// Each device joined to a receiver: as read now, else as last read, else unread (see `unanswered`).
         pub fn read(&mut self) -> Vec<Device> {
             let mut devices = Vec::new();
             let mut present = Vec::new();
+            self.unanswered.clear();
             for mut receiver in receivers() {
                 present.push(receiver.id.clone());
                 if !matches!(receiver.ask(RECEIVER, GET_REGISTER, CONNECTION_STATE, [0; 3]), Answer::Reply(_) | Answer::Refused(_)) {
@@ -872,30 +1036,37 @@ mod logitech {
                 }
                 for slot in SLOTS {
                     let key = (receiver.id.clone(), slot);
-                    if !self.ping(&mut receiver, slot) {
-                        match asleep(self.last.get(&key), || paired(&mut receiver, slot)) {
-                            Some(device) => devices.push(device),
-                            None => {
-                                self.known.remove(&key);
-                                self.last.remove(&key);
-                            }
+                    let paired = paired(&mut receiver, slot);
+                    // (Another device paired in its slot since it was asked: nothing kept of the one before is its.)
+                    if let (Some(paired), Some(known)) = (paired, self.known.get(&key)) {
+                        if known.wpid.is_some_and(|wpid| wpid != paired.wpid) {
+                            self.known.remove(&key);
+                            self.last.remove(&key);
                         }
+                    }
+                    let answers = self.ping(&mut receiver, slot);
+                    if let Some(device) = answers.then(|| self.reading(&mut receiver, slot, paired)).flatten() {
+                        self.last.insert(key, device.clone());
+                        devices.push(device);
                         continue;
                     }
-                    if !self.known.contains_key(&key) {
-                        let Some(known) = self.discover(&mut receiver, slot) else { continue };
-                        self.known.insert(key.clone(), known);
-                    }
-                    let known = &self.known[&key];
-                    let Some(battery) = known.battery else { continue };
-                    let (name, kind) = (known.name.clone(), known.kind);
-                    match self.battery(&mut receiver, slot, battery) {
-                        Some((level, charging)) => {
-                            let device = Device { key: format!("hidpp:{}:{slot}", receiver.id), name, kind, via: Via::Logitech, level, charging, container: None };
-                            self.last.insert(key, device.clone());
+                    let known = self.known.get(&key);
+                    let unread = || Device {
+                        key: format!("hidpp:{}:{slot}", receiver.id),
+                        name: known.map(|known| known.name.clone()).unwrap_or_default(),
+                        kind: known.map(|known| known.kind).or(paired.map(|paired| paired.kind)).unwrap_or(Kind::Other),
+                        via: Via::Logitech,
+                        level: None,
+                        charging: false,
+                        container: None,
+                    };
+                    match unanswered(self.last.get(&key), answers || paired.is_some(), unread) {
+                        Some(device) => {
+                            if !answers && device.kind == Kind::Keyboard {
+                                self.unanswered.extend(hardware(&receiver.id));
+                            }
                             devices.push(device);
                         }
-                        // (Not answered as before: another device in its slot since, perhaps. Asked anew next time.)
                         None => {
                             self.known.remove(&key);
                             self.last.remove(&key);
@@ -903,9 +1074,27 @@ mod logitech {
                     }
                 }
             }
+            self.unanswered.dedup();
             self.known.retain(|(receiver, _), _| present.contains(receiver));
             self.last.retain(|(receiver, _), _| present.contains(receiver));
             devices
+        }
+
+        /// The device in `slot` (it answered a ping), read: asked what it is first where it was not yet. None where it
+        /// did not tell its charge, or has no battery to tell.
+        fn reading(&mut self, receiver: &mut Receiver, slot: u8, paired: Option<Paired>) -> Option<Device> {
+            let key = (receiver.id.clone(), slot);
+            if !self.known.contains_key(&key) {
+                let known = Known { wpid: paired.map(|paired| paired.wpid), ..self.discover(receiver, slot)? };
+                self.known.insert(key.clone(), known);
+            }
+            let known = self.known[&key].clone();
+            let Some((level, charging)) = self.battery(receiver, slot, known.battery?) else {
+                // (Asked anew next time: where it was another device's battery feature, it is not asked again.)
+                self.known.remove(&key);
+                return None;
+            };
+            Some(Device { key: format!("hidpp:{}:{slot}", receiver.id), name: known.name, kind: known.kind, via: Via::Logitech, level: Some(level), charging, container: None })
         }
 
         /// The software id for the next question.
@@ -956,8 +1145,8 @@ mod logitech {
                     let kind = device_kind(*self.feature(receiver, slot, index, 2, [0; 3])?.first()?);
                     (String::from_utf8_lossy(&name).trim_end_matches('\0').trim().to_string(), kind)
                 }
-                // (A device that cannot say its name is not shown.)
-                None => return Some(Known { name: String::new(), kind: Kind::Other, battery: None }),
+                // (A device that cannot say its name is shown as what its receiver says it is, unread.)
+                None => return Some(Known { name: String::new(), kind: Kind::Other, battery: None, wpid: None }),
             };
             let battery = if let Some(index) = self.index(receiver, slot, UNIFIED_BATTERY)? {
                 Some(Battery::Unified(index))
@@ -966,11 +1155,16 @@ mod logitech {
             } else {
                 self.index(receiver, slot, BATTERY_VOLTAGE)?.map(Battery::Voltage)
             };
-            Some(Known { name, kind, battery })
+            Some(Known { name, kind, battery, wpid: None })
         }
 
-        /// The battery's level (percent) and whether it is charging, of the device in `slot`.
+        /// The battery's level (percent) and whether it is charging, of the device in `slot`: asked only where its
+        /// battery's feature is at the index it was (a function asked of another feature could set, not tell).
         fn battery(&mut self, receiver: &mut Receiver, slot: u8, battery: Battery) -> Option<(u8, bool)> {
+            let (feature, index) = battery.feature();
+            if self.index(receiver, slot, feature)? != Some(index) {
+                return None;
+            }
             match battery {
                 // (Function 1: its status. Function 0 tells what it can say.)
                 Battery::Unified(index) => unified_battery(&self.feature(receiver, slot, index, 1, [0; 3])?),
@@ -980,24 +1174,48 @@ mod logitech {
         }
     }
 
-    /// A device that does not answer, as it was `last` read (none where it never was): asleep (a keyboard, a mouse left
-    /// alone) or switched off, it is listed as it was while its receiver is plugged in and still holds it paired (asked
-    /// of it only then), as the receiver has it joined still. Not paired any more, it is not.
-    pub(super) fn asleep(last: Option<&Device>, paired: impl FnOnce() -> bool) -> Option<Device> {
-        let last = last?;
-        paired().then(|| Device { charging: false, ..last.clone() })
+    /// A device that gives no reading now (asleep, a keyboard or a mouse left alone; switched off; or its charge not
+    /// told), where it is `there` (it answers, or its receiver still holds it paired): as it was `last` read, not
+    /// charging (nothing says it is); else, never read, `unread`. Not there any more, it is not shown.
+    pub(super) fn unanswered(last: Option<&Device>, there: bool, unread: impl FnOnce() -> Device) -> Option<Device> {
+        there.then(|| last.map_or_else(unread, |last| Device { charging: false, ..last.clone() }))
     }
 
-    /// Whether `receiver` holds a device paired in `slot`, as its pairing register says (asked as a Bolt receiver, and
-    /// as a Unifying or Lightspeed one).
-    fn paired(receiver: &mut Receiver, slot: u8) -> bool {
-        [BOLT_PAIRING + slot, UNIFYING_PAIRING + slot - 1].into_iter().any(|sub| pairing(&receiver.ask(RECEIVER, GET_LONG_REGISTER, RECEIVER_INFO, [sub, 0, 0]), sub))
+    /// What `receiver`'s pairing register says of the device paired in `slot` (asked as a Bolt receiver, and as a
+    /// Unifying or Lightspeed one): none where it holds none (or does not tell).
+    fn paired(receiver: &mut Receiver, slot: u8) -> Option<Paired> {
+        [BOLT_PAIRING + slot, UNIFYING_PAIRING + slot - 1].into_iter().find_map(|sub| pairing(&receiver.ask(RECEIVER, GET_LONG_REGISTER, RECEIVER_INFO, [sub, 0, 0]), sub))
     }
 
-    /// Whether `answer` to the pairing register's sub-register `sub` tells of a device paired there: its reply, which
-    /// begins with that sub-register.
-    pub(super) fn pairing(answer: &Answer, sub: u8) -> bool {
-        matches!(answer, Answer::Reply(reply) if reply.first() == Some(&sub))
+    /// What `answer` to the pairing register's sub-register `sub` tells of a device paired there: its reply begins
+    /// with that sub-register. A Bolt receiver's (from 0x50) tells what the device is in its second byte (the low four
+    /// bits) and its wireless id in the third and fourth (low first); a Unifying receiver's, its wireless id in the
+    /// fourth and fifth (high first), what it is in the eighth, as Solaar reads them.
+    pub(super) fn pairing(answer: &Answer, sub: u8) -> Option<Paired> {
+        let Answer::Reply(reply) = answer else { return None };
+        if reply.first() != Some(&sub) {
+            return None;
+        }
+        let (kind, wpid) = if sub >= BOLT_PAIRING {
+            (*reply.get(1)?, u16::from_le_bytes([*reply.get(2)?, *reply.get(3)?]))
+        } else {
+            (*reply.get(7)?, u16::from_be_bytes([*reply.get(3)?, *reply.get(4)?]))
+        };
+        Some(Paired { kind: paired_kind(kind & 0x0F), wpid })
+    }
+
+    /// What a receiver's pairing register says a device is (HID++ 1.0's kinds).
+    pub(super) fn paired_kind(kind: u8) -> Kind {
+        match kind {
+            // A keyboard, a numpad.
+            1 | 3 => Kind::Keyboard,
+            // A mouse, a trackball, a touchpad.
+            2 | 8 | 9 => Kind::Mouse,
+            // A gamepad, a joystick.
+            11 | 12 => Kind::Gamepad,
+            13 => Kind::Headset,
+            _ => Kind::Other,
+        }
     }
 
     /// What a device's type (feature 0x0005's function 2) says it is.
@@ -1218,7 +1436,7 @@ mod xbox {
             name: controller.DisplayName().map(|name| name.to_string()).unwrap_or_default(),
             kind: Kind::Gamepad,
             via: Via::Xbox,
-            level,
+            level: Some(level),
             charging: status == BatteryStatus::Charging,
             container: None,
         })
@@ -1233,7 +1451,7 @@ mod xbox {
 #[cfg(test)]
 mod tests {
     use super::bluetooth::{appearance_kind, class_kind, joined, Record};
-    use super::logitech::{answer, asleep, battery_status, battery_voltage, device_kind, pairing, unified_battery, voltage_percent, Answer};
+    use super::logitech::{answer, battery_status, battery_voltage, device_kind, paired_kind, pairing, unanswered, unified_battery, voltage_percent, Answer, Paired};
     use super::*;
 
     fn record(address: u64, container: u128, connected: bool) -> Record {
@@ -1382,25 +1600,74 @@ mod tests {
     }
 
     fn device(key: &str, name: &str, kind: Kind) -> Device {
-        Device { key: key.into(), name: name.into(), kind, via: Via::Bluetooth, level: 50, charging: false, container: None }
+        Device { key: key.into(), name: name.into(), kind, via: Via::Bluetooth, level: Some(50), charging: false, container: None }
     }
 
-    /// A receiver's device that does not answer (asleep, or switched off) is listed as last read while the receiver
-    /// still holds it paired, not charging, and not where it never was read or is paired no more.
+    /// A receiver's device that gives no reading now (asleep, switched off, or its charge not told) is shown while the
+    /// receiver holds it: as last read (not charging), else unread, as what is known of it; not where it is gone.
     #[test]
-    fn a_device_asleep_on_its_receiver_stays_listed() {
-        let mut keys = Device { via: Via::Logitech, level: 64, charging: true, ..device("hidpp:r:1", "MX Keys", Kind::Keyboard) };
-        assert_eq!(asleep(Some(&keys), || true), Some(Device { charging: false, ..keys.clone() }));
-        assert_eq!(asleep(Some(&keys), || false), None);
-        assert_eq!(asleep(None, || panic!("not asked of a device never read")), None);
-        keys.charging = false;
-        assert_eq!(asleep(Some(&keys), || true), Some(keys));
-        // The pairing register: a slot's reply begins with its sub-register (the owner's Bolt receiver, its mouse in
-        // slot 2), an empty slot's is refused.
-        assert!(pairing(&Answer::Reply(vec![0x52, 0x02, 0x42, 0xB0, 0xA7, 0x55, 0x03, 0x0D, 0x02, 0x01, 0x80, 0x14, 0x01, 0, 0, 0]), 0x52));
-        assert!(!pairing(&Answer::Refused(0x08), 0x51));
-        assert!(!pairing(&Answer::Reply(vec![0x53, 0x02]), 0x52));
-        assert!(!pairing(&Answer::Silent, 0x52));
+    fn a_device_on_its_receiver_is_shown_read_or_not() {
+        let keys = Device { via: Via::Logitech, level: Some(64), charging: true, ..device("hidpp:r:1", "MX Keys", Kind::Keyboard) };
+        let unread = || Device { via: Via::Logitech, level: None, ..device("hidpp:r:1", "", Kind::Mouse) };
+        assert_eq!(unanswered(Some(&keys), true, unread), Some(Device { charging: false, ..keys.clone() }));
+        assert_eq!(unanswered(Some(&keys), false, unread), None);
+        assert_eq!(unanswered(None, true, unread), Some(unread()));
+        assert_eq!(unanswered(None, false, unread), None);
+        // The pairing register: a slot's reply begins with its sub-register, an empty slot's is refused. A Bolt
+        // receiver's tells what the device is in its second byte and its wireless id after (the owner's: its mouse in
+        // slot 2); a Unifying receiver's, its wireless id in the fourth and fifth (high first), what it is in the eighth.
+        let bolt = vec![0x52, 0x02, 0x42, 0xB0, 0xA7, 0x55, 0x03, 0x0D, 0x02, 0x01, 0x80, 0x14, 0x01, 0, 0, 0];
+        assert_eq!(pairing(&Answer::Reply(bolt), 0x52), Some(Paired { kind: Kind::Mouse, wpid: 0xB042 }));
+        let unifying = vec![0x21, 0x00, 0x08, 0x40, 0x2D, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(pairing(&Answer::Reply(unifying), 0x21), Some(Paired { kind: Kind::Keyboard, wpid: 0x402D }));
+        assert_eq!(pairing(&Answer::Refused(0x08), 0x51), None);
+        assert_eq!(pairing(&Answer::Reply(vec![0x53, 0x02, 0, 0]), 0x52), None);
+        assert_eq!(pairing(&Answer::Silent, 0x52), None);
+        assert_eq!([0x01, 0x02, 0x03, 0x08, 0x09, 0x0B, 0x0D, 0x00].map(paired_kind), [Kind::Keyboard, Kind::Mouse, Kind::Keyboard, Kind::Mouse, Kind::Mouse, Kind::Gamepad, Kind::Headset, Kind::Other]);
+    }
+
+    /// A PMO board is shown while its receiver (or its cable) is plugged in: as read; as last read where it does not
+    /// answer (read before Glance last ended too); unread where it never answered, as the board its receiver names, or
+    /// a keyboard. Read on its cable, it is as read on its receiver too, and charging there.
+    #[test]
+    fn a_pmo_board_is_shown_while_its_receiver_is_in() {
+        use super::pmo::Reader;
+        let receiver = r"\\?\hid#vid_36b0&pid_3002&mi_01#a&11e21a08&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}".to_string();
+        let cable = r"\\?\hid#vid_36b0&pid_3009&mi_01#a&22e21a08&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}".to_string();
+        let mut reader = Reader::default();
+        let shown = reader.took(vec![(receiver.clone(), 0x3002, (None, None))]);
+        assert_eq!(shown, [Device { key: "pmo:3002".into(), name: String::new(), kind: Kind::Keyboard, via: Via::Receiver, level: None, charging: false, container: None }]);
+        assert_eq!(reader.waiting(), ["vid_36b0&pid_3002"]);
+        let shown = reader.took(vec![(receiver.clone(), 0x3002, (Some(0x3009), None))]);
+        assert_eq!((shown[0].key.as_str(), shown[0].name.as_str(), shown[0].level), ("pmo:3009", "WAVE 75", None));
+        let shown = reader.took(vec![(receiver.clone(), 0x3002, (Some(0x3009), Some(6)))]);
+        assert_eq!((shown[0].key.as_str(), shown[0].level, shown[0].charging), ("pmo:3009", Some(6), false));
+        assert!(reader.waiting().is_empty());
+        // A later run, the board asleep: as last read.
+        let mut later = Reader::seeded(&reader.kept());
+        let shown = later.took(vec![(receiver.clone(), 0x3002, (None, None))]);
+        assert_eq!((shown[0].key.as_str(), shown[0].level), ("pmo:3009", Some(6)));
+        // On its cable at 80: once, as read there; its cable out, as read there through its receiver too.
+        let shown = later.took(vec![(receiver.clone(), 0x3002, (None, None)), (cable.clone(), 0x3009, (None, Some(80)))]);
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].via, shown[0].level, shown[0].charging), (Via::Cable, Some(80), true));
+        let shown = later.took(vec![(receiver.clone(), 0x3002, (None, None))]);
+        assert_eq!((shown[0].via, shown[0].level, shown[0].charging), (Via::Receiver, Some(80), false));
+        // Its receiver out: gone.
+        assert!(later.took(Vec::new()).is_empty());
+        assert!(later.kept().is_empty());
+    }
+
+    /// A keyboard heard is matched to the receivers waited for by the vendor and product its device's name carries.
+    #[test]
+    fn a_keyboard_heard_is_matched_to_its_receiver() {
+        assert_eq!(hardware(r"\\?\HID#VID_36B0&PID_3002&MI_00#8&2b3c51a&0&0000#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}").as_deref(), Some("vid_36b0&pid_3002"));
+        assert_eq!(hardware(r"USB\VID_046D&PID_C548&MI_02\C&34ECC405&0&0002").as_deref(), Some("vid_046d&pid_c548"));
+        assert_eq!(hardware(r"\\?\ACPI#PNP0303#4&1d401fb5&0#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}"), None);
+        let waiting = ["vid_36b0&pid_3002".to_string()];
+        assert!(waited_for(r"\\?\HID#VID_36B0&PID_3002&MI_00#8&2b3c51a&0&0000#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}", &waiting));
+        assert!(!waited_for(r"\\?\HID#VID_046D&PID_C548&MI_00#8&1&0&0000#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}", &waiting));
+        assert!(!waited_for(r"\\?\HID#VID_36B0&PID_3002&MI_00#8&2b3c51a&0&0000#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}", &[]));
     }
 
     /// PMO Hub's frames, and its replies as the owner's Wave 75 gave them through its receiver: the session's opening
@@ -1457,6 +1724,13 @@ mod tests {
         let since = Instant::now();
         assert_eq!(settled(&woken), Some(true));
         assert!(since.elapsed() >= SETTLED);
+        // Asked several times at once (the panel and widgets opening together): read once.
+        for _ in 0..3 {
+            wake.send(Wake::Asked).unwrap();
+        }
+        wake.send(Wake::Told).unwrap();
+        assert_eq!(settled(&woken), Some(true));
+        assert!(woken.try_recv().is_err());
         drop(wake);
         assert_eq!(settled(&woken), None);
     }

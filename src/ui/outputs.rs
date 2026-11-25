@@ -223,9 +223,9 @@ impl Sound {
             let small_y = frame.line_in(theme.small, y + 20.0, 16.0);
             frame.text(&via, theme.small, theme.text3, words_x, small_y, words_w, Align::Start);
             // Its charge after it.
-            if let Some(device) = charged {
+            if let Some(level) = charged.and_then(|device| device.level) {
                 let after = words_x + frame.measure(&via, theme.small) + 8.0;
-                frame.text(&format!("{}%", device.level), theme.small, theme.text2, after, small_y, (words_x + words_w - after).max(0.0), Align::Start);
+                frame.text(&format!("{level}%"), theme.small, theme.text2, after, small_y, (words_x + words_w - after).max(0.0), Align::Start);
             }
             if current {
                 frame.icon(Icon::Check, Point { x: SIDE + inner - tick / 2.0, y: centre.y }, tick, accent);
