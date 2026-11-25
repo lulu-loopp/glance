@@ -376,6 +376,8 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, cl
         let mut kept = kept.borrow_mut();
         if kept.is_none() {
             let Ok(window) = Window::new() else { return };
+            // (Never part of what is behind a glass of Glance's, as a tip is not: see `tip::show`.)
+            crate::ui::scene::leave_out(window.hwnd, true);
             *kept = Some(Card { window, gfx: gfx.clone(), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: None });
         }
         let card = kept.as_mut().unwrap();

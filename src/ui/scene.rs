@@ -981,6 +981,12 @@ pub fn supported() -> bool {
 /// widget torn off it takes its place, the hint of where a widget would stick).
 static LEFT_OUT: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 
+/// Whether `window` is left out of every scene (see `leave_out`).
+#[cfg(test)]
+pub fn left_out(window: HWND) -> bool {
+    LEFT_OUT.lock().unwrap().contains(&(window.0 as isize))
+}
+
 /// Leaves `window` out of every scene from now on (`out`), or no longer.
 pub fn leave_out(window: HWND, out: bool) {
     let mut left_out = LEFT_OUT.lock().unwrap();

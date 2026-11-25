@@ -99,6 +99,16 @@ pub fn went(hwnd: HWND) {
     }
 }
 
+/// A tip's window: let pointers through, and never part of what is behind a glass of Glance's, as it says something
+/// of what it is over. (A widget pressed comes over it a while; taken in then, it stayed in the widget's glass,
+/// blurred, a pale box, after it was over the widget again.)
+fn made() -> windows::core::Result<Window> {
+    let mut window = Window::new()?;
+    window.set_click_through(true);
+    crate::ui::scene::leave_out(window.hwnd, true);
+    Ok(window)
+}
+
 /// Says `text` under `about` (what it speaks of, where that is on the
 /// screen), its middle under its middle, on its screen, till `hide` or till
 /// `owner` (the window `about` is a part of) is hidden or destroyed: always
@@ -110,8 +120,7 @@ pub fn show(owner: HWND, text: &str, about: RECT, dark: bool) {
     TIP.with(|kept| {
         let mut kept = kept.borrow_mut();
         if kept.is_none() {
-            let Ok(mut window) = Window::new() else { return };
-            window.set_click_through(true);
+            let Ok(window) = made() else { return };
             *kept = Some(Tip { window, gfx: gfx.clone(), surface: None, showing: None, said: (String::new(), RECT::default()) });
         }
         let tip = kept.as_mut().unwrap();
@@ -241,6 +250,26 @@ mod tests {
         assert!(stray.upgrade().is_none(), "a device no screen needs kept");
     }
 
+    /// A tip's window is never part of what is behind a glass of Glance's (a widget pressed came over it a while, took
+    /// it in, and kept it in its glass, a pale box); a window gone is left out no longer, its handle another's to be.
+    #[test]
+    fn a_tip_is_never_behind_a_glass() {
+        struct Left;
+        impl Drop for Left {
+            fn drop(&mut self) {
+                super::TIP.with(|kept| std::mem::forget(kept.borrow_mut().take()));
+            }
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let _left = Left;
+        // (Made as `show` makes it, not shown: nothing comes up on the desktop.)
+        let window = super::made().expect("a window");
+        let hwnd = window.hwnd;
+        assert!(crate::ui::scene::left_out(hwnd), "a tip is part of what is behind a glass");
+        drop(window);
+        assert!(!crate::ui::scene::left_out(hwnd), "a window gone is still left out");
+    }
+
     /// Nothing behind a tip shows through it.
     #[test]
     fn nothing_shows_through_a_tip() {
@@ -272,6 +301,7 @@ mod tests {
         unsafe { GetWindowRect(window, &mut rect).unwrap() };
         println!("tip at {rect:?}");
         assert!(unsafe { IsWindowVisible(window) }.as_bool() && rect.right - rect.left > 100 && rect.top > 400);
+        assert!(crate::ui::scene::left_out(window), "a tip is part of what is behind a glass of Glance's");
         std::thread::sleep(std::time::Duration::from_secs(2));
         super::hide();
         assert!(!unsafe { IsWindowVisible(window) }.as_bool());

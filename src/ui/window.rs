@@ -45,6 +45,8 @@ pub const CLOSE_ASKED: u32 = WM_APP + 19;
 impl Drop for Window {
     fn drop(&mut self) {
         LIFTED.lock().unwrap().retain(|&lifted| lifted != self.hwnd.0 as isize);
+        // (Left out of what is behind Glance's glass no longer: its handle may come to be another window's.)
+        super::scene::leave_out(self.hwnd, false);
         // (Whatever it took the keys for, and the to-dos' picker opened from it, let go with it.)
         super::keys::give_back(self.hwnd);
         super::todo::went(self.hwnd);
