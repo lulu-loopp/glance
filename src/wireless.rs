@@ -264,7 +264,7 @@ mod kept {
     #[derive(Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
     pub(super) struct Kept {
         pub pmo: Vec<(String, Device)>,
-        pub logitech: Vec<(String, u8, Device)>,
+        pub logitech: Vec<logitech::KeptDevice>,
     }
 
     fn file() -> std::path::PathBuf {
@@ -1042,9 +1042,6 @@ mod logitech {
         name: String,
         kind: Kind,
         battery: Option<Battery>,
-        /// Its wireless id, as its receiver's pairing register told it when it was asked (none where that is not told):
-        /// another id there since, another device was paired in its slot.
-        wpid: Option<u16>,
     }
 
     /// What a receiver's pairing register tells of the device paired in a slot.
@@ -1065,12 +1062,26 @@ mod logitech {
         }
     }
 
+    /// A device as last read, kept from one run of Glance to the next: by its receiver and slot, with the wireless id
+    /// its receiver's pairing register told in that slot (none where it told none; none in what an older Glance kept).
+    #[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+    pub(super) struct KeptDevice {
+        pub receiver: String,
+        pub slot: u8,
+        pub device: Device,
+        #[serde(default)]
+        pub wpid: Option<u16>,
+    }
+
     /// Reads the receivers' devices, keeping what is asked once of each (by its receiver and slot), and each as it was
     /// last read (see `asleep`).
     #[derive(Default)]
     pub(super) struct Reader {
         known: HashMap<(String, u8), Known>,
         last: HashMap<(String, u8), Device>,
+        /// The wireless id each slot's pairing register last told (kept with what was last read: see `KeptDevice`):
+        /// another there since, another device was paired in that slot.
+        wpids: HashMap<(String, u8), u16>,
         /// The receivers (by `hardware`) a keyboard on which went unanswered at the last reading.
         unanswered: Vec<String>,
         /// The software id the next question carries (2 to 15, in turn: 0 is the devices' own notifications', 1 is
@@ -1081,15 +1092,30 @@ mod logitech {
 
     impl Reader {
         /// A reader that has read `last` (see `kept`).
-        pub fn seeded(last: &[(String, u8, Device)]) -> Reader {
-            Reader { last: last.iter().map(|(receiver, slot, device)| ((receiver.clone(), *slot), device.clone())).collect(), ..Reader::default() }
+        pub fn seeded(last: &[KeptDevice]) -> Reader {
+            Reader {
+                last: last.iter().map(|kept| ((kept.receiver.clone(), kept.slot), kept.device.clone())).collect(),
+                wpids: last.iter().filter_map(|kept| Some(((kept.receiver.clone(), kept.slot), kept.wpid?))).collect(),
+                ..Reader::default()
+            }
         }
 
-        /// The devices as last read, by their receiver and slot, in order.
-        pub fn kept(&self) -> Vec<(String, u8, Device)> {
-            let mut kept: Vec<(String, u8, Device)> = self.last.iter().map(|((receiver, slot), device)| (receiver.clone(), *slot, device.clone())).collect();
-            kept.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        /// The devices as last read, by their receiver and slot, in order, with the wireless id told in their slot.
+        pub fn kept(&self) -> Vec<KeptDevice> {
+            let mut kept: Vec<KeptDevice> = self.last.iter().map(|(key, device)| KeptDevice { receiver: key.0.clone(), slot: key.1, device: device.clone(), wpid: self.wpids.get(key).copied() }).collect();
+            kept.sort_by(|a, b| (&a.receiver, a.slot).cmp(&(&b.receiver, b.slot)));
             kept
+        }
+
+        /// The wireless id the pairing register of the slot `key` tells now, where it tells one: another than told
+        /// there before (in this run, or kept from the last), nothing known or kept of the device before is the one
+        /// there now (it was shown as that one, with its charge, and told of as it ran low).
+        pub(super) fn paired_now(&mut self, key: &(String, u8), wpid: Option<u16>) {
+            let Some(wpid) = wpid else { return };
+            if self.wpids.insert(key.clone(), wpid).is_some_and(|before| before != wpid) {
+                self.known.remove(key);
+                self.last.remove(key);
+            }
         }
 
         /// The receivers (by `hardware`) a keyboard on which went unanswered at the last reading (asked again as soon as
@@ -1111,15 +1137,9 @@ mod logitech {
                 for slot in SLOTS {
                     let key = (receiver.id.clone(), slot);
                     let paired = paired(&mut receiver, slot);
-                    // (Another device paired in its slot since it was asked: nothing kept of the one before is its.)
-                    if let (Some(paired), Some(known)) = (paired, self.known.get(&key)) {
-                        if known.wpid.is_some_and(|wpid| wpid != paired.wpid) {
-                            self.known.remove(&key);
-                            self.last.remove(&key);
-                        }
-                    }
+                    self.paired_now(&key, paired.map(|paired| paired.wpid));
                     let answers = self.ping(&mut receiver, slot);
-                    if let Some(device) = answers.then(|| self.reading(&mut receiver, slot, paired)).flatten() {
+                    if let Some(device) = answers.then(|| self.reading(&mut receiver, slot)).flatten() {
                         self.last.insert(key, device.clone());
                         devices.push(device);
                         continue;
@@ -1144,6 +1164,7 @@ mod logitech {
                         None => {
                             self.known.remove(&key);
                             self.last.remove(&key);
+                            self.wpids.remove(&key);
                         }
                     }
                 }
@@ -1151,15 +1172,16 @@ mod logitech {
             self.unanswered.dedup();
             self.known.retain(|(receiver, _), _| present.contains(receiver));
             self.last.retain(|(receiver, _), _| present.contains(receiver));
+            self.wpids.retain(|(receiver, _), _| present.contains(receiver));
             devices
         }
 
         /// The device in `slot` (it answered a ping), read: asked what it is first where it was not yet. None where it
         /// did not tell its charge, or has no battery to tell.
-        fn reading(&mut self, receiver: &mut Receiver, slot: u8, paired: Option<Paired>) -> Option<Device> {
+        fn reading(&mut self, receiver: &mut Receiver, slot: u8) -> Option<Device> {
             let key = (receiver.id.clone(), slot);
             if !self.known.contains_key(&key) {
-                let known = Known { wpid: paired.map(|paired| paired.wpid), ..self.discover(receiver, slot)? };
+                let known = self.discover(receiver, slot)?;
                 self.known.insert(key.clone(), known);
             }
             let known = self.known[&key].clone();
@@ -1220,7 +1242,7 @@ mod logitech {
                     (String::from_utf8_lossy(&name).trim_end_matches('\0').trim().to_string(), kind)
                 }
                 // (A device that cannot say its name is shown as what its receiver says it is, unread.)
-                None => return Some(Known { name: String::new(), kind: Kind::Other, battery: None, wpid: None }),
+                None => return Some(Known { name: String::new(), kind: Kind::Other, battery: None }),
             };
             let battery = if let Some(index) = self.index(receiver, slot, UNIFIED_BATTERY)? {
                 Some(Battery::Unified(index))
@@ -1229,7 +1251,7 @@ mod logitech {
             } else {
                 self.index(receiver, slot, BATTERY_VOLTAGE)?.map(Battery::Voltage)
             };
-            Some(Known { name, kind, battery, wpid: None })
+            Some(Known { name, kind, battery })
         }
 
         /// The battery's level (percent) and whether it is charging, of the device in `slot`: asked only where its
@@ -1698,6 +1720,32 @@ mod tests {
         assert_eq!(pairing(&Answer::Reply(vec![0x53, 0x02, 0, 0]), 0x52), None);
         assert_eq!(pairing(&Answer::Silent, 0x52), None);
         assert_eq!([0x01, 0x02, 0x03, 0x08, 0x09, 0x0B, 0x0D, 0x00].map(paired_kind), [Kind::Keyboard, Kind::Mouse, Kind::Keyboard, Kind::Mouse, Kind::Mouse, Kind::Gamepad, Kind::Headset, Kind::Other]);
+    }
+
+    /// A Logitech receiver's slot paired to another device since its device was last read, in this run or before Glance
+    /// last ended: nothing kept of the one before is shown for it (it was, by its name, kind and charge, and told of as
+    /// it ran low). The wireless id kept with what was read; what an older Glance kept, without it, still read.
+    #[test]
+    fn a_slot_paired_anew_forgets_the_device_before() {
+        use super::logitech::{KeptDevice, Reader};
+        let keys = Device { via: Via::Logitech, level: Some(8), ..device("hidpp:r:1", "MX Keys", Kind::Keyboard) };
+        let kept = [KeptDevice { receiver: "r".into(), slot: 1, device: keys.clone(), wpid: Some(0x408A) }];
+        // (A later run, the slot's pairing told first: the same device, kept; another paired while Glance was not
+        // running, forgotten; and in the same run, as it is paired anew.)
+        let mut later = Reader::seeded(&kept);
+        later.paired_now(&("r".into(), 1), None);
+        later.paired_now(&("r".into(), 1), Some(0x408A));
+        assert_eq!(later.kept(), kept);
+        later.paired_now(&("r".into(), 1), Some(0xB042));
+        assert!(later.kept().is_empty());
+        let mut other = Reader::seeded(&kept);
+        other.paired_now(&("r".into(), 1), Some(0xB042));
+        assert!(other.kept().is_empty());
+        // (What an older Glance kept, a list of three: read, with no wireless id.)
+        let old = format!("[[\"r\",1,{}]]", serde_json::to_string(&keys).unwrap());
+        let read: Vec<KeptDevice> = serde_json::from_str(&old).unwrap();
+        assert_eq!(read, [KeptDevice { wpid: None, ..kept[0].clone() }]);
+        assert_eq!(serde_json::from_str::<Vec<KeptDevice>>(&serde_json::to_string(&kept).unwrap()).unwrap(), kept);
     }
 
     /// A PMO board is shown while its receiver (or its cable) is plugged in: as read; as last read where it does not
