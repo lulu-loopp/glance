@@ -34,7 +34,7 @@ pub fn folder() -> PathBuf {
 }
 
 /// What Claude Code gives its status line, as far as the limits go: they are its session's last answer's, and that
-/// answer is dated by its transcript's last writing (see `answered`).
+/// answer is dated as its transcript dates it (see `answered`).
 #[derive(Deserialize)]
 struct Given {
     rate_limits: Option<Rates>,
@@ -66,11 +66,48 @@ fn limit_in(given: Given, plan: Option<String>, now: u64) -> Option<Limit> {
     (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan, windows, balance: None, told: now })
 }
 
-/// When the answer whose limits `given` tells was had: its session's transcript last written (milliseconds since
-/// 1970), as it is written as each answer comes. None where it names no transcript or that cannot be read.
+/// When the answer whose limits `given` tells was had: its session's last answer in its transcript (milliseconds since
+/// 1970). Not when the transcript was last written: a title given, a prompt or what a tool gave back written there
+/// since dated an idle session's old limits after a newer answer's of another. None where it names no transcript, that
+/// cannot be read, or holds no answer.
 fn answered(given: &Given) -> Option<u64> {
-    let written = std::fs::metadata(given.transcript_path.as_ref()?).ok()?.modified().ok()?;
-    Some(written.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+    last_answer(given.transcript_path.as_ref()?, READ_BACK)
+}
+
+/// How much of a transcript is read at a time from its end, back to its last answer.
+const READ_BACK: usize = 64 * 1024;
+
+/// The moment of the last answer in the transcript at `path` (see `claude::answered_at`), read back from its end
+/// `chunk` bytes at a time (a transcript runs to gigabytes: its last answer is near its end).
+fn last_answer(path: &Path, chunk: usize) -> Option<u64> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut end = file.metadata().ok()?.len();
+    // (What of a line runs on from before the part read, to be read with the part before it.)
+    let mut carried: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(chunk as u64);
+        let mut part = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut part).ok()?;
+        part.extend_from_slice(&carried);
+        end = start;
+        // (Whole lines are those after the first line's end, or all of them at the file's start.)
+        let whole = match (start, memchr::memchr(b'\n', &part)) {
+            (0, _) => 0,
+            (_, Some(at)) => at + 1,
+            (_, None) => {
+                carried = part;
+                continue;
+            }
+        };
+        if let Some(at) = part[whole..].split(|byte| *byte == b'\n').rev().find_map(|line| super::claude::answered_at(line.trim_ascii())) {
+            return Some(at);
+        }
+        part.truncate(whole);
+        carried = part;
+    }
+    None
 }
 
 /// The limit kept, with when the answer that told it was had (see `answered`).
@@ -510,14 +547,50 @@ mod tests {
         limit_in(serde_json::from_slice::<Given>(given).ok()?, plan, now)
     }
 
-    /// A session's transcript in `folder`, last written `at` (seconds since 1970): what it tells its status line as
-    /// Claude Code gives it, with `limits` (its `rate_limits`' JSON).
+    /// A session's transcript in `folder`, its last answer had `at` (seconds since 1970, within its first day): what it
+    /// tells its status line as Claude Code gives it, with `limits` (its `rate_limits`' JSON).
     fn session(folder: &Path, name: &str, at: u64, limits: &str) -> Vec<u8> {
         std::fs::create_dir_all(folder).unwrap();
         let transcript = folder.join(format!("{name}.jsonl"));
-        let file = std::fs::File::create(&transcript).unwrap();
-        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at)).unwrap();
+        std::fs::write(&transcript, answer(at)).unwrap();
         serde_json::to_vec(&serde_json::json!({"session_id": name, "transcript_path": transcript, "rate_limits": serde_json::from_str::<serde_json::Value>(limits).unwrap()})).unwrap()
+    }
+
+    /// An answer's line in a transcript, had `at` (seconds since 1970, within its first day).
+    fn answer(at: u64) -> String {
+        format!("{{\"type\":\"assistant\",\"sessionId\":\"s\",\"timestamp\":\"{}\",\"message\":{{\"id\":\"m{at}\",\"model\":\"claude-opus-4-7\",\"usage\":{{\"input_tokens\":3,\"output_tokens\":5}}}}}}\n", time(at))
+    }
+
+    /// `at` (seconds since 1970, within its first day) as a transcript writes a moment.
+    fn time(at: u64) -> String {
+        format!("1970-01-01T{:02}:{:02}:{:02}.000Z", at / 3600, at / 60 % 60, at % 60)
+    }
+
+    /// A session's answer is dated by its last answer in its transcript, not by what was written there since (a prompt,
+    /// what a tool gave back, a title given, an error Claude Code shows as an answer): those dated an idle session's old
+    /// limits after a newer answer's of another, and they were kept over it. Read back from its end a little at a time,
+    /// lines across where it is read in two are read whole.
+    #[test]
+    fn an_answer_is_dated_by_the_transcripts_last_answer() {
+        let folder = folder().join("dated");
+        let _ = std::fs::remove_dir_all(&folder);
+        let week = |used: u32| format!(r#"{{"seven_day":{{"used_percentage":{used},"resets_at":1795449600}}}}"#);
+        let idle = session(&folder, "idle", 1_000, &week(45));
+        keep_told(&idle, None, &folder, 1);
+        keep_told(&session(&folder, "busy", 2_000, &week(49)), None, &folder, 2);
+        let transcript = folder.join("idle.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        let later = time(3_000);
+        write!(file, "{{\"type\":\"user\",\"sessionId\":\"s\",\"timestamp\":\"{later}\",\"message\":{{\"role\":\"user\",\"content\":\"and then?\"}}}}\n{{\"type\":\"custom-title\",\"sessionId\":\"s\",\"customTitle\":\"renamed\"}}\n{{\"type\":\"assistant\",\"sessionId\":\"s\",\"timestamp\":\"{later}\",\"isApiErrorMessage\":true,\"message\":{{\"id\":\"e\",\"model\":\"<synthetic>\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":0}}}}}}\n").unwrap();
+        drop(file);
+        keep_told(&idle, None, &folder, 3);
+        assert_eq!(told_in(&folder).unwrap().windows[0].used, 49.0);
+        for chunk in [1, 7, 64, READ_BACK] {
+            assert_eq!(last_answer(&transcript, chunk), Some(1_000_000), "{chunk}");
+        }
+        std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+        assert_eq!(last_answer(&transcript, 7), None);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// The limit told kept in Glance's folder for it, and read from there as it was told; none told, the one kept before

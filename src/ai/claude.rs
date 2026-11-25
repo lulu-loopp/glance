@@ -119,6 +119,16 @@ pub(super) fn line(bytes: &[u8], read: &mut Read, told: &mut Vec<Told>) {
     }
 }
 
+/// When transcript line `bytes` is an answer the model gave (one its service sent, with what it spent: not one Claude
+/// Code made up itself, an error shown as one), its moment (ms since 1970); else none.
+pub(super) fn answered_at(bytes: &[u8]) -> Option<u64> {
+    memchr::memmem::find(bytes, b"\"usage\"")?;
+    let line = serde_json::from_slice::<Line>(bytes).ok()?;
+    let message = line.message.filter(|_| line.kind.as_deref() == Some("assistant"))?;
+    (message.usage.is_some() && message.model.is_some_and(|model| !model.starts_with('<'))).then_some(())?;
+    line.timestamp.as_deref().and_then(moment)
+}
+
 /// Whether user's line `line` is what its user asked: not one Claude Code put in itself, a summary carried on from,
 /// what the system queued, or a subagent's.
 fn asked(line: &Line) -> bool {
