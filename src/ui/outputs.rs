@@ -52,6 +52,11 @@ pub enum Hit {
 pub struct Sound {
     order: Vec<String>,
     order_of: Option<String>,
+    /// What each row stands for as last drawn, by its place: the programs' keys and the outputs' ids. A press is
+    /// done on what was drawn where it was, not on what is in that place now (one gone between, every row after it
+    /// stood for the next one's program or output).
+    shown: Vec<String>,
+    outputs_shown: Vec<String>,
     held: Option<String>,
     pub dots: super::thumb::Dots<Hit>,
     /// What was drawn last (what is read, and how loud each program sounded, to the hundredth): drawn again only as
@@ -166,13 +171,16 @@ impl Sound {
                 self.order.insert(at, app.key.clone());
             }
         }
-        self.order.iter().filter_map(|key| mixer.apps.iter().find(|app| app.key == *key)).collect()
+        let apps: Vec<&crate::audio::App> = self.order.iter().filter_map(|key| mixer.apps.iter().find(|app| app.key == *key)).collect();
+        self.shown = apps.iter().map(|app| app.key.clone()).collect();
+        self.outputs_shown = mixer.outputs.iter().map(|output| output.id.clone()).collect();
+        apps
     }
 
     /// Whether it is to be drawn again: what is read or how loud the programs sound changed since it was drawn, or a
     /// knob eases (stepped on to `now`, the pointer over `over`).
     pub fn changed(&mut self, now: Instant, over: Option<Hit>) -> bool {
-        let held = self.held.as_ref().and_then(|key| self.order.iter().position(|of| of == key)).map(|at| Hit::Level(at as u16));
+        let held = self.held.as_ref().and_then(|key| self.shown.iter().position(|of| of == key)).map(|at| Hit::Level(at as u16));
         let easing = self.dots.step(now, over.filter(|hit| matches!(hit, Hit::Level(_))), held);
         let now = (crate::audio::mixer(), sounded(&crate::audio::peaks()), crate::devices::latest());
         let changed = self.drawn.as_ref() != Some(&now);
@@ -325,8 +333,8 @@ impl Sound {
     pub fn pressed(&mut self, hit: Hit) {
         match hit {
             Hit::Output(at) => {
-                if let Some(output) = crate::audio::mixer().outputs.get(at as usize) {
-                    crate::audio::choose(&output.id);
+                if let Some(id) = self.outputs_shown.get(at as usize) {
+                    crate::audio::choose(id);
                 }
             }
             Hit::Mute(at) => {
@@ -350,7 +358,7 @@ impl Sound {
 
     /// The program shown at `at`, by its key.
     fn order_key(&self, at: u16) -> Option<String> {
-        self.order.get(at as usize).cloned()
+        self.shown.get(at as usize).cloned()
     }
 }
 
@@ -428,13 +436,25 @@ mod tests {
         // (One come since: after them, before Windows' own sounds.)
         mixer.apps.push(app("c", true, false));
         assert_eq!(keys(sound.ordered(&mixer)), ["b", "a", "c", "system"]);
-        // (One gone: not shown.)
+        // (One gone: not shown, and each row after it stands for its own program still, not the one before it.)
         mixer.apps.retain(|app| app.key != "a");
         assert_eq!(keys(sound.ordered(&mixer)), ["b", "c", "system"]);
+        assert_eq!([0, 1, 2, 3].map(|at| sound.order_key(at)), [Some("b".into()), Some("c".into()), Some("system".into()), None]);
         // (Another output: begun again.)
         mixer.current = Some("other".into());
         mixer.apps = vec![app("c", false, false), app("d", true, false)];
         assert_eq!(keys(sound.ordered(&mixer)), ["d", "c"]);
+    }
+
+    /// A press on an output is done on the output drawn there, though one before it is gone since.
+    #[test]
+    fn an_output_pressed_is_the_one_drawn_there() {
+        let output = |id: &str| crate::audio::Output { id: id.into(), name: id.into(), via: crate::audio::Via::Usb, form: crate::audio::Form::Speakers, container: None };
+        let mut sound = Sound::default();
+        let mut mixer = Mixer { outputs: vec![output("A"), output("B"), output("C")], current: Some("A".into()), apps: Vec::new(), read: true };
+        sound.ordered(&mixer);
+        mixer.outputs.remove(0);
+        assert_eq!(sound.outputs_shown.get(1).map(String::as_str), Some("B"));
     }
 
     #[test]
