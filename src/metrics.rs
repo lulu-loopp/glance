@@ -34,7 +34,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetAdaptersAddresses, GetBestInterface, GetBestRoute, GetIfTable2, GAA_FLAG_SKIP_ANYCAST,
     GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, MIB_IF_TABLE2, MIB_IPFORWARDROW,
 };
-use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+use windows::Win32::Networking::WinSock::{IpDadStatePreferred, AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
@@ -109,6 +109,9 @@ pub struct Sampler {
     gpu_shared: Option<PDH_HCOUNTER>,
     disk_read: Option<PDH_HCOUNTER>,
     disk_write: Option<PDH_HCOUNTER>,
+    /// Each physical drive's reading and writing (see `drive_rates`).
+    drives_read: Option<PDH_HCOUNTER>,
+    drives_written: Option<PDH_HCOUNTER>,
     disk_idle: Option<PDH_HCOUNTER>,
     /// The GPUs' last readings, kept through a momentary counter failure.
     /// The processors' idle and busy time at the last sample (100 ns units).
@@ -246,6 +249,8 @@ impl Sampler {
         let gpu_process_memory = add(w!(r"\GPU Process Memory(*)\Dedicated Usage"));
         let disk_read = add(w!(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec"));
         let disk_write = add(w!(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"));
+        let drives_read = add(w!(r"\PhysicalDisk(*)\Disk Read Bytes/sec"));
+        let drives_written = add(w!(r"\PhysicalDisk(*)\Disk Write Bytes/sec"));
         let disk_idle = add(w!(r"\PhysicalDisk(_Total)\% Idle Time"));
         // Rate counters need a first collection to diff against.
         unsafe { PdhCollectQueryData(query) };
@@ -330,6 +335,8 @@ impl Sampler {
             gpu_shared,
             disk_read,
             disk_write,
+            drives_read,
+            drives_written,
             disk_idle,
             system_times: system_times(),
             processes,
@@ -476,6 +483,11 @@ impl Sampler {
         let collected = unsafe { PdhCollectQueryData(self.query) } == ERROR_SUCCESS.0;
         let counter = |counter: Option<PDH_HCOUNTER>| counter.filter(|_| collected);
 
+        let drive_rates = {
+            let read = counter(self.drives_read).and_then(|counter| read_array(counter, &mut self.buf)).unwrap_or_default();
+            let written = counter(self.drives_written).and_then(|counter| read_array(counter, &mut self.buf)).unwrap_or_default();
+            drive_rates(&read, &written)
+        };
         let mut cpu = None;
         // Each thread in its processor's place (its group's first, and its
         // number in the group); one not read this time, or not listed,
@@ -584,6 +596,7 @@ impl Sampler {
             network: self.slow.network.clone(),
             disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
             disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
+            drive_rates,
             disk_active: counter(self.disk_idle).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map(|idle| (100.0 - idle).clamp(0.0, 100.0) as f32),
             volumes: self.spaces.take(),
             processes: self.slow.processes.clone(),
@@ -1708,7 +1721,7 @@ fn default_interface() -> Option<NetworkInfo> {
     let mut size = 0u32;
     loop {
         let list = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-        let status = unsafe { GetAdaptersAddresses(AF_INET.0 as u32, flags, None, Some(list), &mut size) };
+        let status = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, Some(list), &mut size) };
         if status == ERROR_BUFFER_OVERFLOW.0 {
             buf.resize((size as usize).div_ceil(8), 0);
             continue;
@@ -1720,14 +1733,28 @@ fn default_interface() -> Option<NetworkInfo> {
         while !adapter.is_null() {
             let a = unsafe { &*adapter };
             if unsafe { a.Anonymous1.Anonymous.IfIndex } == index {
-                let ipv4 = (!a.FirstUnicastAddress.is_null()).then(|| {
-                    let socket = unsafe { (*a.FirstUnicastAddress).Address.lpSockaddr as *const SOCKADDR_IN };
-                    dotted(unsafe { (*socket).sin_addr.S_un.S_addr })
-                });
+                // Its addresses: the first of IPv4, and of IPv6 a stable one the internet reaches.
+                let (mut ipv4, mut ipv6) = (None, Vec::new());
+                let mut unicast = a.FirstUnicastAddress;
+                while !unicast.is_null() {
+                    let one = unsafe { &*unicast };
+                    let socket = one.Address.lpSockaddr;
+                    match unsafe { (*socket).sa_family } {
+                        family if family == AF_INET && ipv4.is_none() => ipv4 = Some(dotted(unsafe { (*(socket as *const SOCKADDR_IN)).sin_addr.S_un.S_addr })),
+                        family if family == AF_INET6 => ipv6.push(V6 {
+                            address: std::net::Ipv6Addr::from(unsafe { (*(socket as *const SOCKADDR_IN6)).sin6_addr.u.Byte }),
+                            suffix: one.SuffixOrigin.0,
+                            preferred: one.DadState == IpDadStatePreferred,
+                        }),
+                        _ => {}
+                    }
+                    unicast = one.Next;
+                }
                 return Some(NetworkInfo {
                     name: unsafe { a.FriendlyName.to_string() }.unwrap_or_default(),
                     model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
+                    ipv6: stable_ipv6(&ipv6).map(|address| address.to_string()),
                     gateway,
                     link_bps: a.ReceiveLinkSpeed,
                     wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name_on(&adapter, a.NetworkGuid)),
@@ -1737,6 +1764,51 @@ fn default_interface() -> Option<NetworkInfo> {
         }
         return None;
     }
+}
+
+/// One of an interface's IPv6 addresses as Windows lists it: how its last 64 bits were made (`NL_SUFFIX_ORIGIN`), and
+/// whether it is in use (its duplicate check passed, not deprecated).
+struct V6 {
+    address: std::net::Ipv6Addr,
+    suffix: i32,
+    preferred: bool,
+}
+
+/// Of an interface's IPv6 addresses `listed`, the one to show: one the internet reaches (global unicast, 2000::/3, not
+/// a link-local or unique-local one), in use, and stable, not a temporary one (made at random for privacy, replaced
+/// every day or so: `IpSuffixOriginRandom`). Of those, one set by hand first, then one a DHCPv6 server gave, then one
+/// made from the router's prefix (by the adapter or, as Windows makes it, stable for the network).
+fn stable_ipv6(listed: &[V6]) -> Option<std::net::Ipv6Addr> {
+    // (NL_SUFFIX_ORIGIN: manual 1, well known 2, DHCP 3, link layer 4, random 5.)
+    let rank = |suffix: i32| match suffix {
+        1 => Some(0),
+        3 => Some(1),
+        4 => Some(2),
+        _ => None,
+    };
+    listed
+        .iter()
+        .filter(|one| one.preferred && one.address.segments()[0] & 0xE000 == 0x2000)
+        .filter_map(|one| Some((rank(one.suffix)?, one.address)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, address)| address)
+}
+
+/// Each physical drive's reading and writing, from the instances of `\PhysicalDisk(*)` `read` and `written` (each by
+/// its name, the drive's number then its volumes' letters, "1 D: E:"): the whole (`_Total`) left out, as is an instance
+/// not named by a number.
+fn drive_rates(read: &[(String, Option<f64>)], written: &[(String, Option<f64>)]) -> Vec<crate::reading::DriveRate> {
+    let number = |name: &str| name.split_whitespace().next()?.parse::<u32>().ok();
+    let mut rates: Vec<crate::reading::DriveRate> = read
+        .iter()
+        .filter_map(|(name, read)| {
+            let id = number(name)?;
+            let write = written.iter().find(|(other, _)| other == name).and_then(|(_, write)| *write);
+            Some(crate::reading::DriveRate { id, read: *read, write })
+        })
+        .collect();
+    rates.sort_by_key(|rate| rate.id);
+    rates
 }
 
 /// The wireless network the adapter `adapter` is on, by its name, as `wifi_name` says; asked of Windows only as the
@@ -1944,6 +2016,34 @@ pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Of an interface's IPv6 addresses, a stable one the internet reaches: not a temporary one (made at random), a
+    /// link-local or unique-local one, or one not in use; one set by hand before one a DHCPv6 server gave, before one
+    /// made from the router's prefix; none where there is none such.
+    #[test]
+    fn shows_a_stable_ipv6_address_the_internet_reaches() {
+        let v6 = |address: &str, suffix: i32, preferred: bool| V6 { address: address.parse().unwrap(), suffix, preferred };
+        // (As this PC lists them: made from the router's prefix, a temporary one, one from DHCPv6, link-local.)
+        let listed = [v6("2409:8a20:1:2:a1b2:c3d4:e5f6:1", 4, true), v6("2409:8a20:1:2:9999:8888:7777:6666", 5, true), v6("2409:8a20:1:2::1a2b", 3, true), v6("fe80::1234", 4, true)];
+        assert_eq!(stable_ipv6(&listed), Some("2409:8a20:1:2::1a2b".parse().unwrap()));
+        assert_eq!(stable_ipv6(&listed[..2]), Some("2409:8a20:1:2:a1b2:c3d4:e5f6:1".parse().unwrap()));
+        assert_eq!(stable_ipv6(&[v6("2001:db8::5", 1, true), v6("2409:8a20:1:2::1a2b", 3, true)]), Some("2001:db8::5".parse().unwrap()));
+        // A temporary one alone, link-local or unique-local ones (Tailscale's), one not in use: none.
+        assert_eq!(stable_ipv6(&[v6("2409:8a20:1:2:9999:8888:7777:6666", 5, true), v6("fe80::1234", 4, true), v6("fd7a:115c:a1e0::1", 1, true), v6("2409:8a20:1:2::9", 3, false)]), None);
+        assert_eq!(stable_ipv6(&[]), None);
+    }
+
+    /// Each physical drive's reading and writing as Windows counts each by its number and its volumes, the whole and
+    /// what is not a drive's number left out, in the drives' order; one written unread there, unread.
+    #[test]
+    fn reads_each_drives_rates_by_its_number() {
+        let at = |name: &str, value: Option<f64>| (name.to_string(), value);
+        let read = [at("1 D: E:", Some(7.0e6)), at("0 C:", Some(512.0)), at("_Total", Some(7.0e6)), at("2", Some(0.0)), at("x", Some(1.0))];
+        let written = [at("0 C:", Some(8.3e6)), at("_Total", Some(9.0e6)), at("1 D: E:", None)];
+        let rate = |id, read, write| crate::reading::DriveRate { id, read, write };
+        assert_eq!(drive_rates(&read, &written), [rate(0, Some(512.0), Some(8.3e6)), rate(1, Some(7.0e6), None), rate(2, Some(0.0), None)]);
+        assert!(drive_rates(&[], &written).is_empty());
+    }
+
     /// Space on the drives is read on a thread of its own: a drive slow to answer holds no sample, which takes what
     /// was read last (none before the first reading), and the reading asked anew.
     #[test]

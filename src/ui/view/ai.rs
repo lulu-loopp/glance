@@ -342,7 +342,7 @@ impl Told {
         match self {
             Told::Head { title, aside } => head(title.clone(), "", aside.clone(), false),
             Told::Ai(block) => Block::Ai(block.clone()),
-            Told::Facts(rows) => Block::Facts { rows: rows.clone(), gap: GAP },
+            Told::Facts(rows) => Block::Facts { rows: rows.clone(), gap: GAP, presses: Vec::new() },
         }
     }
 }
@@ -618,7 +618,7 @@ fn failed_words(failed: crate::ai::Failed, keyed: bool, lang: Lang) -> &'static 
 /// yet; or, read for a plan (`of_a_plan`), that it holds none (it told no plan's windows).
 #[cfg(windows)]
 fn account_state(tool: crate::ai::Tool, of_a_plan: bool, usage: &crate::ai::Usage, limit: Option<&crate::ai::Limit>, spent: bool, lang: Lang) -> Option<Block> {
-    let fact = |what: &str, value: &str, hot: bool| Block::Facts { rows: vec![(what.into(), value.into(), hot)], gap: GAP };
+    let fact = |what: &str, value: &str, hot: bool| Block::Facts { rows: vec![(what.into(), value.into(), hot)], gap: GAP, presses: Vec::new() };
     if usage.unkeyed.contains(&tool) {
         return (!spent).then(|| fact(lang.pick("API 密钥", "API key"), lang.pick("未设置", "Not set"), false));
     }
@@ -860,7 +860,7 @@ pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai:
     };
     let mut blocks = vec![head(lang.pick("会话", "Sessions"), "", aside, false)];
     if sessions.is_empty() {
-        blocks.push(Block::Facts { rows: vec![(lang.pick("今日会话", "Today").into(), lang.pick("暂无", "None").into(), false)], gap: GAP });
+        blocks.push(Block::Facts { rows: vec![(lang.pick("今日会话", "Today").into(), lang.pick("暂无", "None").into(), false)], gap: GAP, presses: Vec::new() });
         return blocks;
     }
     let shown = working.clamp(SESSIONS_TOLD, SESSIONS_AT_WORK);
@@ -937,7 +937,7 @@ fn session_row(session: &crate::ai::Session, usage: &crate::ai::Usage, now: u64,
 
 /// A lane's row while it is being read.
 fn reading(lang: Lang) -> Block {
-    Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), lang.pick("正在读取", "Reading").into(), false)], gap: GAP }
+    Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), lang.pick("正在读取", "Reading").into(), false)], gap: GAP, presses: Vec::new() }
 }
 
 /// The limit `tool` last told: its own (Codex's "codex"), else the first told.
@@ -1006,7 +1006,7 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
         let tools: Vec<(crate::ai::Tool, u64)> = usage.days.iter().map(|(tool, days)| (*tool, days[6])).filter(|(_, spent)| *spent > 0).collect();
         if tools.len() > 1 {
             let named = |tool| SOURCES.into_iter().find(|source| tool_of(*source) == tool).map_or("", Source::tool_name);
-            blocks.push(Block::Facts { rows: tools.into_iter().map(|(tool, spent)| (named(tool).into(), short(spent, lang), false)).collect(), gap: GAP });
+            blocks.push(Block::Facts { rows: tools.into_iter().map(|(tool, spent)| (named(tool).into(), short(spent, lang), false)).collect(), gap: GAP, presses: Vec::new() });
         }
         return Some(blocks);
     }
@@ -1038,7 +1038,7 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
             Lang::Zh => format!("{}，额度来自本机记录", failed_words(*failed, false, lang)),
             Lang::En => format!("{}, limits from this PC's records", failed_words(*failed, false, lang)),
         };
-        blocks.push(Block::Facts { rows: vec![(lang.pick("状态", "State").into(), said, true)], gap: GAP });
+        blocks.push(Block::Facts { rows: vec![(lang.pick("状态", "State").into(), said, true)], gap: GAP, presses: Vec::new() });
     }
     let shown_limit = !windows.is_empty();
     if shown_limit {
@@ -1056,7 +1056,7 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
         let today = open.is_none() && (spent == 0 || if source.keyed() { !shown_limit } else { limit.is_none() });
         if today {
             let told = if spent == 0 { lang.pick("暂无", "None").to_string() } else { short(spent, lang) };
-            blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), told, false)], gap: GAP });
+            blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), told, false)], gap: GAP, presses: Vec::new() });
         }
         return Some(blocks);
     }

@@ -2992,6 +2992,8 @@ impl Widgets {
                     let rest = widget.resting.due().filter(|_| !widget.carding).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     // (And the preview's shortcut due to be said, or coming in.)
                     let rest = widget.preview_hint.due(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
+                    // (And an address's row due to stop saying it was copied.)
+                    let rest = view::copied_until(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
@@ -4551,6 +4553,10 @@ impl Widget {
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
                                 Some(view::Hit::Folder(number)) => crate::panel::open_folder(number),
+                                Some(view::Hit::Address(address)) => {
+                                    crate::panel::copy_address(address, self.window.hwnd);
+                                    self.next_frame = Instant::now();
+                                }
                                 // Its process list sorted by the header clicked, as a panel's is (the sort is one for
                                 // all: kept, every one shows it as it restyles).
                                 Some(view::Hit::Sort(sort)) => {

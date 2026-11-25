@@ -3942,11 +3942,11 @@ impl Ui {
                 None => return 0.0,
             },
             Row::Element(name) => match self.item_label("lyrics", name).1 {
-                Some(word) => (Cow::Borrowed(word), width - 2.0 * ROW_SIDE - 40.0 - 16.0),
+                Some(word) => (word, width - 2.0 * ROW_SIDE - 40.0 - 16.0),
                 None => return 0.0,
             },
             Row::Item(id, name) => match self.item_label(id, name).1 {
-                Some(word) => (Cow::Borrowed(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
+                Some(word) => (word, width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
                 None => return 0.0,
             },
             // (Its word beside the grip, left of its switch and chevron: see `module_row`.)
@@ -5635,11 +5635,12 @@ It can be disconnected here at any time, and the status line command put back.",
                 ("memory", "speed") => info.memory_speed.is_some(),
                 ("battery", "power") => seen.battery_power,
                 ("battery", "health") => seen.battery_health,
-                ("network", "address") => seen.address,
+                ("network", "address") => seen.address || seen.ipv6,
                 ("network", "gateway") => seen.gateway,
                 ("network", "wifi") => seen.wifi,
                 ("network", "link") => seen.link,
                 ("disk", "drives") => !seen.drives.is_empty() || info.drives.len() > 1,
+                ("disk", "rates") => info.drives.len() > 1,
                 ("disk", "active") => seen.disk_active,
                 ("storage", "volumes") => !seen.volumes.is_empty(),
                 ("time", "lyrics") => prefs::LYRICS_OFFERED,
@@ -5726,7 +5727,7 @@ It can be disconnected here at any time, and the status line command put back.",
     }
 
     /// What an item of module `id` is called, and a word on it.
-    fn item_label(&self, id: &str, name: &str) -> (Cow<'static, str>, Option<&'static str>) {
+    fn item_label(&self, id: &str, name: &str) -> (Cow<'static, str>, Option<Cow<'static, str>>) {
         let id = id.trim_start_matches(WORKBENCH);
         match name.split_once(':') {
             // A drive, by its letter.
@@ -5741,9 +5742,26 @@ It can be disconnected here at any time, and the status line command put back.",
             Some((group, sensor)) => (Cow::Owned(self.prefs.sensor_name(&crate::app().info().board, group, sensor, self.lang)), None),
             None => {
                 let (label, word) = self.module_item_label(id, name);
-                (Cow::Borrowed(label), word)
+                (Cow::Borrowed(label), self.item_now(id, name, word).or(word.map(Cow::Borrowed)))
             }
         }
+    }
+
+    /// The word on an item that tells what the item shows as it is now, where it does: the network's addresses and its
+    /// link speed (after the item's own word `word`, if it has one).
+    fn item_now(&self, id: &str, name: &str, word: Option<&'static str>) -> Option<Cow<'static, str>> {
+        if id != "network" {
+            return None;
+        }
+        let latest = crate::app().controller.history.latest()?;
+        let network = latest.network.as_ref()?;
+        let now: Vec<String> = match name {
+            "address" => [network.ipv4.clone(), network.ipv6.clone()].into_iter().flatten().collect(),
+            "gateway" => network.gateway.clone().into_iter().collect(),
+            "link" => (network.link_bps > 0).then(|| crate::ui::text::link_speed(network.link_bps)).into_iter().collect(),
+            _ => return None,
+        };
+        (!now.is_empty()).then(|| Cow::Owned(now_said(self.lang, word, &now)))
     }
 
     /// What one of the items every module of kind `id` has is called, and a word on it.
@@ -5823,6 +5841,7 @@ It can be disconnected here at any time, and the status line command put back.",
             (_, "latency") => (p("网络延迟", "Latency"), Some(p("定时向下方所选地址发送 ping 并记录往返时间", "Pings the address chosen below at each refresh and shows the round trip"))),
             (_, "loss") => (p("丢包率", "Packet loss"), Some(p("最近 60 次 ping 中未收到回应的比例", "The share of the last 60 pings that went unanswered"))),
             (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
+            (_, "rates") => (p("各硬盘读写", "Each drive's rates"), Some(p("每块硬盘各自的读取与写入速度", "How fast each drive reads and writes"))),
             (_, "active") => (p("活动时间", "Active time"), None),
             _ => (p("其他", "Other"), None),
         }
@@ -7198,7 +7217,7 @@ It can be disconnected here at any time, and the status line command put back.",
                     let (title, word) = self.item_label("lyrics", name);
                     let on = self.item_on("lyrics", name);
                     let switch_left = left + width - ROW_SIDE - 40.0;
-                    field_label(frame, palette, &title, word, label, hint, left + ROW_SIDE, y + row_height / 2.0, switch_left - 16.0 - left - ROW_SIDE);
+                    field_label(frame, palette, &title, word.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, switch_left - 16.0 - left - ROW_SIDE);
                     let target = Target::Element(name);
                     let pressed = self.pressed == Some(target.clone());
                     self.toggle(frame, palette, format!("element:{name}"), on, true, switch_left, y + row_height / 2.0, now, pressed);
@@ -7427,7 +7446,7 @@ It can be disconnected here at any time, and the status line command put back.",
                         // A sensor of the board: its name, and just after it the button that names it, shown as the
                         // pointer is on the row or on it, or as it has the focus.
                         let pen = Target::Rename(id.clone(), name.clone());
-                        field_label_in(frame, colors, &name_text, detail, label, hint, words_left, cy, room - PEN - 4.0);
+                        field_label_in(frame, colors, &name_text, detail.as_deref(), label, hint, words_left, cy, room - PEN - 4.0);
                         let pen_left = words_left + frame.gfx.measure(&name_text, label).min(room - PEN - 4.0) + 4.0;
                         let lit = self.hovered_now.as_ref() == Some(&pen);
                         let focused = self.keyboard && self.focus.as_ref() == Some(&pen);
@@ -7439,7 +7458,7 @@ It can be disconnected here at any time, and the status line command put back.",
                         }
                         self.targets.push((Rect { x: pen_left, y: cy - PEN / 2.0, w: PEN, h: PEN }, pen));
                     } else {
-                        field_label_in(frame, colors, &name_text, detail, label, hint, words_left, cy, room);
+                        field_label_in(frame, colors, &name_text, detail.as_deref(), label, hint, words_left, cy, room);
                     }
                     let pressed = self.pressed == Some(target.clone());
                     let on = self.item_on(&id, &name);
@@ -8833,6 +8852,19 @@ fn lines_of(widths: &[f32], room: f32) -> Vec<std::ops::Range<usize>> {
 
 /// A row's label, and below it, if there is one, its hint, centred together on `cy`.
 #[allow(clippy::too_many_arguments)]
+/// An item's word with what it shows now, `now` (each address, the speed) after it, in the words of `lang`.
+fn now_said(lang: Lang, word: Option<&str>, now: &[String]) -> String {
+    let now = match lang {
+        Lang::Zh => format!("当前为 {}", now.join("，")),
+        Lang::En => format!("Now {}", now.join(", ")),
+    };
+    match word {
+        Some(word) if lang == Lang::Zh => format!("{word}，{now}"),
+        Some(word) => format!("{word}. {now}"),
+        None => now,
+    }
+}
+
 fn field_label(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
     field_label_in(frame, (palette.text, palette.text2), label, hint, label_font, hint_font, x, cy, width);
 }
@@ -9824,6 +9856,16 @@ mod pictures {
 
 #[cfg(test)]
 mod tests {
+    /// An item's word tells what it shows now after the item's own word (each address, the speed), or alone.
+    #[test]
+    fn an_items_word_tells_what_it_shows_now() {
+        let now = ["10.0.0.19".to_string(), "2603:6010::19".to_string()];
+        assert_eq!(super::now_said(Lang::Zh, None, &now), "当前为 10.0.0.19，2603:6010::19");
+        assert_eq!(super::now_said(Lang::En, None, &now), "Now 10.0.0.19, 2603:6010::19");
+        assert_eq!(super::now_said(Lang::Zh, Some("访问互联网时经过的路由器"), &now[..1]), "访问互联网时经过的路由器，当前为 10.0.0.19");
+        assert_eq!(super::now_said(Lang::En, Some("The router"), &now[..1]), "The router. Now 10.0.0.19");
+    }
+
     use super::*;
 
     /// The board's sensors not read, it is said why: on a laptop, that its maker's controller keeps them (as most

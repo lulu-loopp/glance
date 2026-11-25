@@ -198,6 +198,8 @@ impl Sampler {
             network: primary_interface(self.network.as_ref(), interfaces.as_ref()),
             disk_read: disk_rates.map(|rates| rates.0),
             disk_write: disk_rates.map(|rates| rates.1),
+            // (One disk's rates on a Mac: the whole.)
+            drive_rates: Vec::new(),
             // macOS does not keep the disks' busy time.
             disk_active: None,
             volumes: volumes(),
@@ -426,7 +428,7 @@ fn primary_interface(network: Option<&Network>, interfaces: Option<&HashMap<Stri
     let bsd = network?.primary()?;
     let shown = display_name(&bsd).unwrap_or_else(|| bsd.clone());
     let link_bps = interfaces.and_then(|interfaces| interfaces.get(&bsd)).map_or(0, |(_, _, speed)| *speed);
-    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), gateway: None, link_bps, wifi: None })
+    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), ipv6: None, gateway: None, link_bps, wifi: None })
 }
 
 /// An interface's IPv4 address.

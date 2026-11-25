@@ -31,6 +31,7 @@ pub struct Seen {
     /// The disks' busy time (which macOS does not keep).
     pub disk_active: bool,
     pub address: bool,
+    pub ipv6: bool,
     pub gateway: bool,
     pub wifi: bool,
     pub link: bool,
@@ -120,6 +121,7 @@ impl Seen {
         self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
+            self.ipv6 |= network.ipv6.is_some();
             self.gateway |= network.gateway.is_some();
             self.wifi |= network.wifi.is_some();
             self.link |= network.link_bps > 0;
@@ -182,6 +184,7 @@ impl Seen {
             "wsl" => flag(self.wsl, other.wsl, Item::Wsl),
             "network" => {
                 flag(self.address, other.address, Item::Address);
+                flag(self.ipv6, other.ipv6, Item::Ipv6);
                 flag(self.gateway, other.gateway, Item::Gateway);
                 flag(self.wifi, other.wifi, Item::Wifi);
                 flag(self.link, other.link, Item::Link);
@@ -267,6 +270,7 @@ impl Seen {
             Item::Dimms(count) => seen.dimms = *count,
             Item::Containers(count) => seen.containers = *count,
             Item::Address => seen.address = true,
+            Item::Ipv6 => seen.ipv6 = true,
             Item::Gateway => seen.gateway = true,
             Item::Wifi => seen.wifi = true,
             Item::Link => seen.link = true,
@@ -335,6 +339,7 @@ pub enum Item {
     /// Docker's containers, this many (one more).
     Containers(usize),
     Address,
+    Ipv6,
     Gateway,
     Wifi,
     Link,

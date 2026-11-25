@@ -185,6 +185,11 @@ const MIN_FRAME_SCALE: f64 = 10.0;
 /// centred on the name's ink, not its line (a name of capitals and a colon
 /// has no descender, and sits high in its line).
 fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: f32) {
+    pressed_marked(frame, theme, label, left, top, Icon::Folder);
+}
+
+/// As `opens_marked`, `icon` after the label telling what a press does.
+fn pressed_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: f32, icon: Icon) {
     let font = theme.small;
     let (ink_top, ink_bottom) = frame.ink(label, font);
     let wide = frame.measure(label, font);
@@ -194,13 +199,56 @@ fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: 
     }
     let middle = top + (ink_top + ink_bottom) / 2.0;
     let ink = if theme.skin == Skin::Fluent { super::theme::accent(theme.dark) } else { theme.text2 };
-    frame.icon(Icon::Folder, Point { x: left + wide + 5.0 + 6.0, y: middle }, 12.0, ink);
+    frame.icon(icon, Point { x: left + wide + 5.0 + 6.0, y: middle }, 12.0, ink);
+}
+
+/// One of the addresses the network module tells, as a press on its row copies it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Address {
+    V4,
+    V6,
+    Gateway,
+}
+
+/// How long a row says its address was copied, a press on it having copied it.
+pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The address copied last, and when (see `Address::copied`).
+static COPIED: std::sync::Mutex<Option<(Address, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// When the row saying an address was copied goes back to its name (none while none says so): every panel and widget
+/// telling it drawn again then.
+pub fn copied_until(now: std::time::Instant) -> Option<std::time::Instant> {
+    COPIED.lock().unwrap().map(|(_, at)| at + COPIED_FOR).filter(|until| *until > now)
+}
+
+impl Address {
+    /// Copied at `now`: its rows say so for `COPIED_FOR`.
+    pub fn noted_copied(self, now: std::time::Instant) {
+        *COPIED.lock().unwrap() = Some((self, now));
+    }
+
+    /// Whether its rows say it was copied, at `now`.
+    pub fn copied(self, now: std::time::Instant) -> bool {
+        COPIED.lock().unwrap().is_some_and(|(copied, at)| copied == self && now < at + COPIED_FOR)
+    }
+
+    /// It, of the interface `network` (none where it has none).
+    pub fn of(self, network: &crate::reading::NetworkInfo) -> Option<&str> {
+        match self {
+            Address::V4 => network.ipv4.as_deref(),
+            Address::V6 => network.ipv6.as_deref(),
+            Address::Gateway => network.gateway.as_deref(),
+        }
+    }
 }
 
 /// What a click or a wheel turn on the panel lands on.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum Hit {
     Settings,
+    /// One of the network's addresses, a press copying it (see `Address`).
+    Address(Address),
     Pin,
     /// The music shown over the whole of its screen.
     Full,
@@ -1000,7 +1048,8 @@ enum Block {
     Threads(Vec<(Option<f32>, bool, String)>),
     /// A labelled bar; `opens`: a click on it opens that drive (its place among those seen: see `Hit::Drive`).
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<char> },
-    Facts { rows: Vec<(String, String, bool)>, gap: f32 },
+    /// Rows of a label and its value (hot or not); `presses`: the rows a press on does something, each by its hit.
+    Facts { rows: Vec<(String, String, bool)>, gap: f32, presses: Vec<(usize, Hit)> },
     /// The wireless devices connected now, each its charge's ring round its icon (see `Devices`): rings alone in a row
     /// where `rings` (each told by its icon), else a row for each, named, its charge after it.
     Devices { devices: Vec<DeviceSample>, rings: bool, full: bool },
@@ -2957,7 +3006,7 @@ impl Block {
             Block::Trace { gap, .. } => gap + RATE_PLOT,
             Block::Threads(_) => 10.0 + 14.0,
             Block::Meter { gap, .. } => gap + LINE,
-            Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
+            Block::Facts { rows, gap, .. } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
             Block::Facts { .. } => 0.0,
             Block::Devices { devices, rings: true, .. } => DEVICE_RINGS_TOP + rings_tall(devices.len()),
             Block::Devices { devices, rings: false, .. } => devices.len() as f32 * (DEVICE_ROW_GAP + DEVICE_ROW),
@@ -2996,7 +3045,7 @@ impl Hash for Block {
             Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
-            Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
+            Block::Facts { rows, gap, presses } => (rows, gap.to_bits(), presses).hash(state),
             Block::Devices { devices, rings, full } => (devices, rings, full).hash(state),
             Block::Sound { level, muted, output, open } => (level, muted, output, open).hash(state),
             Block::Playing { title, about, playing, players } => (title, about, playing, players).hash(state),
@@ -3670,7 +3719,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, had_temp && temp.is_some_and(|t| t > hot_temp)),
                 readout(s.cpu, std::rc::Rc::new(|s| s.cpu.map(f64::from))),
-                Block::Facts { rows: facts, gap: 10.0 },
+                Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() },
             ];
             let threads = scene.seen.threads;
             if full && on("threads") && threads > 0 {
@@ -3755,7 +3804,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 facts.push((lang.pick("共享显存", "Shared").into(), shown(reading.and_then(|g| g.shared_used), |used| text::usage(used, gpu.shared_total)), false));
             }
             if full {
-                blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+                blocks.push(Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() });
             }
             blocks
         }
@@ -3795,7 +3844,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     hot: percent > hot_load,
                     plot: chart.then(|| Plot::new(scene, vec![std::rc::Rc::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64))),
                 },
-                Block::Facts { rows: facts, gap: 10.0 },
+                Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() },
             ]
         }
         "network" => {
@@ -3810,11 +3859,25 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("wifi") && scene.seen.wifi {
                 facts.push(("Wi-Fi".into(), shown(adapter.and_then(|a| a.wifi.clone()), |name| name), false));
             }
+            // Each address a press on copies (one it has now): its row's name says so for a while.
+            let mut presses = Vec::new();
+            let now = std::time::Instant::now();
+            let mut address = |facts: &mut Vec<(String, String, bool)>, address: Address, name: &str| {
+                let value = adapter.and_then(|a| address.of(a));
+                if value.is_some() {
+                    presses.push((facts.len(), Hit::Address(address)));
+                }
+                let name = if address.copied(now) { lang.pick("已复制", "Copied").to_string() } else { name.to_string() };
+                facts.push((name, shown(value, str::to_string), false));
+            };
             if on("address") && scene.seen.address {
-                facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
+                address(&mut facts, Address::V4, "IPv4");
+            }
+            if on("address") && scene.seen.ipv6 {
+                address(&mut facts, Address::V6, "IPv6");
             }
             if on("gateway") && scene.seen.gateway {
-                facts.push((lang.pick("网关", "Gateway").into(), shown(adapter.and_then(|a| a.gateway.clone()), |ip| ip), false));
+                address(&mut facts, Address::Gateway, lang.pick("网关", "Gateway"));
             }
             let link = |s: &Sample| s.network.as_ref().map(|a| a.link_bps).filter(|bps| *bps > 0);
             if on("link") && scene.seen.link {
@@ -3833,6 +3896,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             if !full {
                 facts.clear();
+                presses.clear();
             }
             vec![
                 // The network it is on (the wireless network's name, else the connection's), by the adapter traffic
@@ -3846,7 +3910,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     plot: chart.then_some(plot),
                     scale: if chart { text::rate(scale, bits) } else { String::new() },
                 },
-                Block::Facts { rows: facts, gap: 10.0 },
+                Block::Facts { rows: facts, gap: 10.0, presses },
             ]
         }
         "disk" => {
@@ -3861,13 +3925,27 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             // its temperature (unread, for one that gives none).
             // (Those the machine started with, and any that has given a
             // temperature since: one plugged in later.)
+            // Each line tells the drive's reading and writing (as switched on), then its temperature (as switched on).
             let mut all: Vec<(u32, &String)> = info.drive_ids.iter().copied().zip(&info.drives).collect();
             all.extend(drives.iter().filter(|(id, _)| !info.drive_ids.contains(id)).map(|(id, name)| (*id, name)));
-            let every = if on("drives") { all.len() } else { 0 };
+            let every = if on("drives") || on("rates") { all.len() } else { 0 };
             if every > 1 {
                 for (id, name) in &all {
                     let value = temp(*id);
-                    facts.push(((*name).clone(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
+                    let mut said = Vec::new();
+                    // (A drive whose rates are not read tells its temperature alone, or that it is not read.)
+                    if let Some(rates) = s.drive_rates.iter().find(|rate| rate.id == *id).filter(|_| on("rates")) {
+                        let rate = |of: Option<f64>| shown(of, |rate| text::rate(rate, false));
+                        said.push(match lang {
+                            Lang::Zh => format!("读 {}，写 {}", rate(rates.read), rate(rates.write)),
+                            Lang::En => format!("R {}, W {}", rate(rates.read), rate(rates.write)),
+                        });
+                    }
+                    // (Its temperature, where it gives one: that it is not read, only where nothing else is told.)
+                    if on("drives") && value.is_some() || said.is_empty() {
+                        said.push(shown(value.filter(|_| on("drives")), celsius));
+                    }
+                    facts.push(((*name).clone(), said.join(" · "), on("drives") && value.is_some_and(|t| t > hot_temp)));
                 }
             }
             if on("active") {
@@ -3889,7 +3967,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     plot: chart.then_some(plot),
                     scale: if chart { text::rate(scale, false) } else { String::new() },
                 },
-                Block::Facts { rows: facts, gap: 10.0 },
+                Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() },
             ]
         }
         "processes" => {
@@ -3958,6 +4036,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         })
                         .collect(),
                     gap: 0.0,
+                    presses: Vec::new(),
                 },
                 Block::Facts {
                     rows: fans
@@ -3966,6 +4045,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         .map(|n| (named(n, "fans"), shown(value(board.map(|b| &b.fans), n), |rpm| format!("{rpm:.0} RPM")), false))
                         .collect(),
                     gap: 10.0,
+                    presses: Vec::new(),
                 },
             ]
         }
@@ -4057,7 +4137,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     gap: 10.0,
                 });
             }
-            blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+            blocks.push(Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() });
             blocks
         }
         "battery" => {
@@ -4101,7 +4181,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     hot: battery.is_some_and(|b| !b.plugged && b.percent <= 20),
                     plot: chart.then(|| Plot::new(scene, vec![std::rc::Rc::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
-                Block::Facts { rows: facts, gap: 8.0 },
+                Block::Facts { rows: facts, gap: 8.0, presses: Vec::new() },
             ]
         }
         "docker" => {
@@ -4143,7 +4223,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     scrolls: false,
                     widths: CONTAINER_COLUMNS,
                 },
-                Block::Facts { rows: vec![(if context.is_empty() { "Docker".into() } else { context }, state, false)], gap: 6.0 },
+                Block::Facts { rows: vec![(if context.is_empty() { "Docker".into() } else { context }, state, false)], gap: 6.0, presses: Vec::new() },
             ]
         }
         "devices" => {
@@ -4300,6 +4380,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         .take(if full { usize::MAX } else { 1 })
                         .collect(),
                     gap: 0.0,
+                    presses: Vec::new(),
                 },
             ]
         }
@@ -5176,11 +5257,23 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                 let how = Devices::of(*rings, *full, devices.len(), height, room, width, width - wider);
                 paint_devices(frame, scene, ink, devices, how, (left, y, width), &part);
             }
-            (Block::Facts { rows, gap }, Pass::Content) => {
+            (Block::Facts { rows, gap, presses }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
                     let row_y = y + gap + i as f32 * (LINE + FACT_GAP);
                     part(&i.to_string());
-                    frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
+                    // A row a press on does something (copies its value): its hit across it, and under the pointer its
+                    // label in full ink, marked as its skin marks what is pressed, with what a press does after it.
+                    let pressed = presses.iter().find(|(row, _)| *row == i).map(|(_, hit)| *hit);
+                    if let Some(hit) = pressed {
+                        hits.push((left, row_y, width, LINE, hit));
+                    }
+                    let hovered = pressed.is_some_and(|hit| scene.hover == Some(hit));
+                    let words = if hovered { theme.text } else { theme.text2 };
+                    let name = if hovered && theme.skin == Skin::Fluent { super::theme::accent(theme.dark) } else { words };
+                    if hovered {
+                        pressed_marked(frame, theme, label, left, row_y, Icon::Copy);
+                    }
+                    frame.text(label, theme.small, name, left, row_y, LABEL, Align::Start);
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
                 }
@@ -9800,6 +9893,77 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The network module tells its IPv4 and IPv6 addresses and its gateway (each as it has been seen), a press on each
+    /// one it has now copying it; the one copied says so in place of its name for a while, then its name again.
+    #[test]
+    fn the_network_tells_its_addresses_a_press_copies() {
+        use super::*;
+        use crate::reading::NetworkInfo;
+        let network = |ipv6: Option<&str>| NetworkInfo { name: "Ethernet".into(), model: "Realtek".into(), ipv4: Some("10.0.0.19".into()), ipv6: ipv6.map(str::to_string), gateway: Some("10.0.0.1".into()), link_bps: 0, wifi: None };
+        let info = info();
+        let theme = Theme::new(Skin::Glass, true);
+        let mut prefs = Prefs::resolve(&serde_json::Value::Null, &["network".to_string()]);
+        prefs.set_item("network", "address", true);
+        prefs.set_item("network", "gateway", true);
+        let facts = |history: &'static [Arc<Sample>], seen: &Seen| {
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+            let blocks = lane(&scene, "network", Detail::Full).unwrap();
+            blocks.into_iter().find_map(|block| if let Block::Facts { rows, presses, .. } = block { Some((rows.into_iter().map(|(name, value, _)| format!("{name}: {value}")).collect::<Vec<_>>(), presses)) } else { None }).unwrap()
+        };
+        let leak = |sample: Sample| -> &'static [Arc<Sample>] { Box::leak(Box::new([Arc::new(sample)])) };
+        let both = leak(Sample { network: Some(network(Some("2603:6010::19"))), ..sample(None, None, None) });
+        let seen = Seen::of(both);
+        let (rows, presses) = facts(both, &seen);
+        let at = |name: &str| rows.iter().position(|row| row.starts_with(name)).unwrap();
+        assert_eq!(rows[at("IPv4")..=at("网关")], ["IPv4: 10.0.0.19", "IPv6: 2603:6010::19", "网关: 10.0.0.1"]);
+        assert_eq!(presses, [(at("IPv4"), Hit::Address(Address::V4)), (at("IPv6"), Hit::Address(Address::V6)), (at("网关"), Hit::Address(Address::Gateway))]);
+        // (The IPv6 address gone, as seen before: its line stays, unread, and a press on it does nothing.)
+        let (rows, presses) = facts(leak(Sample { network: Some(network(None)), ..sample(None, None, None) }), &seen);
+        assert!(rows.contains(&"IPv6: —".to_string()));
+        assert!(!presses.iter().any(|(_, hit)| *hit == Hit::Address(Address::V6)));
+        // (Never seen: no line.)
+        let none = leak(Sample { network: Some(network(None)), ..sample(None, None, None) });
+        assert!(!facts(none, &Seen::of(none)).0.iter().any(|row| row.starts_with("IPv6")));
+        // Copied: said so, until `COPIED_FOR` has gone by.
+        let now = std::time::Instant::now();
+        Address::Gateway.noted_copied(now);
+        assert!(facts(both, &seen).0.contains(&"已复制: 10.0.0.1".to_string()));
+        assert!(Address::Gateway.copied(now + COPIED_FOR / 2) && !Address::V4.copied(now));
+        assert!(!Address::Gateway.copied(now + COPIED_FOR));
+        assert_eq!(copied_until(now), Some(now + COPIED_FOR));
+        assert_eq!(copied_until(now + COPIED_FOR), None);
+    }
+
+    /// With more than one drive, each drive's line tells its reading and writing (by the drive's number: one not read
+    /// tells only its temperature, or that it is not read) and its temperature, each as switched on; with neither switched on there are no lines of drives.
+    #[test]
+    fn each_drive_tells_its_reading_and_writing() {
+        use super::*;
+        use crate::reading::{DriveRate, DriveTemperature};
+        let info = StaticInfo { drives: vec!["NVMe".into(), "USB".into()], drive_ids: vec![0, 2], ..info() };
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample {
+            drive_rates: vec![DriveRate { id: 0, read: Some(3.0 * 1024.0 * 1024.0), write: Some(0.0) }, DriveRate { id: 1, read: Some(1.0), write: Some(1.0) }],
+            drive_temps: vec![DriveTemperature { id: 0, name: "NVMe".into(), celsius: 41.0 }],
+            ..sample(None, None, None)
+        })]));
+        let theme = Theme::new(Skin::Glass, true);
+        let seen = Seen::of(history);
+        let rows = |off: &[&str]| {
+            let mut prefs = Prefs::resolve(&serde_json::Value::Null, &["disk".to_string()]);
+            for name in off {
+                prefs.set_item("disk", name, false);
+            }
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+            let blocks = lane(&scene, "disk", Detail::Full).unwrap();
+            let rows = blocks.into_iter().find_map(|block| if let Block::Facts { rows, .. } = block { Some(rows) } else { None }).unwrap();
+            rows.into_iter().map(|(name, value, _)| format!("{name}: {value}")).collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&[]), ["NVMe: 读 3.0 MB/s，写 0 B/s · 41 °C", "USB: —"]);
+        assert_eq!(rows(&["drives"]), ["NVMe: 读 3.0 MB/s，写 0 B/s", "USB: —"]);
+        assert_eq!(rows(&["rates"]), ["NVMe: 41 °C", "USB: —"]);
+        assert!(rows(&["rates", "drives"]).is_empty());
+    }
+
     /// The storage lane tells each folder in its order under its drives, with its size (said, where that is not known),
     /// those of one name with the folder or drive each is in, and takes a folder dragged anywhere on it; with no drives
     /// switched on it tells the folders alone, and with neither there is none.
@@ -10491,6 +10655,7 @@ otepad.exe", "Notepad"),
             network: None,
             disk_read: Some(0.0),
             disk_write: Some(0.0),
+            drive_rates: Vec::new(),
             disk_active: Some(0.0),
             volumes: Vec::new(),
             processes: Vec::new(),

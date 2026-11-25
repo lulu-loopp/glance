@@ -111,7 +111,7 @@ const NETWORK: [Item; 9] = [
     item("latency", false),
     item("loss", false),
 ];
-const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
+const DISK: [Item; 4] = [item("chart", true), item("drives", true), item("rates", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.
 const STORAGE: [Item; 1] = [item("volumes", true)];

@@ -99,6 +99,9 @@ pub struct Sample {
     pub ping_loss: Option<f32>,
     pub disk_read: Option<f64>,
     pub disk_write: Option<f64>,
+    /// Each physical drive's reading and writing (bytes a second), by its number (as `DriveTemperature::id`).
+    #[serde(default)]
+    pub drive_rates: Vec<DriveRate>,
     /// Percent of the time the disks were busy.
     pub disk_active: Option<f32>,
     pub volumes: Vec<VolumeSample>,
@@ -373,6 +376,9 @@ pub struct NetworkInfo {
     pub name: String,
     pub model: String,
     pub ipv4: Option<String>,
+    /// Its IPv6 address the internet reaches it by, a stable one (see `metrics::stable_ipv6`); none where it has none.
+    #[serde(default)]
+    pub ipv6: Option<String>,
     /// The router traffic to the internet goes through, by its IPv4 address; none where there is none (a network of
     /// one's own, nothing between), or where it is not read (macOS, as yet).
     #[serde(default)]
@@ -429,6 +435,15 @@ pub struct BoardSensors {
     pub temps: Vec<(String, f32)>,
     /// Fan headers that report a speed, named the same way, in RPM.
     pub fans: Vec<(String, f32)>,
+}
+
+/// How fast a physical drive reads and writes (bytes a second), by its number (as `\\.\PhysicalDriveN` names it);
+/// unread, either, where Windows did not count it this time.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DriveRate {
+    pub id: u32,
+    pub read: Option<f64>,
+    pub write: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

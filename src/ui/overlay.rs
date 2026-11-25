@@ -1348,6 +1348,7 @@ mod tests {
             network: None,
             disk_read: None,
             disk_write: None,
+            drive_rates: Vec::new(),
             disk_active: None,
             volumes: Vec::new(),
             processes: Vec::new(),

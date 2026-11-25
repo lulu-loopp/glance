@@ -4818,6 +4818,10 @@ impl<'a> Panel<'a> {
         if let Some(due) = self.hint.due(now) {
             self.next_frame = self.next_frame.min(due);
         }
+        // (Or an address's row due to stop saying it was copied.)
+        if let Some(due) = crate::ui::view::copied_until(now) {
+            self.next_frame = self.next_frame.min(due);
+        }
         // The sound's page due to open or close as the pointer rests on the output's name or has left it (see
         // `outputs::Rest`).
         if let Some(due) = self.sound_rest.due() {
@@ -5273,6 +5277,10 @@ impl<'a> Panel<'a> {
             }
             Some(Hit::Drive(letter)) => open_drive(letter),
             Some(Hit::Folder(number)) => open_folder(number),
+            Some(Hit::Address(address)) => {
+                copy_address(address, self.window.hwnd);
+                self.next_frame = Instant::now();
+            }
             Some(hit) if crate::station::pressed(hit) => {}
             Some(Hit::Tab(tab)) => {
                 self.tab = tab;
@@ -5711,6 +5719,15 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
     }
     match hit {
         Hit::Drive(letter) => Some(opens_drive(&format!("{letter}:"), lang)),
+        // (The address whole: a long one shows shortened.)
+        Hit::Address(address) => {
+            let latest = crate::app().controller.history.latest()?;
+            let value = address.of(latest.network.as_ref()?)?.to_string();
+            Some(match lang {
+                Lang::Zh => format!("单击以复制 {value}"),
+                Lang::En => format!("Click to copy {value}"),
+            })
+        }
         Hit::Media(crate::playing::Key::Player, _) => {
             let players = crate::playing::now().map_or(0, |now| now.players);
             Some(match lang {
@@ -5735,6 +5752,16 @@ pub(crate) fn open_drive(letter: char) {
             windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &root, windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
         }
     });
+}
+
+/// The network's address `address` (as it is now) put on the clipboard, its row saying so for a while (see
+/// `view::Address::copied`).
+pub(crate) fn copy_address(address: crate::ui::view::Address, owner: HWND) {
+    let Some(latest) = crate::app().controller.history.latest() else { return };
+    let Some(value) = latest.network.as_ref().and_then(|network| address.of(network)) else { return };
+    if crate::clipboard::put(owner, &[(crate::clipboard::TEXT, crate::clipboard::utf16_z(value))]) {
+        address.noted_copied(Instant::now());
+    }
 }
 
 /// The folder told of that `number` stands for opened in Explorer (see `folders`).
