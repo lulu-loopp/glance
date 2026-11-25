@@ -4497,14 +4497,22 @@ impl<'a> Panel<'a> {
             }
         }
         let (prefs, theme, lang, scroll, tab, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned);
-        let opening = match &mut self.opening {
-            Some(opening) => {
-                // What the machine has shown since joins its lane where it
-                // fits (each lane measured holding what it would hold).
-                let probe = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
-                opening.grow(&now, &info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
-                opening
+        if let Some(opening) = &mut self.opening {
+            // What the machine has shown since joins its lane where it fits (each lane measured holding what it would
+            // hold).
+            let probe = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
+            let height = |id: &str, seen: &Seen, detail| view::lane_height(&probe, id, seen, detail);
+            opening.grow(&now, &info, height);
+            // A lane come or gone since (the devices' as the first joins or the last leaves, Docker's, WSL's, a
+            // volume's), or one holding more than its box now (devices it held come back with others): laid out
+            // anew, holding what it held.
+            let lanes: Vec<String> = view::heights(&probe).into_iter().map(|(id, _)| id).collect();
+            if !opening.lays_out(&lanes) || opening.overflows(|id, seen, detail| view::lane_least(&probe, id, seen, detail)) {
+                self.held = self.opening.take().map(|opening| opening.seen);
             }
+        }
+        let opening = match &mut self.opening {
+            Some(opening) => opening,
             None => {
                 let now = match self.held.take() {
                     Some(held) => held.join(&now, &info),

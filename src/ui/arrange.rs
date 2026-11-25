@@ -494,6 +494,25 @@ impl Opening {
     /// Takes in what the machine has shown since (`now`), lane by lane,
     /// where it fits the lane's box: `height` is a lane's height at a
     /// detail holding a given set of readings.
+    /// Whether it lays out the lanes `lanes` (by module, in any order): none come since it was laid out, none gone.
+    pub fn lays_out(&self, lanes: &[String]) -> bool {
+        let mut laid: Vec<&String> = self.lanes.iter().collect();
+        let mut told: Vec<&String> = lanes.iter().collect();
+        laid.sort();
+        told.sort();
+        laid == told
+    }
+
+    /// Whether a lane holds more now than its box (`height` as in `grow`): what it held grown with nothing more seen
+    /// (devices it held come back, more of them than it was laid out with).
+    pub fn overflows(&self, height: impl Fn(&str, &Seen, Detail) -> Option<f32>) -> bool {
+        if self.small().is_some() {
+            return false;
+        }
+        let detail = self.detail();
+        self.lanes.iter().zip(&self.layout.lanes()).any(|(id, area)| height(id, &self.seen, detail).is_some_and(|height| height > area.h + 0.5))
+    }
+
     pub fn grow(&mut self, now: &Seen, info: &StaticInfo, height: impl Fn(&str, &Seen, Detail) -> Option<f32>) {
         self.seen.rename(now);
         if self.small().is_some() {
@@ -891,5 +910,15 @@ mod tests {
         assert!(opening.seen.gpus[0].clock);
         assert!(!opening.seen.gpus[0].power);
         assert_eq!((opening.layout.height(), opening.zoom), (layout, zoom));
+        // Each lane in its box: no lane over it. One that holds more than its box now, with nothing more seen (devices
+        // it held come back, more of them than it was laid out with): over it.
+        let held = |id: &str, seen: &Seen, _| Some(if id == "gpu:0" { gpu(seen) } else { lanes.iter().find(|lane| lane.0 == id).unwrap().1[0] });
+        assert!(!opening.overflows(held));
+        assert!(opening.overflows(|id: &str, _: &Seen, _| Some(if id == "gpu:0" { 400.0 } else { 100.0 })));
+        // The lanes it was laid out with, in whatever order they are told: the same; one come or gone, not.
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert!(opening.lays_out(&ids(&["memory", "cpu", "gpu:0"])));
+        assert!(!opening.lays_out(&ids(&["memory", "cpu", "gpu:0", "devices"])));
+        assert!(!opening.lays_out(&ids(&["cpu", "gpu:0"])));
     }
 }

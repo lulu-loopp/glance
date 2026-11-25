@@ -447,7 +447,24 @@ pub struct MusicSource {
 /// which has no such form, leaves it out rather than show something else.
 pub const MUSIC_FORM: &str = "music";
 
+/// What a widget showing one lane alone keeps before its module's id and its form (see `PanelLayout::alone`).
+pub const ONLY_FORM: &str = "only:";
+
+impl PanelLayout {
+    /// The one lane it shows alone, by its module's id (kept in its form after `ONLY_FORM`), if it shows one.
+    pub fn alone(&self) -> Option<&str> {
+        // (A module's id may hold ':', as a note stuck on the desktop's does; '|' none, nor a file's name.)
+        self.form.strip_prefix(ONLY_FORM).and_then(|rest| rest.split_once('|')).map(|(id, _)| id)
+    }
+}
+
 impl WidgetAt {
+    /// Whether it shows the lane of the module `id` among `lanes` alone (merged into it or not): shown there, and so
+    /// read for it, whatever the panel's switches say.
+    pub fn shows_alone(&self, lanes: Part, id: &str) -> bool {
+        std::iter::once(&self.layout).chain(self.parts.iter().flatten()).any(|layout| layout.lanes == lanes && layout.alone() == Some(id))
+    }
+
     /// Whether it shows the AI component's lanes (merged into it or not).
     pub fn shows_ai(&self) -> bool {
         self.layout.lanes == Part::Ai || self.parts.iter().flatten().any(|part| part.lanes == Part::Ai)
@@ -1472,6 +1489,23 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A widget showing one lane alone says which (its module's id, kept in its form), merged into another or not: what
+    /// is read for it whatever the panel's switches say.
+    #[test]
+    fn a_widget_says_the_lane_it_shows_alone() {
+        let layout = |form: &str, lanes| PanelLayout { form: form.into(), scale: 1.0, extra: (0.0, 0.0), lanes, ai_source: None };
+        let widget = |layout, parts| WidgetAt { at: (0, 0), layout, pinned: false, click_through: false, game_only: false, ..serde_json::from_value(serde_json::json!({"at": [0, 0], "layout": {"form": "full-1", "scale": 1.0, "extra": [0.0, 0.0]}})).map(|w: WidgetAt| WidgetAt { parts, ..w }).unwrap() };
+        assert_eq!(layout("only:devices|full-1", Part::Monitor).alone(), Some("devices"));
+        assert_eq!(layout("only:note:7|full-1", Part::Workbench).alone(), Some("note:7"));
+        assert_eq!(layout("full-2", Part::Monitor).alone(), None);
+        let devices = widget(layout("only:devices|full-1", Part::Monitor), None);
+        assert!(devices.shows_alone(Part::Monitor, "devices"));
+        assert!(!devices.shows_alone(Part::Monitor, "wsl") && !devices.shows_alone(Part::Workbench, "devices"));
+        assert!(!widget(layout("full-2", Part::Monitor), None).shows_alone(Part::Monitor, "devices"));
+        let merged = widget(layout(MUSIC_FORM, Part::Monitor), Some(vec![layout(MUSIC_FORM, Part::Monitor), layout("only:time|corner", Part::Workbench)]));
+        assert!(merged.shows_alone(Part::Workbench, "time"));
+    }
 
     /// The overlay shows when it is asked to, each way read back as it was set, and offered once it was.
     #[test]

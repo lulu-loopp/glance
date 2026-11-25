@@ -3543,6 +3543,15 @@ pub fn lane_height(scene: &Scene, id: &str, seen: &Seen, detail: Detail) -> Opti
     Some(scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>())
 }
 
+/// The least height `id`'s lane is drawn at holding `seen`, at `detail`: as `lane_height`, its list at its foot given
+/// way as far as it gives (see `gives`).
+pub fn lane_least(scene: &Scene, id: &str, seen: &Seen, detail: Detail) -> Option<f32> {
+    let scene = Scene { seen, ..*scene };
+    let blocks = lane(&scene, id, detail)?;
+    let gives = blocks.last().and_then(Block::list_tall).map_or(0.0, |tall| (tall - LIST_LEAST).max(0.0));
+    Some(scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>() - gives)
+}
+
 /// What a board's sensor `name` of `group` ("temps" or "fans") is called, unless the user named it (see
 /// `Prefs::sensor_name`): by what it is wired to, where the board is known; else by its number.
 pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
@@ -8322,6 +8331,30 @@ otepad.exe", "Notepad"),
             }
             // (The first pass draws what the second shows: pictures and plates made on their own threads.)
             std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    /// A panel just laid out holds each lane in its box, its lists given way as far as they give (see `lane_least`),
+    /// whatever its screen, skin and edge: an open panel lays itself out anew only as a lane comes, goes or outgrows its
+    /// box (see `Opening::overflows`), never at every frame.
+    #[test]
+    fn a_panel_laid_out_holds_its_lanes() {
+        let known: Vec<String> = ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board", "battery", "devices", "system", "time"].map(String::from).to_vec();
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &known));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(Some(4.2), Some(64), Some(900.0)))]));
+        let seen = Seen::of(history);
+        for skin in [Skin::Glass, Skin::Paper, Skin::Fluent] {
+            let theme = Theme::new(skin, false);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+            let heights = heights(&scene);
+            let lanes: Vec<(&str, crate::ui::arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
+            let ids: Vec<String> = heights.iter().map(|(id, _)| id.clone()).collect();
+            assert!(ids.len() >= 6 && ids.iter().any(|id| id == "processes"), "{ids:?}");
+            for (edge, work) in [(crate::settings::Edge::Right, (2560.0, 1400.0)), (crate::settings::Edge::Right, (1280.0, 700.0)), (crate::settings::Edge::Top, (1920.0, 1040.0)), (crate::settings::Edge::Left, (900.0, 1600.0))] {
+                let opening = crate::ui::arrange::Opening::new(&theme, edge, &lanes, wide(&scene), crate::ui::forms::shows(&scene), work, None, 1.0, crate::ui::arrange::Want::Itself, seen.clone());
+                assert!(opening.lays_out(&ids));
+                assert!(!opening.overflows(|id, seen, detail| lane_least(&scene, id, seen, detail)), "{skin:?} {edge:?} {work:?}");
+            }
         }
     }
 

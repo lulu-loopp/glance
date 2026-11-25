@@ -654,8 +654,11 @@ pub fn run() {
             // Whatever plays, while a time and media lane shows it (the readings', or the workbench's); music, while an
             // edge or a widget shows it, or a time and media lane its lyrics.
             let time = |lyrics: bool| {
-                let shown = |list: &str| ui::prefs::module_on_in(view, list, "time") && (!lyrics || ui::prefs::item_on_in(view, list, "time", "lyrics"));
-                shown("modules") || shown("workbench")
+                let lyrics_on = |list: &str| !lyrics || ui::prefs::item_on_in(view, list, "time", "lyrics");
+                let shown = |list: &str| ui::prefs::module_on_in(view, list, "time") && lyrics_on(list);
+                // (A widget showing that lane alone shows it whatever the panel's switch says.)
+                let alone = |lanes, list: &str| settings.widgets.iter().any(|widget| widget.shows_alone(lanes, "time")) && lyrics_on(list);
+                shown("modules") || shown("workbench") || alone(settings::Part::Monitor, "modules") || alone(settings::Part::Workbench, "workbench")
             };
             let music = settings.places().shows(settings::Part::Music) || settings.widgets.iter().any(settings::WidgetAt::shows_music) || time(true) || playing::shown_in_settings();
             (time(false), music, seen)
@@ -663,6 +666,9 @@ pub fn run() {
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();
+        // Whether a widget shows the readings' lane of the module `id` alone: read for it, whatever the panel's switch
+        // of that module says (as the widget shows it).
+        let alone = |settings: &settings::Settings, id: &str| settings.widgets.iter().any(|widget| widget.shows_alone(settings::Part::Monitor, id));
         // The wireless devices told of as they run low (see `devices`).
         #[cfg(windows)]
         let mut notices = devices::Notices::default();
@@ -679,8 +685,8 @@ pub fn run() {
                     interval_ms: settings.interval().as_millis() as u32,
                     // (What changes slowly is read afresh while something shows it; else now and then.)
                     refresh_slow: controller.is_shown() || controller.widget_processes() || ui::settings_window::is_seen(),
-                    wsl: ui::prefs::module_on(&settings.view, "wsl"),
-                    docker: ui::prefs::module_on(&settings.view, "docker"),
+                    wsl: ui::prefs::module_on(&settings.view, "wsl") || alone(&settings, "wsl"),
+                    docker: ui::prefs::module_on(&settings.view, "docker") || alone(&settings, "docker"),
                 }
             };
             if let Some(mut sample) = source.next(want, controller.edges()) {
@@ -691,7 +697,7 @@ pub fn run() {
                 {
                     let (shown, notice, lang) = {
                         let settings = app().settings.lock().unwrap();
-                        (ui::prefs::module_shown(&settings.view, "devices"), ui::prefs::item_on(&settings.view, "devices", "notice"), update::language_in(&settings.view))
+                        (ui::prefs::module_shown(&settings.view, "devices") || alone(&settings, "devices"), ui::prefs::item_on(&settings.view, "devices", "notice"), update::language_in(&settings.view))
                     };
                     sample.devices = devices::read(shown);
                     notices.look(&sample.devices, notice, lang);

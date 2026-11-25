@@ -53,8 +53,7 @@ pub(crate) fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) 
 use crate::mouse::{cursor_position, monitor_at, Contact};
 use crate::settings::{WidgetAt, WidgetSide, MUSIC_FORM};
 
-/// What a widget showing one lane alone keeps before its module's id and its form (see `form_of`).
-const ONLY_FORM: &str = "only:";
+use crate::settings::ONLY_FORM;
 
 /// The form a widget's readings are kept as: `form`, or for one lane alone (`only`), its module's id and its form
 /// after `ONLY_FORM` (a form an older Glance does not know: it leaves the widget out, rather than show all the lanes).
@@ -4790,7 +4789,13 @@ impl Widget {
                             None => Want::Kept(readings.choice),
                         };
                         let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, view::wide(&scene), readings_count, work, None, 1.0, want, seen.clone());
-                        let Some(choice) = opening.choice else { return Frame::Rest };
+                        // (Nothing of what it shows there now, as a lane shown only while there is something in it, the
+                        // devices' with none joined: put away till there is, not left showing what it showed last. Drawn
+                        // again, it is shown again.)
+                        let Some(choice) = opening.choice else {
+                            self.window.hide();
+                            return Frame::Rest;
+                        };
                         if let Some(room) = sized_to {
                             readings.taken = Some(arrange::Shown::after(readings.taken, choice.form, room));
                         }
