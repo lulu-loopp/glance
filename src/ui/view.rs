@@ -3154,7 +3154,7 @@ fn paint_across(frame: &dyn Canvas, scene: &Scene, rows: &[Vec<Lane>], (left, y,
         for (at, lane) in row.iter().enumerate() {
             let x = left + at as f32 * (column + ACROSS_GAP);
             let area = Rect { x: x - theme.pad_x, y: top - theme.pad_top, w: column + 2.0 * theme.pad_x, h: tall + theme.pad_top + theme.pad_bottom };
-            paint_lane(frame, scene, lane, area, 0.0, pass, hits);
+            paint_lane(frame, scene, lane, area, (0.0, 0.0), pass, hits);
         }
         top += tall + ACROSS_ROW_GAP;
     }
@@ -3352,8 +3352,15 @@ impl Devices {
     /// all of it given more room than it was laid out for tells more of each, named, in as many columns as its width
     /// holds, where their rows fit (a widget made larger never shows less).
     fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32) -> Devices {
+        Devices::of_wide(rings, full, count, laid, room, width, width)
+    }
+
+    /// As `of`, the lane laid out `laid_width` across: given more width than that, as given more height, it tells more
+    /// of each where their named rows fit in its height (names before larger rings: a name tells what a ring does not).
+    fn of_wide(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32, laid_width: f32) -> Devices {
         let columns = Devices::columns(count, width);
-        if full && room > laid + 0.5 && count.div_ceil(columns) as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
+        let more = room > laid + 0.5 || width > laid_width + 0.5;
+        if full && more && count.div_ceil(columns) as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
             Devices::Named(columns)
         } else if rings {
             Devices::Rings
@@ -4437,6 +4444,9 @@ pub struct Layout {
     bar_height: f32,
     /// Each column's width: as designed, or wider (see `stretched`).
     column_width: f32,
+    /// Each column's width as laid out for what its lanes are (see `widened`), before it was made wider or narrower
+    /// for the room it is given (see `stretched`, `fitted`): what `wider` tells the lanes they have past.
+    laid_column: f32,
     /// How much taller than its lanes need each column was made, for their
     /// charts to grow into (see `stretched`).
     grow: f32,
@@ -4484,6 +4494,7 @@ impl Layout {
             bar_gap: theme.bar_gap,
             bar_height: theme.bar_height,
             column_width: COLUMN_WIDTH,
+            laid_column: COLUMN_WIDTH,
             grow: 0.0,
             rail: None,
         }
@@ -4554,7 +4565,14 @@ impl Layout {
     /// much wider as that takes (their share of the room at the panel's sides too: see `lanes`).
     pub fn widened(mut self, wide: f32) -> Self {
         self.column_width = self.column_width.max(wide + 2.0 * self.outer.1 / self.columns as f32);
+        self.laid_column = self.column_width;
         self
+    }
+
+    /// How much wider each lane is drawn than it was laid out (a workbench widget made wider, a panel stretched):
+    /// room across for lanes that tell more given it (see `Devices::of`). Never less than nothing.
+    pub fn wider(&self) -> f32 {
+        (self.column_width - self.laid_column).max(0.0)
     }
 
     /// The same, `by` DIPs wider and taller: the width shared out among
@@ -4704,7 +4722,7 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
             }
             continue;
         }
-        paint_lane(frame, scene, lane, *area, grow, pass, &mut hits);
+        paint_lane(frame, scene, lane, *area, (grow, layout.wider()), pass, &mut hits);
         // Chart paper rules each lane off below; the last rule in a column
         // also sets off the bar.
         if pass == Pass::Content && theme.ruled {
@@ -4735,7 +4753,7 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
 /// Draws what `lane` shows alone in `area`: none of what the panel draws round its lanes (its bar, chart paper's rules).
 pub fn paint_alone(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect) {
     for pass in [Pass::Content, Pass::Plots] {
-        paint_lane(frame, scene, lane, area, 0.0, pass, &mut Vec::new());
+        paint_lane(frame, scene, lane, area, (0.0, 0.0), pass, &mut Vec::new());
     }
 }
 
@@ -4763,7 +4781,7 @@ pub fn music_room(layout: &Layout, ids: &[String], theme: &Theme) -> Option<Rect
 
 /// Draws `lane` in `area`, its charts `grow` DIPs taller between them (each
 /// at most twice as tall as designed).
-fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: f32, pass: Pass, hits: &mut Vec<HitBox>) {
+fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow, wider): (f32, f32), pass: Pass, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let first = hits.len();
     let ink = lane.ink;
@@ -5158,7 +5176,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Devices { devices, rings, full }, Pass::Content) => {
                 // (No hover: nothing of it is pressed, and nothing more is told of a device than it shows.)
                 let room = height + (area.h - natural).max(0.0);
-                paint_devices(frame, scene, ink, devices, Devices::of(*rings, *full, devices.len(), height, room, width), (left, y, width), &part);
+                // (As wide as it was laid out, past what it is drawn wider: a widget made wider holds more across.)
+                let how = Devices::of_wide(*rings, *full, devices.len(), height, room, width, width - wider);
+                paint_devices(frame, scene, ink, devices, how, (left, y, width), &part);
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
@@ -8135,7 +8155,7 @@ otepad.exe", "Notepad"),
                         frame.fill(ground, 0.0, 0.0, w, h);
                         let mut y = 0.0;
                         for (lane, height) in lanes.iter().zip(&heights) {
-                            paint_lane(frame, &scene, lane, Rect { x: 0.0, y, w, h: *height }, 0.0, Pass::Content, &mut Vec::new());
+                            paint_lane(frame, &scene, lane, Rect { x: 0.0, y, w, h: *height }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                             y += height + 8.0;
                             frame.fill(theme.rule, 0.0, y - 4.0, w, 1.0);
                         }
@@ -8156,7 +8176,7 @@ otepad.exe", "Notepad"),
                         frame.fill(ground, 0.0, 0.0, w, h);
                         frame.fill_rounded(theme.track, 0.0, 0.0, down.0, down.1, 12.0);
                         ai::draw_dock(frame, &scene, &dock, false, (0.0, 0.0, down.0, down.1));
-                        paint_lane(frame, &scene, &card, Rect { x: down.0 + 16.0, y: 0.0, w: COLUMN_WIDTH, h: card_h }, 0.0, Pass::Content, &mut Vec::new());
+                        paint_lane(frame, &scene, &card, Rect { x: down.0 + 16.0, y: 0.0, w: COLUMN_WIDTH, h: card_h }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                         let top = down.1.max(card_h) + 16.0;
                         frame.place(windows_numerics::Matrix3x2::translation(0.0, top));
                         frame.fill_rounded(theme.track, 0.0, 0.0, across.0, across.1, 12.0);
@@ -9498,7 +9518,7 @@ otepad.exe", "Notepad"),
             let (w, h) = (COLUMN_WIDTH, lane.height(&theme) + 16.0);
             let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
                 frame.fill(Color::hex(0x202124, 1.0), 0.0, 0.0, w, h);
-                paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, 0.0, Pass::Content, &mut Vec::new());
+                paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), Pass::Content, &mut Vec::new());
             }).expect("drawn");
             crate::studio::save_png(&out.join(format!("{skin:?}.png")), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
         }
@@ -9559,7 +9579,7 @@ otepad.exe", "Notepad"),
                 };
                 let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| {
                     frame.fill(ground, 0.0, 0.0, w, h);
-                    paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, 0.0, Pass::Content, &mut Vec::new());
+                    paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                 }).expect("drawn");
                 crate::studio::save_png(&out.join(format!("{row}-{column}.png")), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
             }
@@ -9660,7 +9680,7 @@ otepad.exe", "Notepad"),
                     let scene = Scene { music_apart: false, hint, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
-                    paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
+                    paint_lane(frame, &scene, &lane, area, (0.0, 0.0), Pass::Content, &mut Vec::new());
                 }
             }
         }).expect("drawn");
@@ -9741,7 +9761,7 @@ otepad.exe", "Notepad"),
                     let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: hovered(column), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, Tab::default(), Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
-                    paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
+                    paint_lane(frame, &scene, &lane, area, (0.0, 0.0), Pass::Content, &mut Vec::new());
                 }
             }
         }).expect("drawn");
@@ -9807,7 +9827,7 @@ otepad.exe", "Notepad"),
             let lane = Lane { id: "storage".into(), blocks: lane(&scene, "storage", Detail::Full)?, ink: theme.ink("storage") };
             let (width, tall) = (COLUMN_WIDTH, lane.height(&theme));
             let mut hits = Vec::new();
-            gfx.draw_offscreen((width as u32, tall.ceil() as u32), 1.0, |frame| paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w: width, h: tall }, 0.0, Pass::Content, &mut hits)).expect("drawn");
+            gfx.draw_offscreen((width as u32, tall.ceil() as u32), 1.0, |frame| paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w: width, h: tall }, (0.0, 0.0), Pass::Content, &mut hits)).expect("drawn");
             let rows = lane.blocks.iter().find_map(|block| if let Block::Folders { rows, .. } = block { Some(format!("{rows:?}")) } else { None }).unwrap();
             Some((rows, hits, (width, tall)))
         };
@@ -9894,7 +9914,7 @@ otepad.exe", "Notepad"),
                         let lane = Lane { id: "storage".into(), blocks, ink: theme.ink("storage") };
                         let tall = lane.height(&theme);
                         frame.fill_rounded(ground, x, y, lane_w, tall, theme.radius);
-                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: tall }, 0.0, Pass::Content, &mut Vec::new());
+                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: tall }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                     }
                     // Its cards: over a week, and since less; not there.
                     crate::folders::pretend(folders());
@@ -10027,7 +10047,7 @@ otepad.exe", "Notepad"),
                         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: *tab, hover: *hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, *tab, Lang::Zh), ink: theme.ink("station") };
                         frame.clip(x, y, lane_w, lane_h);
-                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, 0.0, Pass::Content, &mut Vec::new());
+                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                         frame.unclip();
                     }
                 }
@@ -10363,7 +10383,7 @@ otepad.exe", "Notepad"),
                         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: *tab, hover: *hover, thumbs: &dots, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, *tab, Lang::Zh), ink: theme.ink("station") };
                         frame.clip(x, y, lane_w, lane_h);
-                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, 0.0, Pass::Content, &mut Vec::new());
+                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, (0.0, 0.0), Pass::Content, &mut Vec::new());
                         frame.unclip();
                     }
                     // Carried together: what is drawn of the one pressed, on its plate, the others behind it, each what it is.
@@ -10375,9 +10395,9 @@ otepad.exe", "Notepad"),
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                         let mut hits = Vec::new();
                         let area = Rect { x: 0.0, y: 0.0, w: lane_w, h: lane.height(&theme) };
-                        paint_lane(&super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0)), &scene, &lane, area, 0.0, Pass::Content, &mut hits);
+                        paint_lane(&super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0)), &scene, &lane, area, (0.0, 0.0), Pass::Content, &mut hits);
                         let recorder = super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0));
-                        paint_lane(&recorder, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
+                        paint_lane(&recorder, &scene, &lane, area, (0.0, 0.0), Pass::Content, &mut Vec::new());
                         let recorded = recorder.parts();
                         let pad = crate::carry::PAD;
                         let tiles: Vec<(Vec<super::super::morph::Part>, (f32, f32))> = together
@@ -10876,7 +10896,7 @@ seven".into()));
         let scene = scene(history);
         let lane = Lane { id: "devices".into(), blocks: lane(&scene, "devices", Detail::Full).unwrap(), ink: theme.ink("devices") };
         let mut hits = Vec::new();
-        paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 }, 0.0, Pass::Content, &mut hits);
+        paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 }, (0.0, 0.0), Pass::Content, &mut hits);
         assert!(hits.is_empty(), "{hits:?}");
     }
 
@@ -10910,6 +10930,25 @@ seven".into()));
         assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 60.0, 650.0), Devices::Named(1));
         // Not wide enough for two: one under another, where they fit.
         assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 300.0), Devices::Rings);
+    }
+
+    /// A lane with all of it made wider and no taller (a devices widget widened) names its devices where their rows
+    /// fit in the height it has: a name tells more than a larger ring would. Where they do not fit, its rings as laid
+    /// out; as wide as it was laid out, as laid out.
+    #[test]
+    fn devices_are_named_given_more_width() {
+        let rings = |count: usize| DEVICE_RINGS_TOP + rings_tall(count);
+        let laid = 300.0;
+        // One device, a little wider: its named row in its ring's height.
+        assert_eq!(Devices::of_wide(true, true, 1, rings(1), rings(1), 340.0, laid), Devices::Named(1));
+        // Three, wide enough for each a column: named side by side in the height of their row of rings.
+        assert_eq!(Devices::of_wide(true, true, 3, rings(3), rings(3), 650.0, laid), Devices::Named(3));
+        // Three, wide enough for two columns only: two rows of names are taller than the rings' row, so rings.
+        assert_eq!(Devices::of_wide(true, true, 3, rings(3), rings(3), 430.0, laid), Devices::Rings);
+        // As wide as laid out: as laid out.
+        assert_eq!(Devices::of_wide(true, true, 1, rings(1), rings(1), laid, laid), Devices::Rings);
+        // Compact (not with all of it): never named.
+        assert_eq!(Devices::of_wide(true, false, 1, rings(1), rings(1), 650.0, laid), Devices::Rings);
     }
 
     /// Named devices in columns: each column the same width, side by side with room between, filled a row at a time.
@@ -11269,7 +11308,7 @@ seven".into()));
             let glide = Glide { done, was: "the line before".into() };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Lyric { line: "the line sung".into(), under: String::new(), said: false, glide }], ink: theme.ink("time") };
             gliding_drawn();
-            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, 0.0, Pass::Content, &mut Vec::new());
+            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, (0.0, 0.0), Pass::Content, &mut Vec::new());
             gliding_drawn()
         };
         assert!(drawn(0.4), "gliding");
@@ -12018,7 +12057,7 @@ seven".into()));
                 let lane = Lane { id: format!("{STUCK_NOTE_LANE}a.md"), blocks: vec![stuck_note(&note, Lang::Zh, 60_000)], ink: theme.ink("notes") };
                 let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
                 let mut hits = Vec::new();
-                paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, 0.0, Pass::Content, &mut hits);
+                paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), Pass::Content, &mut hits);
                 let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
                 // Its words where the page's box writes them (at twice the pixels, its box's edges on whole ones).
                 let scale = 2.0;
@@ -12043,7 +12082,7 @@ seven".into()));
                 let lane = Lane { id: format!("{STUCK_NOTE_LANE}a.md"), blocks: vec![stuck_note(&note, Lang::Zh, 60_000)], ink: theme.ink("notes") };
                 let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
                 let mut hits = Vec::new();
-                paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w: STUCK_NOTE.0, h: STUCK_NOTE.1 }, 0.0, Pass::Content, &mut hits);
+                paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w: STUCK_NOTE.0, h: STUCK_NOTE.1 }, (0.0, 0.0), Pass::Content, &mut hits);
                 let drew = recorder.parts().into_iter().flat_map(|part| part.ops).any(|op| matches!(op, Op::Markdown { .. }));
                 assert_eq!((drew, hits.len()), (!written, 2), "{skin:?} written {written}");
             }
@@ -12421,7 +12460,7 @@ seven".into()));
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false, output: None, open: false }, Block::Progress { at: 3725, length: 3725, seekable: true }], ink: theme.ink("time") };
             let (reach, mut hits) = (Reach::default(), Vec::new());
-            paint_lane(&reach, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 200.0 }, 0.0, Pass::Content, &mut hits);
+            paint_lane(&reach, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 200.0 }, (0.0, 0.0), Pass::Content, &mut hits);
             let said_at = reach.said_at.take();
             let written = |text: &str| said_at.iter().filter(|(said, _)| said == text).map(|(_, at)| *at).fold(f32::MIN, f32::max);
             for (hit, figure) in [(Hit::Volume, "100%"), (Hit::Seek(crate::playing::Follow::Any), "1:02:05")] {
@@ -12445,7 +12484,7 @@ seven".into()));
         let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
         let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
         let mut hits = Vec::new();
-        paint_lane(&Nothing, &scene, &lane, area, 0.0, Pass::Content, &mut hits);
+        paint_lane(&Nothing, &scene, &lane, area, (0.0, 0.0), Pass::Content, &mut hits);
         let lowest = hits.iter().filter(|hit| matches!(hit.4, Hit::Note(_))).map(|hit| hit.1 + hit.3).fold(0.0, f32::max);
         assert!(lowest > area.h - theme.pad_bottom - NOTE_ROW, "the notes end at {lowest} in a lane {} tall", area.h);
     }
@@ -12665,7 +12704,7 @@ seven".into()));
         let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>();
         let shown = |tall: f32| {
             let mut hits = Vec::new();
-            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: tall }, 0.0, Pass::Content, &mut hits);
+            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: tall }, (0.0, 0.0), Pass::Content, &mut hits);
             hits.iter().filter(|hit| matches!(hit.4, Hit::App(_))).count()
         };
         let across = (((COLUMN_WIDTH - 2.0 * theme.pad_x) / APP_CELL_W) as usize).max(1);

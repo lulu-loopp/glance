@@ -1816,7 +1816,7 @@ fn draw_board(frame: &dyn Canvas, scene: &Scene, board: &Board, (x, y, w, h): (f
     let top = y + theme.pad_top + (h - theme.pad_top - theme.pad_bottom - board.tall()) / 2.0;
     let mut paint = |lane: &Lane, at: usize, lane_top: f32, tall: f32| {
         let area = Rect { x: left + at as f32 * (column + ACROSS_GAP) - theme.pad_x, y: lane_top - theme.pad_top, w: column + 2.0 * theme.pad_x, h: tall + theme.pad_top + theme.pad_bottom };
-        paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
+        paint_lane(frame, scene, lane, area, (0.0, 0.0), Pass::Content, hits);
     };
     for (at, lanes) in board.columns.iter().enumerate() {
         let mut lane_top = top;
@@ -1872,7 +1872,7 @@ pub(super) fn column_of(rich: &Rich, theme: &Theme, lang: Lang, (_, h): (f32, f3
 fn draw_column(frame: &dyn Canvas, scene: &Scene, ink: Ink, mut lane: Lane, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     lane.ink = ink;
     let tall = lane.height(scene.theme);
-    paint_lane(frame, scene, &lane, Rect { x, y: y + (h - tall) / 2.0, w, h: tall }, 0.0, Pass::Content, hits);
+    paint_lane(frame, scene, &lane, Rect { x, y: y + (h - tall) / 2.0, w, h: tall }, (0.0, 0.0), Pass::Content, hits);
 }
 
 /// Between the rings as near a square and what is listed under them, and between the lists (DIPs).
@@ -2068,7 +2068,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
             let cell_left = left + (at % columns) as f32 * (cell + 8.0);
             // (Its list as wide as its ring's room, a little in from it: given a lane's room, inset by a lane's pads too, it
             // had half of it.)
-            paint_lane(frame, scene, lane, Rect { x: cell_left + 4.0 - theme.pad_x, y: list_top, w: cell - 8.0 + 2.0 * theme.pad_x, h: models_tall }, 0.0, Pass::Content, hits);
+            paint_lane(frame, scene, lane, Rect { x: cell_left + 4.0 - theme.pad_x, y: list_top, w: cell - 8.0 + 2.0 * theme.pad_x, h: models_tall }, (0.0, 0.0), Pass::Content, hits);
         }
         list_top += models_tall + LIST_ABOVE;
     }
