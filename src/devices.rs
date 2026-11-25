@@ -57,6 +57,8 @@ fn of(device: wireless::Device) -> DeviceSample {
             Via::Bluetooth => DeviceVia::Bluetooth,
             Via::Logitech => DeviceVia::Logitech,
             Via::Xbox => DeviceVia::Xbox,
+            Via::Receiver => DeviceVia::Receiver,
+            Via::Cable => DeviceVia::Cable,
         },
         level: device.level.min(100),
         charging: device.charging,
@@ -111,8 +113,8 @@ fn step(told: Option<u8>, level: u8, charging: bool) -> (Option<u8>, bool) {
 fn notify(device: &DeviceSample, lang: Lang) {
     use crate::toast::escaped;
     let (title, line) = match lang {
-        Lang::Zh => (format!("{} 电量低", device.name), format!("剩余 {}%，请及时充电。", device.level)),
-        _ => (format!("{} is low on charge", device.name), format!("{}% left. Charge it soon.", device.level)),
+        Lang::Zh => (format!("{} 电量低", device.called(true)), format!("剩余 {}%，请及时充电。", device.level)),
+        _ => (format!("{} is low on charge", device.called(false)), format!("{}% left. Charge it soon.", device.level)),
     };
     let xml = format!(r#"<toast launch="devices:"><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>"#, escaped(&title), escaped(&line));
     if let Err(error) = crate::toast::show(&xml, &device.key, "devices", false) {

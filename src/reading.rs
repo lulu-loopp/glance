@@ -171,12 +171,36 @@ pub enum DeviceVia {
     Logitech,
     /// Xbox Wireless (its adapter, or the controller's own Bluetooth as Windows' game controllers read it).
     Xbox,
+    /// A keyboard's own 2.4 GHz receiver.
+    Receiver,
+    /// Its cable (a wireless keyboard plugged in, as its maker's protocol still reads it).
+    Cable,
 }
 
 impl DeviceSample {
     /// Whether it is running low: a fifth of its charge or less, while it is not charging.
     pub fn low(&self) -> bool {
         !self.charging && self.level <= LOW_CHARGE
+    }
+
+    /// What it is called: its name, else (one whose maker's protocol tells none) what it is.
+    pub fn called(&self, zh: bool) -> String {
+        if !self.name.is_empty() {
+            return self.name.clone();
+        }
+        let (zh_said, en) = match self.kind {
+            DeviceKind::Headphones => ("耳机", "Headphones"),
+            DeviceKind::Earbuds => ("耳塞", "Earbuds"),
+            DeviceKind::Headset => ("耳麦", "Headset"),
+            DeviceKind::Speaker => ("音箱", "Speaker"),
+            DeviceKind::Keyboard => ("键盘", "Keyboard"),
+            DeviceKind::Mouse => ("鼠标", "Mouse"),
+            DeviceKind::Gamepad => ("手柄", "Controller"),
+            DeviceKind::Phone => ("手机", "Phone"),
+            DeviceKind::Watch => ("手表", "Watch"),
+            DeviceKind::Other => ("设备", "Device"),
+        };
+        (if zh { zh_said } else { en }).to_string()
     }
 }
 

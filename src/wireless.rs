@@ -1,10 +1,11 @@
 //! The batteries of the wireless devices joined to the PC: Bluetooth headphones, keyboards, mice and speakers (the
 //! level Windows itself shows in its Bluetooth settings), the devices of Logitech's receivers (Unifying, Bolt,
-//! Lightspeed: asked over HID++, as Logitech's own software asks), and Xbox controllers (as Windows' game controller
-//! API tells). Only devices joined now and whose level is known are listed.
+//! Lightspeed: asked over HID++, as Logitech's own software asks), keyboards of PMO Hub's firmware on their 2.4 GHz
+//! receiver (as PMO Hub's web driver asks), and Xbox controllers (as Windows' game controller API tells). Only devices
+//! joined now and whose level is known are listed (a receiver's device asleep as last read).
 //!
 //! All of it is read on a thread of its own: at the start, then every half minute (Logitech's devices every minute,
-//! as each is asked over the air), and a moment after a device comes or goes. Nothing is set on any device: every
+//! the PMO boards every five, as each is asked over the air), and a moment after a device comes or goes. Nothing is set on any device: every
 //! question asked of one only reads. No rights are needed.
 
 use std::collections::HashMap;
@@ -33,7 +34,7 @@ use windows::Win32::Devices::Properties::{
 };
 use windows::Win32::Foundation::{CloseHandle, DEVPROPKEY, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
-use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects};
+use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects, WaitForSingleObject};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED};
 
 /// A wireless device whose battery level is known, as last read.
@@ -80,6 +81,10 @@ pub enum Via {
     Logitech,
     /// As an Xbox controller (through Xbox's own wireless adapter, or Bluetooth).
     Xbox,
+    /// Through a keyboard's own 2.4 GHz receiver.
+    Receiver,
+    /// On its cable (a wireless keyboard plugged in, as its maker's protocol still reads it).
+    Cable,
 }
 
 /// The devices as last read, ordered as `now` gives them.
@@ -89,6 +94,9 @@ static DEVICES: Mutex<Vec<Device>> = Mutex::new(Vec::new());
 const EVERY: Duration = Duration::from_secs(30);
 /// How often Logitech's devices are asked again (each answers over the air).
 const LOGITECH_EVERY: Duration = Duration::from_secs(60);
+/// How often the PMO boards are asked again: seldom, as each question goes over the air to the board and may wake it
+/// (its charge changes slowly, and between askings it is shown as last read).
+const BOARDS_EVERY: Duration = Duration::from_secs(300);
 /// How long Windows' telling of devices coming and going must be quiet before they are read again (a device comes
 /// with several interfaces at once), and the longest they wait for that.
 const SETTLED: Duration = Duration::from_secs(2);
@@ -117,6 +125,8 @@ fn run() {
     let _controllers = xbox::hear(told);
     let mut bluetooth = bluetooth::Reader::default();
     let mut logitech = logitech::Reader::default();
+    let mut boards = pmo::Reader::default();
+    let mut boards_read: Option<(Instant, Vec<Device>)> = None;
     let mut logitech_read: Option<(Instant, Vec<Device>)> = None;
     let mut asked = false;
     loop {
@@ -125,6 +135,10 @@ fn run() {
         }
         let mut devices = bluetooth.read();
         devices.extend(logitech_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
+        if asked || boards_read.as_ref().is_none_or(|(at, _)| at.elapsed() >= BOARDS_EVERY) {
+            boards_read = Some((Instant::now(), boards.read()));
+        }
+        devices.extend(boards_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
         devices.extend(xbox::read());
         *DEVICES.lock().unwrap() = ordered(devices);
         asked = match settled(&telling) {
@@ -408,6 +422,260 @@ fn listed(mut size: impl FnMut() -> Option<u32>, mut list: impl FnMut(&mut [u16]
 /// The texts of a list of them each ended by a zero (and the list by another).
 fn multi_string(list: Vec<u16>) -> Vec<String> {
     list.split(|&c| c == 0).filter(|text| !text.is_empty()).map(String::from_utf16_lossy).collect()
+}
+
+/// HID collections spoken to directly (a receiver's, a keyboard's own channel): found by their vendor, opened shared
+/// for overlapped reading and writing, so that the makers' own software goes on speaking to them too.
+mod hid {
+    use super::*;
+
+    /// The paths of the HID collections there are now of the vendor `vendor` (its USB vendor id, four hex digits).
+    pub(super) fn paths(vendor: &str) -> Vec<String> {
+        let size = || {
+            let mut length = 0u32;
+            (unsafe { CM_Get_Device_Interface_List_SizeW(&mut length, &GUID_DEVINTERFACE_HID, PCWSTR::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } == CR_SUCCESS)
+                .then_some(length)
+        };
+        let list = |into: &mut [u16]| unsafe { CM_Get_Device_Interface_ListW(&GUID_DEVINTERFACE_HID, PCWSTR::null(), into, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
+        let wanted = format!("vid_{}", vendor.to_ascii_lowercase());
+        multi_string(listed(size, list)).into_iter().filter(|path| path.to_ascii_lowercase().contains(&wanted)).collect()
+    }
+
+    /// The product id a collection's path names (its "PID_" and four hex digits).
+    pub(super) fn product(path: &str) -> Option<u16> {
+        let lower = path.to_ascii_lowercase();
+        let at = lower.find("pid_")? + 4;
+        u16::from_str_radix(lower.get(at..at + 4)?, 16).ok()
+    }
+
+    /// A HID collection, opened for overlapped reading and writing, with a read of it under way (into `buffer`, telling
+    /// `overlapped`'s event) while `reading`.
+    pub(super) struct Collection {
+        pub handle: HANDLE,
+        pub overlapped: Box<OVERLAPPED>,
+        buffer: Vec<u8>,
+        pub reading: bool,
+        /// The length of its output report.
+        pub output: usize,
+        /// What a write tells as it ends.
+        written: HANDLE,
+    }
+
+    impl Collection {
+        /// The collection at `path`, opened, where its capabilities are `wanted`.
+        pub fn open(path: &str, wanted: impl Fn(&HIDP_CAPS) -> bool) -> Option<Collection> {
+            let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+            let handle =
+                unsafe { CreateFileW(PCWSTR(wide.as_ptr()), (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None) }
+                    .ok()?;
+            let mut caps = HIDP_CAPS::default();
+            let mut data = PHIDP_PREPARSED_DATA::default();
+            let read = unsafe { HidD_GetPreparsedData(handle, &mut data) } && {
+                let status = unsafe { HidP_GetCaps(data, &mut caps) };
+                let _ = unsafe { HidD_FreePreparsedData(data) };
+                status == HIDP_STATUS_SUCCESS
+            };
+            let events = (read && wanted(&caps))
+                .then(|| Some((unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.ok()?, unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.ok()?)))
+                .flatten();
+            let Some((event, written)) = events else {
+                let _ = unsafe { CloseHandle(handle) };
+                return None;
+            };
+            Some(Collection {
+                handle,
+                overlapped: Box::new(OVERLAPPED { hEvent: event, ..Default::default() }),
+                buffer: vec![0; caps.InputReportByteLength as usize],
+                reading: false,
+                output: caps.OutputReportByteLength as usize,
+                written,
+            })
+        }
+
+        /// A read begun, where none is under way.
+        pub fn read(&mut self) {
+            if self.reading {
+                return;
+            }
+            let began = unsafe { ReadFile(self.handle, Some(&mut self.buffer), None, Some(&mut *self.overlapped)) };
+            self.reading = began.is_ok() || began.is_err_and(|error| error.code() == ERROR_IO_PENDING.to_hresult());
+        }
+
+        /// The report read, once the read under way has ended (its event told): none where it failed.
+        pub fn report(&mut self) -> Option<Vec<u8>> {
+            self.reading = false;
+            let mut length = 0u32;
+            unsafe { GetOverlappedResult(self.handle, &*self.overlapped, &mut length, false) }.ok()?;
+            Some(self.buffer[..length as usize].to_vec())
+        }
+
+        /// The next report, within `left`: a read begun where none is under way, and another begun once it ends.
+        pub fn next(&mut self, left: Duration) -> Option<Vec<u8>> {
+            self.read();
+            if !self.reading || unsafe { WaitForSingleObject(self.overlapped.hEvent, left.as_millis() as u32) } != WAIT_OBJECT_0 {
+                return None;
+            }
+            let report = self.report();
+            self.read();
+            report
+        }
+
+        /// Writes `report`: whether it was written within `waited`.
+        pub fn write(&mut self, report: &[u8], waited: Duration) -> bool {
+            let mut overlapped = OVERLAPPED { hEvent: self.written, ..Default::default() };
+            let began = unsafe { WriteFile(self.handle, Some(report), None, Some(&mut overlapped)) };
+            if began.is_err_and(|error| error.code() != ERROR_IO_PENDING.to_hresult()) {
+                return false;
+            }
+            let mut length = 0u32;
+            if unsafe { GetOverlappedResultEx(self.handle, &overlapped, &mut length, waited.as_millis() as u32, false) }.is_ok() {
+                return length as usize == report.len();
+            }
+            let _ = unsafe { CancelIoEx(self.handle, Some(&overlapped)) };
+            let _ = unsafe { GetOverlappedResult(self.handle, &overlapped, &mut length, true) };
+            false
+        }
+    }
+
+    impl Drop for Collection {
+        fn drop(&mut self) {
+            if self.reading {
+                let mut length = 0u32;
+                let _ = unsafe { CancelIoEx(self.handle, Some(&*self.overlapped)) };
+                let _ = unsafe { GetOverlappedResult(self.handle, &*self.overlapped, &mut length, true) };
+            }
+            let _ = unsafe { CloseHandle(self.overlapped.hEvent) };
+            let _ = unsafe { CloseHandle(self.written) };
+            let _ = unsafe { CloseHandle(self.handle) };
+        }
+    }
+}
+
+/// Keyboards of PMO Hub's firmware (PMO's and WOBKEY's: the Wave 75, the Aurora 80, the P75, the 80) through their
+/// 2.4 GHz receiver (the "Wireless 2.4G Dongle", 36B0:3002, which the boards of many makers share) or on their cable,
+/// asked over the keyboard's own raw HID channel (usage page 0xFF60, usage 0x61) as PMO Hub's web driver asks: a
+/// session opened (as it opens, the receiver tells which board is paired to it), the battery asked, the session closed.
+/// Only reads. A board that does not answer (asleep, or on its cable) is listed as last read while its receiver stays
+/// plugged in.
+mod pmo {
+    use super::*;
+
+    const VENDOR: u16 = 0x36B0;
+    /// The receiver the boards share.
+    const RECEIVER: u16 = 0x3002;
+    /// The boards, by their own product id (as the receiver tells it, and as their cable is), and their names.
+    const BOARDS: [(u16, &str); 4] = [(0x3009, "WAVE 75"), (0x3004, "Aurora 80"), (0x302B, "PMO P75"), (0x3012, "PMO 80")];
+    /// A frame's first byte, its commands (a session opened, closed, the battery asked) and the mark of a reply that
+    /// did what was asked.
+    const FRAME: u8 = 0xAA;
+    const START: u8 = 0x10;
+    const STOP: u8 = 0x11;
+    const BATTERY: u8 = 0x30;
+    const DONE: u8 = 0x55;
+    /// The length the battery is asked with.
+    const BATTERY_LENGTH: u8 = 0x18;
+    /// How long a question waits for its answer.
+    const WAITED: Duration = Duration::from_millis(600);
+
+    /// Reads the boards, keeping each as it was last read, by the receiver or cable it was read through.
+    #[derive(Default)]
+    pub(super) struct Reader {
+        last: HashMap<String, Device>,
+    }
+
+    impl Reader {
+        pub fn read(&mut self) -> Vec<Device> {
+            let (mut read, mut kept, mut present) = (Vec::new(), Vec::new(), Vec::new());
+            for path in hid::paths(&format!("{VENDOR:04x}")) {
+                let Some(product) = hid::product(&path).filter(|product| *product == RECEIVER || BOARDS.iter().any(|(board, _)| board == product)) else { continue };
+                let Some(mut channel) = hid::Collection::open(&path, |caps| caps.UsagePage == 0xFF60 && caps.Usage == 0x61 && matches!(caps.OutputReportByteLength, 33 | 65))
+                else {
+                    continue;
+                };
+                present.push(path.clone());
+                match battery(&mut channel) {
+                    Some((board, level)) => {
+                        let board = board.unwrap_or(product);
+                        let name = BOARDS.iter().find(|(id, _)| *id == board).map_or("", |(_, name)| name).to_string();
+                        let via = if product == RECEIVER { Via::Receiver } else { Via::Cable };
+                        let device = Device { key: format!("pmo:{board:04x}"), name, kind: Kind::Keyboard, via, level, charging: false, container: None };
+                        self.last.insert(path, device.clone());
+                        read.push(device);
+                    }
+                    None => kept.extend(self.last.get(&path).cloned()),
+                }
+            }
+            self.last.retain(|path, _| present.contains(path));
+            // (A board read on its cable, and kept as last read on its receiver: as read.)
+            kept.retain(|device: &Device| !read.iter().any(|fresh: &Device| fresh.key == device.key));
+            read.extend(kept);
+            read
+        }
+    }
+
+    /// The board's battery (percent), and the board the receiver says is paired to it (none on a cable), asked of
+    /// `channel` in a session of its own; none where it did not answer.
+    fn battery(channel: &mut hid::Collection) -> Option<(Option<u16>, u8)> {
+        // (The length a session is opened and closed with: the report's less the frame's head, as PMO Hub's.)
+        let length = channel.output.saturating_sub(9) as u8;
+        // (Asked twice: the first may wake the link.)
+        let started = ask(channel, START, length).or_else(|| ask(channel, START, length));
+        let Some(started) = started else {
+            // (Closed all the same, in case it was opened.)
+            channel.write(&frame(channel.output, STOP, length), WAITED);
+            return None;
+        };
+        let level = done(&started).then(|| ask(channel, BATTERY, BATTERY_LENGTH)).flatten().and_then(|reply| level(&reply));
+        ask(channel, STOP, length);
+        Some((paired(&started), level?))
+    }
+
+    /// Asks `command` of `channel` (with `length`): its reply's payload (the report id taken off), where it came in time.
+    fn ask(channel: &mut hid::Collection, command: u8, length: u8) -> Option<Vec<u8>> {
+        channel.read();
+        if !channel.write(&frame(channel.output, command, length), WAITED) {
+            return None;
+        }
+        let until = Instant::now() + WAITED;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            if let Some(reply) = channel.next(left).and_then(|report| answer(&report, command)) {
+                return Some(reply);
+            }
+        }
+    }
+
+    /// The report asking `command` with `length`, `output` long (its report id, 0, first).
+    pub(super) fn frame(output: usize, command: u8, length: u8) -> Vec<u8> {
+        let mut report = vec![0; output.max(6)];
+        report[1..6].copy_from_slice(&[FRAME, command, 0, 0, length]);
+        report
+    }
+
+    /// The payload of `report` (its report id taken off), where it answers `command`: it begins as the question did.
+    pub(super) fn answer(report: &[u8], command: u8) -> Option<Vec<u8>> {
+        let payload = report.get(1..)?;
+        payload.starts_with(&[FRAME, command, 0, 0]).then(|| payload.to_vec())
+    }
+
+    /// Whether a reply says it did what was asked.
+    pub(super) fn done(reply: &[u8]) -> bool {
+        reply.get(7) == Some(&DONE)
+    }
+
+    /// The board a session's opening says is paired to the receiver (its vendor's and product's ids, low byte first).
+    pub(super) fn paired(started: &[u8]) -> Option<u16> {
+        let id = |at: usize| Some(u16::from_le_bytes([*started.get(at)?, *started.get(at + 1)?]));
+        (id(9)? == VENDOR).then(|| id(11)).flatten()
+    }
+
+    /// The battery's level a reply to the battery's question tells, where it did what was asked.
+    pub(super) fn level(reply: &[u8]) -> Option<u8> {
+        done(reply).then(|| reply.get(8).copied()).flatten().filter(|level| *level <= 100)
+    }
 }
 
 /// The devices of Logitech's receivers, asked over HID++ (Logitech's protocol, as documented by Logitech and by
@@ -714,60 +982,11 @@ mod logitech {
         }
     }
 
-    /// One of a receiver's HID++ collections, opened for overlapped reading and writing, with a read of it under way
-    /// (into `buffer`, telling `overlapped`'s event) while `reading`.
-    struct Collection {
-        handle: HANDLE,
-        overlapped: Box<OVERLAPPED>,
-        buffer: Vec<u8>,
-        reading: bool,
-        /// The length of its output report.
-        output: usize,
-    }
-
-    impl Collection {
-        /// A read begun, where none is under way.
-        fn read(&mut self) {
-            if self.reading {
-                return;
-            }
-            let began = unsafe { ReadFile(self.handle, Some(&mut self.buffer), None, Some(&mut *self.overlapped)) };
-            self.reading = began.is_ok() || began.is_err_and(|error| error.code() == ERROR_IO_PENDING.to_hresult());
-        }
-
-        /// The report read, once the read under way has ended (its event told): none where it failed.
-        fn report(&mut self) -> Option<Vec<u8>> {
-            self.reading = false;
-            let mut length = 0u32;
-            unsafe { GetOverlappedResult(self.handle, &*self.overlapped, &mut length, false) }.ok()?;
-            Some(self.buffer[..length as usize].to_vec())
-        }
-    }
-
-    impl Drop for Collection {
-        fn drop(&mut self) {
-            if self.reading {
-                let mut length = 0u32;
-                let _ = unsafe { CancelIoEx(self.handle, Some(&*self.overlapped)) };
-                let _ = unsafe { GetOverlappedResult(self.handle, &*self.overlapped, &mut length, true) };
-            }
-            let _ = unsafe { CloseHandle(self.overlapped.hEvent) };
-            let _ = unsafe { CloseHandle(self.handle) };
-        }
-    }
-
     /// A receiver: its USB interface's instance identifier, and its HID++ collections (short, long, very long:
     /// questions are written to the short one, or the long one where it has none; answers come on any).
     struct Receiver {
         id: String,
-        collections: Vec<Collection>,
-        written: HANDLE,
-    }
-
-    impl Drop for Receiver {
-        fn drop(&mut self) {
-            let _ = unsafe { CloseHandle(self.written) };
-        }
+        collections: Vec<hid::Collection>,
     }
 
     impl Receiver {
@@ -782,7 +1001,7 @@ mod logitech {
             let length = self.collections[writer].output;
             let mut request = vec![0u8; length];
             request[..7].copy_from_slice(&[if length == 7 { SHORT } else { LONG }, device, sub, address, parameters[0], parameters[1], parameters[2]]);
-            if !self.write(writer, &request) {
+            if !self.collections[writer].write(&request, WAITED) {
                 return Answer::Silent;
             }
             let until = Instant::now() + WAITED;
@@ -808,83 +1027,21 @@ mod logitech {
             }
         }
 
-        /// Writes `report` to the collection `writer`: whether it was written in time.
-        fn write(&mut self, writer: usize, report: &[u8]) -> bool {
-            let handle = self.collections[writer].handle;
-            let mut overlapped = OVERLAPPED { hEvent: self.written, ..Default::default() };
-            let began = unsafe { WriteFile(handle, Some(report), None, Some(&mut overlapped)) };
-            if began.is_err_and(|error| error.code() != ERROR_IO_PENDING.to_hresult()) {
-                return false;
-            }
-            let mut length = 0u32;
-            if unsafe { GetOverlappedResultEx(handle, &overlapped, &mut length, WAITED.as_millis() as u32, false) }.is_ok() {
-                return length as usize == report.len();
-            }
-            let _ = unsafe { CancelIoEx(handle, Some(&overlapped)) };
-            let _ = unsafe { GetOverlappedResult(handle, &overlapped, &mut length, true) };
-            false
-        }
     }
 
     /// Logitech's HID++ collections there are now (see `opened`), opened, by the USB interface they are of: each such interface's, as a receiver that may be (it is one if it answers as one).
     fn receivers() -> Vec<Receiver> {
-        let size = || {
-            let mut length = 0u32;
-            (unsafe { CM_Get_Device_Interface_List_SizeW(&mut length, &GUID_DEVINTERFACE_HID, PCWSTR::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } == CR_SUCCESS)
-                .then_some(length)
-        };
-        let list = |into: &mut [u16]| unsafe { CM_Get_Device_Interface_ListW(&GUID_DEVINTERFACE_HID, PCWSTR::null(), into, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
-        let mut by_interface: Vec<(String, Vec<Collection>)> = Vec::new();
-        for path in multi_string(listed(size, list)) {
-            if !path.to_ascii_lowercase().contains("vid_046d") {
-                continue;
-            }
+        let mut by_interface: Vec<(String, Vec<hid::Collection>)> = Vec::new();
+        for path in hid::paths("046d") {
             let Some(parent) = parent_of(&path) else { continue };
-            let Some(collection) = opened(&path) else { continue };
+            // (HID++'s: vendor-defined (usage page 0xFF00), of its short reports (usage 1) or its long ones (usage 2).)
+            let Some(collection) = hid::Collection::open(&path, |caps| caps.UsagePage == 0xFF00 && matches!(caps.Usage, 1 | 2) && caps.InputReportByteLength >= 7) else { continue };
             match by_interface.iter_mut().find(|(id, _)| *id == parent) {
                 Some((_, collections)) => collections.push(collection),
                 None => by_interface.push((parent, vec![collection])),
             }
         }
-        by_interface
-            .into_iter()
-            .filter_map(|(id, collections)| {
-                let written = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.ok()?;
-                Some(Receiver { id, collections, written })
-            })
-            .collect()
-    }
-
-    /// The HID collection at `path`, opened, where it is one of HID++: vendor-defined (usage page 0xFF00), of its short
-    /// reports (usage 1) or its long ones (usage 2).
-    fn opened(path: &str) -> Option<Collection> {
-        let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
-        let handle =
-            unsafe { CreateFileW(PCWSTR(wide.as_ptr()), (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None) }
-                .ok()?;
-        let mut caps = HIDP_CAPS::default();
-        let mut data = PHIDP_PREPARSED_DATA::default();
-        let read = unsafe { HidD_GetPreparsedData(handle, &mut data) } && {
-            let status = unsafe { HidP_GetCaps(data, &mut caps) };
-            let _ = unsafe { HidD_FreePreparsedData(data) };
-            status == HIDP_STATUS_SUCCESS
-        };
-        let event = if read && caps.UsagePage == 0xFF00 && matches!(caps.Usage, 1 | 2) && caps.InputReportByteLength >= 7 {
-            unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.ok()
-        } else {
-            None
-        };
-        let Some(event) = event else {
-            let _ = unsafe { CloseHandle(handle) };
-            return None;
-        };
-        Some(Collection {
-            handle,
-            overlapped: Box::new(OVERLAPPED { hEvent: event, ..Default::default() }),
-            buffer: vec![0; caps.InputReportByteLength as usize],
-            reading: false,
-            output: caps.OutputReportByteLength as usize,
-        })
+        by_interface.into_iter().map(|(id, collections)| Receiver { id, collections }).collect()
     }
 
     /// The instance identifier of the device a HID collection's interface (at `path`) is of: its USB interface.
@@ -1145,6 +1302,29 @@ mod tests {
         assert!(!pairing(&Answer::Refused(0x08), 0x51));
         assert!(!pairing(&Answer::Reply(vec![0x53, 0x02]), 0x52));
         assert!(!pairing(&Answer::Silent, 0x52));
+    }
+
+    /// PMO Hub's frames, and its replies as the owner's Wave 75 gave them through its receiver: the session's opening
+    /// naming the board paired (36B0:3009), the battery at 6 %, the session closed. A reply to another question, one
+    /// that failed (0x0F) and a level past 100 tell nothing.
+    #[test]
+    fn a_pmo_board_is_read_through_its_receiver() {
+        use super::pmo::{answer, done, frame, level, paired};
+        let reply = |bytes: &[u8]| -> Vec<u8> { [&[0u8][..], bytes, &[0u8; 32][..32 - bytes.len()]].concat() };
+        assert_eq!(frame(33, 0x10, 0x18)[..7], [0x00, 0xAA, 0x10, 0x00, 0x00, 0x18, 0x00]);
+        assert_eq!(frame(33, 0x10, 0x18).len(), 33);
+        let started = answer(&reply(&[0xAA, 0x10, 0x00, 0x00, 0x18, 0x00, 0x00, 0x55, 0x00, 0xB0, 0x36, 0x09, 0x30]), 0x10).unwrap();
+        assert!(done(&started));
+        assert_eq!(paired(&started), Some(0x3009));
+        let battery = answer(&reply(&[0xAA, 0x30, 0x00, 0x00, 0x18, 0x00, 0x00, 0x55, 0x06]), 0x30).unwrap();
+        assert_eq!(level(&battery), Some(6));
+        assert!(done(&answer(&reply(&[0xAA, 0x11, 0x00, 0x00, 0x18, 0x00, 0x00, 0x55]), 0x11).unwrap()));
+        assert_eq!(answer(&reply(&[0xAA, 0x30, 0x00, 0x00, 0x18, 0x00, 0x00, 0x55, 0x06]), 0x10), None);
+        assert_eq!(level(&answer(&reply(&[0xAA, 0x30, 0x00, 0x00, 0x18, 0x00, 0x00, 0x0F, 0x06]), 0x30).unwrap()), None);
+        assert_eq!(level(&answer(&reply(&[0xAA, 0x30, 0x00, 0x00, 0x18, 0x00, 0x00, 0x55, 0xC8]), 0x30).unwrap()), None);
+        // On its cable, no board is named.
+        assert_eq!(paired(&answer(&reply(&[0xAA, 0x10, 0x00, 0x00, 0x38, 0x00, 0x00, 0x55]), 0x10).unwrap()), None);
+        assert_eq!(super::hid::product(r"\\?\hid#vid_36b0&pid_3002&mi_01#a&11e21a08&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"), Some(0x3002));
     }
 
     #[test]

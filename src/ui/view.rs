@@ -3330,6 +3330,8 @@ fn device_via(via: DeviceVia, lang: Lang) -> &'static str {
         DeviceVia::Bluetooth => lang.pick("蓝牙", "Bluetooth"),
         DeviceVia::Logitech => lang.pick("罗技接收器", "Logitech receiver"),
         DeviceVia::Xbox => lang.pick("Xbox 无线", "Xbox Wireless"),
+        DeviceVia::Receiver => lang.pick("2.4G 接收器", "2.4 GHz receiver"),
+        DeviceVia::Cable => lang.pick("有线连接", "Cable"),
     }
 }
 
@@ -3366,10 +3368,10 @@ fn paint_devices(frame: &dyn Canvas, scene: &Scene, ink: Ink, devices: &[DeviceS
                 let room = (left + width - figure - 8.0 - words).max(0.0);
                 if named {
                     let lines = row_top + (tall - 2.0 * LINE) / 2.0;
-                    frame.text(&device.name, theme.body, theme.text, words, lines, room, Align::Start);
+                    frame.text(&device.called(scene.lang == Lang::Zh), theme.body, theme.text, words, lines, room, Align::Start);
                     frame.text(device_via(device.via, scene.lang), theme.small, theme.text3, words, lines + LINE, room, Align::Start);
                 } else {
-                    frame.text(&device.name, theme.small, theme.text, words, row_top + (tall - LINE) / 2.0, room, Align::Start);
+                    frame.text(&device.called(scene.lang == Lang::Zh), theme.small, theme.text, words, row_top + (tall - LINE) / 2.0, room, Align::Start);
                 }
                 frame.text(&percent(device), theme.small, theme.text2, left + width - figure, row_top + (tall - LINE) / 2.0, figure, Align::End);
             }
