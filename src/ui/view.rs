@@ -4298,8 +4298,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         "wsl" => {
             use crate::reading::WslSample;
-            // Only while its machine runs (see `Seen::wsl`); stopped while the panel is up, it keeps its rows,
-            // unread, so the lane does not change size.
+            // Only while its machine runs (see `Seen::wsl`): stopped while the panel is up, the panel is laid out anew
+            // without it (see `Seen::join`).
             if !scene.seen.wsl {
                 return None;
             }
@@ -11037,10 +11037,11 @@ otepad.exe", "Notepad"),
         // Running: their lanes.
         let history = leak(vec![running()]);
         assert_eq!(shown(seen_of(history), history), ["wsl", "docker"]);
-        // Stopped since, a panel up meanwhile keeping them as it was laid out; laid out afresh, none.
+        // Stopped since, a panel up meanwhile laid out anew holding what it held: none (see `Seen::join`); laid out
+        // afresh, none.
         let history = leak(vec![running(), stopped()]);
         let up = Box::leak(Box::new(Seen::of(&history[..1]).join(&Seen::of(history), &info)));
-        assert_eq!(shown(up, history), ["wsl", "docker"]);
+        assert!(shown(up, history).is_empty());
         assert!(shown(seen_of(history), history).is_empty());
         // Come to run while a panel laid out without them is up: theirs are its news.
         let up = Seen::of(&history[1..]);

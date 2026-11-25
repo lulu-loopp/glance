@@ -28,8 +28,9 @@ mod tests {
 
     /// The libraries every Windows 10 and 11 for desktops has, whatever its edition (N ones too) and the features
     /// turned on in it: the ones a program may have Windows load as it starts.
-    const ON_EVERY_WINDOWS: [&str; 44] = [
+    const ON_EVERY_WINDOWS: [&str; 45] = [
         "advapi32.dll",
+        "api-ms-win-core-realtime-l1-1-1.dll",
         "api-ms-win-core-synch-l1-2-0.dll",
         "api-ms-win-core-winrt-error-l1-1-0.dll",
         "api-ms-win-core-winrt-l1-1-0.dll",
