@@ -582,6 +582,17 @@ fn run(asks: Receiver<Ask>) {
     }
 }
 
+/// Where each of `hits` (laid out as if nothing were scrolled) is on a page `height` tall scrolled `scroll` down: moved
+/// up by it, cut to the page, those scrolled off it left out.
+fn scrolled<T>(hits: Vec<(f32, f32, f32, f32, T)>, scroll: f32, height: f32) -> Vec<(f32, f32, f32, f32, T)> {
+    hits.into_iter()
+        .filter_map(|(x, y, w, h, hit)| {
+            let (top, bottom) = ((y - scroll).max(0.0), (y - scroll + h).min(height));
+            (bottom > top).then_some((x, top, w, bottom - top, hit))
+        })
+        .collect()
+}
+
 /// Where the page `opening` asks for is on the screen (physical px, its shadow's room left out), and how many pixels a
 /// DIP is there: beside what it opens from on its side away from the edge, else on the other, else over it; under the
 /// top edge's panel, as tall as the room under it is.
@@ -1830,9 +1841,23 @@ impl Beside {
         self.paint_ground(frame, (width, height));
         let theme = self.theme.clone();
         let accent = self.accent();
-        let mut hits = Vec::new();
-        self.waiting = self.sound.paint(frame, &theme, self.lang, width, self.pointer, accent, &mut hits);
-        self.hits = hits.into_iter().map(|(x, y, w, h, hit)| (x, y, w, h, Hit::Sound(hit))).collect();
+        // What it lists past its height (on a screen too short for all of it: see `placed_in`) scrolled to by the
+        // wheel (see `WM_MOUSEWHEEL`), a thin thumb where the view is, as the list's; what is pressed where it is drawn.
+        self.scroll_most = (super::outputs::height_of(&crate::audio::mixer()) - height).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, self.scroll_most);
+        let scroll = self.scroll;
+        let pointer = self.pointer.map(|(x, y)| (x, y + scroll));
+        let (sound, lang) = (&mut self.sound, self.lang);
+        let (mut hits, mut waiting) = (Vec::new(), false);
+        frame.clip(0.0, 0.0, width, height);
+        frame.within(windows_numerics::Matrix3x2::translation(0.0, -scroll), |frame| waiting = sound.paint(frame, &theme, lang, width, pointer, accent, &mut hits));
+        frame.unclip();
+        if self.scroll_most > 0.0 {
+            let thumb = (height * height / (height + self.scroll_most)).max(16.0);
+            frame.fill_rounded(theme.text3.alpha(0.6), width - 6.0, (height - thumb) * scroll / self.scroll_most, 2.0, thumb, 1.0);
+        }
+        self.waiting = waiting;
+        self.hits = scrolled(hits, scroll, height).into_iter().map(|(x, y, w, h, hit)| (x, y, w, h, Hit::Sound(hit))).collect();
     }
 
     /// What of the sound's page is where, as it was last drawn (see `outputs`).
@@ -2428,6 +2453,14 @@ otepad.exe"),
                             let file = format!("sound-{name}-{}-{label}.png", if dark { "dark" } else { "light" });
                             crate::studio::save_png(&out.join(file), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
                         }
+                        // (On a screen too short for it: scrolled part way, its thumb at the side.)
+                        if pass == 1 && label == "track" {
+                            let short = (h - 120.0).max(120.0);
+                            beside.scroll = 60.0;
+                            let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (short * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, short))).unwrap();
+                            let file = format!("sound-{name}-{}-scrolled.png", if dark { "dark" } else { "light" });
+                            crate::studio::save_png(&out.join(file), (w * 1.5) as u32, (short * 1.5) as u32, &pixels).unwrap();
+                        }
                     }
                 }
             }
@@ -2441,6 +2474,15 @@ otepad.exe"),
 #[cfg(test)]
 mod tests {
     use super::goes_now;
+
+    /// The sound's page scrolled: each thing pressed is where it shows, moved up by the scroll, cut at the page's edges,
+    /// and what is scrolled off it is not pressed at all (a page taller than its screen had its last rows out of reach).
+    #[test]
+    fn a_scrolled_page_is_pressed_where_it_shows() {
+        let hits = vec![(0.0, 10.0, 100.0, 30.0, 'a'), (0.0, 90.0, 100.0, 30.0, 'b'), (0.0, 190.0, 100.0, 30.0, 'c'), (0.0, 290.0, 100.0, 30.0, 'd')];
+        assert_eq!(super::scrolled(hits.clone(), 0.0, 1000.0), hits);
+        assert_eq!(super::scrolled(hits, 100.0, 200.0), vec![(0.0, 0.0, 100.0, 20.0, 'b'), (0.0, 90.0, 100.0, 30.0, 'c'), (0.0, 190.0, 100.0, 10.0, 'd')]);
+    }
 
     /// A page comes in from what it opened from: clear, nearer it and a little smaller as it is shown, about its corner
     /// nearest it; seen whole a while before it settles, then in place. Shown with motion turned off, in place at once.
