@@ -315,6 +315,122 @@ pub fn put_before(apps: &mut Vec<App>, moving: &str, before: Option<&str>) {
     apps.insert(to, app);
 }
 
+/// One kept at hand pressed in quick launch, in the panel or on a widget alike: moved far enough, put elsewhere among
+/// them as it is let go over another (the others making room as it goes); else opened as it is let go on it.
+#[derive(Default)]
+pub struct Moving {
+    /// What opens the one pressed (as shown as it was pressed: what is kept may change meanwhile, and its place with
+    /// it), where the pointer was (screen px), and whether it has gone far enough to be put elsewhere.
+    pressed: Option<(String, windows::Win32::Foundation::POINT, bool)>,
+    /// The place among them it would go to (the one the pointer was last over), and where the pointer has it (DIPs from
+    /// the corner of what shows them).
+    over: Option<u16>,
+    point: (f32, f32),
+    /// One let go among them: what opens it and its place, kept so (see `thumb::Dots::apps`) till what is kept comes to
+    /// that order, or a while after.
+    dropped: Option<(String, usize, std::time::Instant)>,
+}
+
+/// What one pressed among those kept at hand does as it is let go (see `Moving::let_go`).
+#[derive(Debug, PartialEq)]
+pub enum Let {
+    Nothing,
+    /// Put before the one that opens the second (none: last).
+    Put(String, Option<String>),
+    /// Opened: let go on it, not moved.
+    Open(crate::ui::view::Hit),
+}
+
+impl Let {
+    /// Done: put where it goes (what is kept changed), or opened.
+    pub fn act(self) {
+        match self {
+            Let::Nothing => {}
+            Let::Put(moving, before) => change(move |apps| put_before(apps, &moving, before.as_deref())),
+            Let::Open(hit) => {
+                crate::station::pressed(hit);
+            }
+        }
+    }
+}
+
+impl Moving {
+    /// The one numbered `number` pressed, the pointer at `from` (screen px). Whether it is one kept at hand.
+    pub fn press(&mut self, number: u64, from: windows::Win32::Foundation::POINT) -> bool {
+        let Some(target) = numbered(number).map(|app| app.target) else { return false };
+        self.pressed = Some((target, from, false));
+        self.over = None;
+        true
+    }
+
+    /// Whether one is pressed.
+    pub fn pressed(&self) -> bool {
+        self.pressed.is_some()
+    }
+
+    /// Whether one pressed has been moved far enough to be put elsewhere.
+    pub fn moved(&self) -> bool {
+        self.pressed.as_ref().is_some_and(|(.., moved)| *moved)
+    }
+
+    /// The pointer at `now` (screen px) with one pressed, at `point` (DIPs from the corner of what shows them), over the
+    /// place `slot` (where it is over one): far enough from where it was pressed, moved, and from then on held there,
+    /// its place the one it is over (between them, the last it was over). Whether it is moved.
+    pub fn follow(&mut self, now: windows::Win32::Foundation::POINT, point: (f32, f32), slot: Option<u16>) -> bool {
+        let Some((_, from, moved)) = self.pressed.as_mut() else { return false };
+        *moved |= crate::station::run::drag_begins(*from, now);
+        if !*moved {
+            return false;
+        }
+        self.point = point;
+        if slot.is_some() {
+            self.over = slot;
+        }
+        true
+    }
+
+    /// Nothing pressed any more (Esc), nothing done.
+    pub fn cancel(&mut self) {
+        self.pressed = None;
+        self.over = None;
+    }
+
+    /// Let go, the button up (`up`; else the pointer taken from it) over `over`: moved to another place, put there
+    /// (dropped on a later one, after it; on an earlier one, before it), kept so as drawn till what is kept comes to
+    /// that order; not moved, let go on it, opened. What it does (see `Let::act`).
+    pub fn let_go(&mut self, up: bool, over: Option<crate::ui::view::Hit>) -> Let {
+        let Some((moving, _, moved)) = self.pressed.take() else { return Let::Nothing };
+        let went = self.over.take().filter(|_| moved);
+        // (By what opens it: where it is now, if it is kept still.)
+        let shown = shown();
+        let from = shown.iter().position(|app| app.target == moving);
+        match (up, moved, went, from) {
+            (true, true, Some(to), Some(from)) if usize::from(to) != from => {
+                let to = usize::from(to).min(shown.len() - 1);
+                let before = shown.get(if to > from { to + 1 } else { to }).map(|app| app.target.clone());
+                self.dropped = Some((moving.clone(), to, std::time::Instant::now()));
+                Let::Put(moving, before)
+            }
+            (true, false, _, Some(_)) if over == Some(crate::ui::view::Hit::App(number_of(&moving))) => Let::Open(crate::ui::view::Hit::App(number_of(&moving))),
+            _ => Let::Nothing,
+        }
+    }
+
+    /// The one held as those kept at hand are drawn in `order` (by what opens each): its place, the place it would go,
+    /// and where the pointer has it; one let go, at the place it went till they come to that order (or a while after).
+    pub fn hold(&mut self, order: &[String]) -> Option<crate::ui::thumb::Held> {
+        if self.dropped.as_ref().is_some_and(|(target, to, at)| order.get(*to) == Some(target) || at.elapsed() > std::time::Duration::from_secs(1)) {
+            self.dropped = None;
+        }
+        let held = self.pressed.as_ref().filter(|(.., moved)| *moved).and_then(|(target, ..)| order.iter().position(|one| one == target));
+        match (held, &self.dropped) {
+            (Some(from), _) => Some((from, self.over.map_or(from, usize::from), Some(self.point))),
+            (_, Some((target, to, _))) => order.iter().position(|one| one == target).map(|from| (from, *to, None)),
+            _ => None,
+        }
+    }
+}
+
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).
 /// `app`, kept at hand, shown in quick launch by `alias` from now (none: by its own name again).
 pub fn rename(app: App, alias: Option<String>) {
@@ -336,6 +452,42 @@ pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
+    /// One kept at hand pressed and moved over another place is put there as it is let go, and drawn there till what
+    /// is kept comes to that order; one pressed and let go on it, not moved, is opened; the pointer taken, nothing.
+    /// (In quick launch in the panel and on a widget alike: a widget had no way to put one elsewhere.)
+    #[test]
+    fn one_kept_at_hand_is_moved_among_them_or_opened() {
+        use windows::Win32::Foundation::POINT;
+        let app = |target: &str| super::App { target: target.into(), name: target.into(), alias: None };
+        super::pretend(vec![app("a"), app("b"), app("c")]);
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let at = POINT { x: 100, y: 100 };
+        let far = POINT { x: 200, y: 100 };
+        let mut moving = super::Moving::default();
+        assert!(moving.press(super::number_of("a"), at));
+        assert!(!moving.follow(at, (0.0, 0.0), Some(0)));
+        assert_eq!(moving.hold(&order), None);
+        assert!(moving.follow(far, (50.0, 5.0), Some(2)));
+        assert_eq!(moving.hold(&order), Some((0, 2, Some((50.0, 5.0)))));
+        // (Between them: the last it was over.)
+        assert!(moving.follow(far, (60.0, 5.0), None));
+        assert_eq!(moving.hold(&order), Some((0, 2, Some((60.0, 5.0)))));
+        assert_eq!(moving.let_go(true, None), super::Let::Put("a".into(), None));
+        assert_eq!(moving.hold(&order), Some((0, 2, None)));
+        // Pressed and let go on it: opened.
+        let b = crate::ui::view::Hit::App(super::number_of("b"));
+        assert!(moving.press(super::number_of("b"), at));
+        assert_eq!(moving.let_go(true, Some(b)), super::Let::Open(b));
+        // Moved back onto its own place, or the pointer taken: nothing.
+        assert!(moving.press(super::number_of("c"), at));
+        assert!(moving.follow(far, (0.0, 0.0), Some(2)));
+        assert_eq!(moving.let_go(true, None), super::Let::Nothing);
+        assert!(moving.press(super::number_of("c"), at));
+        assert!(moving.follow(far, (0.0, 0.0), Some(0)));
+        assert_eq!(moving.let_go(false, None), super::Let::Nothing);
+        assert!(!moving.pressed());
+    }
+
     /// Two kept at hand that bear one name (two folders named Documents) are told by the folders they are in, the
     /// fewest folders up where those differ; one bearing a name of its own, a web address and a program by its shell
     /// name, by their names. (They were told by the same name, their tags alike: the owner could not tell which was

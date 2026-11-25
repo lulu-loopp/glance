@@ -612,14 +612,9 @@ impl Music {
     /// one turned to), down toward the end for a turn toward the user.
     pub fn wheel(&mut self, delta: i16, on_sound: bool) {
         // Over the sound's key or its slider (`on_sound`, as its host finds it where the wheel turned): the sound
-        // turned, two in a hundred a notch (as Windows' own does); a part of a notch kept toward the next (a touchpad
-        // turns it by little ones).
+        // turned (see `playing::wheel_sound`).
         if on_sound {
-            let steps = crate::playing::wheel_steps(&mut self.sound_wheeled, delta, 2);
-            if let (Some((level, _)), true) = (crate::playing::sound(), steps != 0) {
-                let to = (i32::from(level) + steps).clamp(0, 100) as u8;
-                crate::playing::set_sound(Some(to), Some(false));
-            }
+            crate::playing::wheel_sound(&mut self.sound_wheeled, delta);
             return;
         }
         self.wheeled -= delta as f32;

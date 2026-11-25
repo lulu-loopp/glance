@@ -669,6 +669,15 @@ pub enum Slider {
 /// The wheel's `delta` (120 a notch) added to what it turned before (`kept`, in hundred and twentieths of a step): the
 /// whole steps of the sound it makes (`per_notch` a notch), what is left of a step kept toward the next (a touchpad
 /// turns it by parts of a notch, none lost).
+/// The sound turned by the wheel (`delta`) over its slider or its key, wherever they are drawn: two in a hundred a
+/// notch (as Windows' own does), a part of a notch kept in `kept` toward the next (a touchpad turns it by little ones).
+pub fn wheel_sound(kept: &mut i32, delta: i16) {
+    let steps = wheel_steps(kept, delta, 2);
+    if let (Some((level, _)), true) = (sound(), steps != 0) {
+        set_sound(Some((i32::from(level) + steps).clamp(0, 100) as u8), Some(false));
+    }
+}
+
 pub fn wheel_steps(kept: &mut i32, delta: i16, per_notch: i32) -> i32 {
     *kept += i32::from(delta) * per_notch;
     let steps = *kept / 120;

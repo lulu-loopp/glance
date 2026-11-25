@@ -557,6 +557,8 @@ pub struct Scrolls {
     turning: [f32; LISTS],
     /// What each shows (see `lists_show`), as it was scrolled for it.
     shows: [u32; LISTS],
+    /// The part of a notch the wheel turned the sound by, kept toward the next (see `playing::wheel_sound`).
+    pub sound_wheeled: i32,
 }
 
 impl Scrolls {
@@ -706,10 +708,16 @@ pub fn under(hits: &[HitBox], (x, y): (f32, f32)) -> impl Iterator<Item = &HitBo
 }
 
 /// The wheel turned `delta` (a notch is 120, turned toward the reader below 0) over what is `under` the pointer (a
-/// thing on a list, then the list, its bar), or (`across`) the wheel turned across: the pages there turned, a page a
+/// thing on a list, then the list, its bar; or the sound's slider or key, the sound turned), or (`across`) the wheel
+/// turned across: the pages there turned, a page a
 /// notch (across, the way it turns), else the list there scrolled, `WHEEL_ROWS` rows a notch (one that lies across, a
 /// page's choices, by either). Whether one was.
 pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> bool {
+    // Over the sound's slider or its key: the sound turned (see `playing::wheel_sound`).
+    if !across && under.first().is_some_and(|hit| hit.of_sound()) {
+        crate::playing::wheel_sound(&mut scrolls.sound_wheeled, delta);
+        return true;
+    }
     let notches = delta as f32 / 120.0;
     let down = -notches * crate::panel::WHEEL_ROWS * TABLE_ROW;
     // (The AI component's sources: turned round, past the last on to the first.)
@@ -7134,6 +7142,26 @@ impl Grid {
         let name = if self.named { GRID_NAME } else { 0.0 };
         (self.x + (n % self.cols) as f32 * (self.cell + GRID_GAP), self.y + (n / self.cols) as f32 * (self.cell + name + GRID_GAP))
     }
+
+    /// How far its pages are turned (in pages, part way while one slides in) by `list`'s scroll, `count` things on them.
+    fn turned(&self, scene: &Scene, list: List, count: usize) -> f32 {
+        let last = (pages_of(count, self.cols * self.rows).len() - 1) as f32;
+        (scene.scrolls.at(list) / PAGE).clamp(0.0, last)
+    }
+
+    /// Where the `i`th of `count` things is (its cell's corner), its page `turned` as `turned` says and each page `w`
+    /// wide.
+    fn place(&self, count: usize, i: usize, turned: f32, w: f32) -> (f32, f32) {
+        let pages = pages_of(count, self.cols * self.rows);
+        let page = pages.iter().rposition(|&(from, _)| from <= i).unwrap_or(0);
+        let (x, y) = self.at(i - pages[page].0);
+        (x + (page as f32 - turned) * w, y)
+    }
+
+    /// The things of `count` on the page `turned` shows: from which, and how many.
+    fn shown(&self, count: usize, turned: f32) -> (usize, usize) {
+        pages_of(count, self.cols * self.rows)[turned.round() as usize]
+    }
 }
 
 /// How `count` things go on pages of `per` cells: each page's first and how many are on it. Where they do not all go
@@ -7203,9 +7231,8 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
     let theme = scene.theme;
     let (x, y, w, h) = room;
     let pages = pages_of(count, grid.cols * grid.rows);
-    let last = (pages.len() - 1) as f32;
-    let most = last * PAGE;
-    let turned = (scene.scrolls.at(list) / PAGE).clamp(0.0, last);
+    let most = (pages.len() - 1) as f32 * PAGE;
+    let turned = grid.turned(scene, list, count);
     let shown = turned.round() as usize;
     let name = if grid.named { GRID_NAME } else { 0.0 };
     let cell = grid.cell;
@@ -7415,8 +7442,14 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let named = crate::station::apps::always_named();
             let grid = Grid::in_room((x, y, w, h), 52.0, named);
             let footed = grid.foot > 0.0;
-            let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
+            // (Each in its place, or on its way to it while one is dragged among them, as the list has them: see
+            // `app_spot`; the one held drawn after all, its picture's middle at the pointer.)
+            let turned = grid.turned(scene, List::Apps, apps.len());
+            let cell = |at: usize| grid.place(apps.len(), at, turned, w);
+            let held_cell = |(px, py): (f32, f32)| (px - grid.cell / 2.0, py - grid.cell / 2.0);
+            let draw = |hits: &mut Vec<HitBox>, at: usize, _: (f32, f32), side: f32, current: bool| {
                 let (name, target) = &apps[at];
+                let Some((cx, cy)) = app_spot(scene, target, at, &cell, &held_cell) else { return };
                 let hit = Hit::App(crate::station::apps::number_of(target));
                 if current {
                     if lit(hit) {
@@ -7440,6 +7473,19 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side, named);
             let hovered = apps.iter().find(|(_, target)| lit(Hit::App(crate::station::apps::number_of(target)))).map(|(name, _)| name.as_str()).filter(|_| !named);
             paint_grid(frame, scene, hits, (x, y, w, h), &grid, apps.len(), List::Apps, &draw, &small, hovered);
+            if let Some((held, point)) = scene.thumbs.app_held() {
+                if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
+                    let (hx, hy) = held_cell(point);
+                    paint_held_app(frame, scene, name, target, hx, hy, grid.cell);
+                }
+            }
+            // The places one dragged among them may go to on the page shown, standing still (see `Hit::AppSlot`).
+            let (from, on) = grid.shown(apps.len(), turned);
+            let name = if named { GRID_NAME } else { 0.0 };
+            for at in from..from + on {
+                let (px, py) = cell(at);
+                hits.push((px, py, grid.cell, grid.cell + name, Hit::AppSlot(at as u16)));
+            }
             hits.push((x, y, w, h, Hit::AppsArea));
         }
         Bench::Notes(notes) => {
@@ -11882,6 +11928,48 @@ seven".into()));
         assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::App(_))));
     }
 
+    /// Quick launch as a grid on pages (a lane too small for its list, and every widget's): one held and dragged finds
+    /// the places of the page shown where the things were, the others moving to make room, and is drawn where the
+    /// pointer has it, not in a cell of its own. (A grid had no places: nothing dragged there could be put elsewhere.)
+    #[test]
+    fn a_grid_of_things_kept_at_hand_has_places_while_one_is_dragged() {
+        let theme = Theme::new(Skin::Glass, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let apps: Vec<(String, String)> = (0..4).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+        let order: Vec<String> = apps.iter().map(|(_, target)| target.clone()).collect();
+        let still: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(super::super::thumb::Dots::new()));
+        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let room = (0.0, 0.0, 300.0, 90.0);
+        let paint = |thumbs| {
+            let mut hits = Vec::new();
+            paint_bench(&Nothing, &scene(thumbs), theme.ink("apps"), room, Rect { x: 0.0, y: 0.0, w: room.2, h: room.3 }, &Bench::Apps(apps.clone()), Shape::of((room.2, room.3)), &mut hits);
+            hits
+        };
+        let number = |at: usize| crate::station::apps::number_of(&format!("C:/{at}.exe"));
+        let hits = paint(still);
+        let at_rest: Vec<(f32, f32)> = (0..4).map(|at| hits.iter().find(|hit| hit.4 == Hit::App(number(at))).map(|hit| (hit.0, hit.1)).unwrap()).collect();
+        for (at, place) in at_rest.iter().enumerate() {
+            let slot = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at as u16)).map(|hit| (hit.0, hit.1));
+            assert_eq!(slot, Some(*place), "place {at} at rest");
+        }
+        // The last held over the first's place, the others on their way to make room.
+        let mut moving = super::super::thumb::Dots::new();
+        let start = std::time::Instant::now();
+        moving.apps(start, &order, Some((3, 0, Some((20.0, 20.0)))));
+        moving.apps(start + std::time::Duration::from_millis(60), &order, Some((3, 0, Some((20.0, 20.0)))));
+        let moving: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(moving));
+        let hits = paint(moving);
+        for (at, place) in at_rest.iter().enumerate() {
+            let slot = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at as u16)).map(|hit| (hit.0, hit.1));
+            assert_eq!(slot, Some(*place), "place {at} held");
+        }
+        assert!(!hits.iter().any(|hit| hit.4 == Hit::App(number(3))), "the one held has no cell of its own");
+        let first = hits.iter().find(|hit| hit.4 == Hit::App(number(0))).map(|hit| (hit.0, hit.1)).unwrap();
+        assert!(first.0 > at_rest[0].0, "the first on its way to make room: {first:?} from {:?}", at_rest[0]);
+    }
+
     /// The deck's strips scroll to every note there is (thirteen: more than fit over the last written's card); the
     /// first not among them.
     #[test]
@@ -12682,6 +12770,21 @@ seven".into()));
     /// The wheel turned over a long list scrolls it, over its things, over the room between them and over its bar
     /// beside it, each list with a bar in each of its views (the bar was drawn past the room the wheel turned it in: a
     /// wheel turned over the bar did nothing). Turned up at its top, it stays.
+    /// The wheel over the sound's slider or its key turns the sound, wherever they are drawn (the time and media lane
+    /// of a panel or a widget, as what plays' own): a part of a notch kept toward the next, nothing scrolled. (Turned a
+    /// quarter of a notch at a time here: the sound itself not set by a test.)
+    #[test]
+    fn the_wheel_over_the_sound_turns_it_wherever_it_is() {
+        for hit in [Hit::Volume, Hit::VolumeUp, Hit::Media(crate::playing::Key::Mute, crate::playing::Follow::Any)] {
+            let mut scrolls = Scrolls::default();
+            assert!(wheel(&mut scrolls, &[hit], 30, false), "{hit:?}");
+            assert_eq!(scrolls.sound_wheeled, 60);
+            assert_eq!(scrolls, Scrolls { sound_wheeled: 60, ..Scrolls::default() });
+            // Turned across, not.
+            assert!(!wheel(&mut Scrolls::default(), &[hit], 30, true));
+        }
+    }
+
     #[test]
     fn the_wheel_scrolls_a_list_over_it_and_over_its_bar() {
         for (what, list, hits) in lists_with_bars(0.0) {

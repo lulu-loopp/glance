@@ -883,6 +883,15 @@ struct Widget {
     /// is from the corner of what it shows (its own DIPs), as last drawn.
     hits: Vec<view::HitBox>,
     hits_from: (f32, f32),
+    /// What it shows moved under the pointer as it was drawn (a list scrolled, a lane grown, things come to new places):
+    /// what is under the pointer to be found again where it stays (see `Widgets::hover_again`), as the panel does.
+    hits_moved: bool,
+    /// A thing kept at hand pressed: moved among them, or opened as it is let go (see `station::apps::Moving`).
+    apps: crate::station::apps::Moving,
+    /// A note's card on a list of notes pressed (by its file's name), where the pointer was, and where its card is
+    /// (physical px on the screen): pulled, it is stuck on the desktop under the hand, lifted off its card; let go on
+    /// it, it is opened beside, as the panel's are.
+    note_press: Option<(String, POINT, RECT)>,
     /// A thing on its station pressed (see `station::select::Press`): dragged off it once moved far enough, else
     /// pressed as it is let go (see `Widgets::hover`, `Widgets::release`).
     shelf_press: Option<crate::station::select::Press>,
@@ -1221,6 +1230,31 @@ impl Merged {
 
     /// The part at `(x, y)` (DIPs, from its corner) to be taken (the readings, everywhere but what plays), and that
     /// point from the part's corner.
+    /// How large the part drawn at `at` (from its corner, DIPs as large as it is on the screen) draws what it shows, its
+    /// own DIPs to these: its readings' zoom as last laid out. What plays, and between the parts, as large.
+    fn zoom_at(&self, (x, y): (f32, f32)) -> f32 {
+        self.rects
+            .iter()
+            .position(|&(rx, ry, rw, rh)| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+            .and_then(|index| match &self.parts[index] {
+                Content::Readings(readings) => readings.last.as_ref().map(|shown| shown.zoom),
+                _ => None,
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// Where `at` (from its corner, DIPs as large as it is on the screen) is in the own DIPs of the part drawn there
+    /// (from its corner, as large as that part draws them); between the parts, as it is.
+    fn own_at(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        match self.rects.iter().copied().find(|&(rx, ry, rw, rh)| x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
+            Some((rx, ry, ..)) => {
+                let z = self.zoom_at((x, y));
+                ((x - rx) / z, (y - ry) / z)
+            }
+            None => (x, y),
+        }
+    }
+
     fn part_at(&self, (x, y): (f32, f32)) -> Option<(usize, (f32, f32))> {
         let inside = |(rx, ry, rw, rh): (f32, f32, f32, f32)| x >= rx && x < rx + rw && y >= ry && y < ry + rh;
         let index = self.parts.iter().position(|part| matches!(part, Content::Music(_))).filter(|&music| self.touch.get(music).is_some_and(|rect| inside(*rect)));
@@ -1967,6 +2001,15 @@ impl Widgets {
 
     /// The widget the note `name` is stuck on the desktop as (alone, or merged with another), raised in front; whether
     /// there is one.
+    /// The note `number`, its card clicked on the widget at `index`: where it is stuck on the desktop already, that one
+    /// shown (as the panel shows it, not opened a second time); else opened beside the widget.
+    fn show_note(&mut self, index: usize, number: u64) {
+        let Some(name) = crate::notes::named(number) else { return };
+        if !self.raise_note(&name) {
+            self.list[index].open_beside(crate::ui::beside::Page::Note(Some(name)));
+        }
+    }
+
     pub fn raise_note(&mut self, name: &str) -> bool {
         let only = format!("{}{name}", view::STUCK_NOTE_LANE);
         let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return false };
@@ -2030,8 +2073,22 @@ impl Widgets {
     }
 
     /// Whether the widget `hwnd` is in hand (moved, sized, or its sound's track slid).
+    /// Whether a thing kept at hand is dragged among them on one (Esc puts it back where it was).
+    pub fn dragging_app(&self) -> bool {
+        self.list.iter().any(|widget| widget.apps.moved())
+    }
+
+    /// Each thing kept at hand dragged on one put back where it was (Esc): nothing done.
+    pub fn cancel_apps(&mut self) {
+        for widget in self.list.iter_mut().filter(|widget| widget.apps.moved()) {
+            widget.apps.cancel();
+            widget.stop_following();
+            widget.next_frame = Instant::now();
+        }
+    }
+
     pub fn held(&self, hwnd: HWND) -> bool {
-        self.list.iter().any(|widget| widget.window.hwnd == hwnd && widget.drag.is_some())
+        self.list.iter().any(|widget| widget.window.hwnd == hwnd && (widget.drag.is_some() || widget.pressing()))
     }
 
     /// The widget torn off the panel and in hand still, if one is.
@@ -2188,6 +2245,41 @@ impl Widgets {
         widget.press(client, keys);
     }
 
+    /// A press on the widget at `hwnd` followed (the pointer moved over it, or wherever it went, see
+    /// `Widget::follow_pointer`): let go where it was not told (past its edge), what was pressed let go there; far
+    /// enough, the thing on its station dragged off it, the note pulled off onto the desktop, the thing kept at hand
+    /// moved among them. Whether a press is followed.
+    pub fn follow_press(&mut self, hwnd: HWND) -> bool {
+        let Some(index) = self.list.iter().position(|w| w.window.hwnd == hwnd) else { return false };
+        if !crate::panel::buttons_down() && self.list[index].pressing() {
+            note("widget: a press let go unheard (the buttons found up)");
+            self.release(hwnd, Instant::now(), false);
+            return false;
+        }
+        let widget = &mut self.list[index];
+        widget.shelf_moved();
+        widget.app_moved();
+        let pulled = widget.note_pulled();
+        let pressing = widget.pressing();
+        if !pressing {
+            widget.stop_following();
+        }
+        if let Some(pulled) = pulled {
+            self.stick_note_held(pulled);
+        }
+        pressing
+    }
+
+    /// What is under the pointer found again on the widget at `hwnd` where the pointer stays, as what it shows moved under
+    /// it (see `Widget::hits_moved`): lit as it is, and what was said of what was there taken away (see `hover`).
+    fn hover_again(&mut self, hwnd: HWND, lang: Lang) {
+        let Some(mut client) = cursor_position() else { return };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+        }
+        self.hover(hwnd, client, lang);
+    }
+
     /// The pointer over a widget's window at `client` (physical px in it):
     /// the shape of what a press there does.
     pub fn hover(&mut self, hwnd: HWND, client: POINT, lang: Lang) {
@@ -2197,27 +2289,9 @@ impl Widgets {
         if !widget.hover {
             widget.next_frame = Instant::now();
         }
-        // A thing on its station pressed and moved far enough: dragged off it (by the station, which takes the
-        // pointer from here).
-        if let (Some(press), Some(now)) = (widget.shelf_press, cursor_position()) {
-            if crate::station::run::drag_begins(press.from, now) {
-                widget.shelf_press = None;
-                // Stroked across its pages at once: they are swiped (the pointer kept).
-                if widget.swipes.is_some_and(|(.., pressed)| pressed.elapsed() < HOLD) && widget.begin_swipe(press.from, now, Instant::now()) {
-                    widget.next_frame = Instant::now();
-                    return;
-                }
-                crate::ui::window::let_go_of_capture(widget.window.hwnd);
-                // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from
-                // here, and the widget hears no more of it to take it away.)
-                widget.unsay();
-                // (With what is chosen with it.)
-                let carried = crate::station::select::drag(press);
-                if let Some(drag) = crate::station::drag_off(&carried, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
-                    widget.lifting = Some((press.hit, carried, drag, press.from));
-                    widget.next_frame = Instant::now();
-                }
-            }
+        // A thing on its station, a note or a thing kept at hand pressed: followed (see `follow_press`).
+        if widget.pressing() {
+            self.follow_press(hwnd);
             return;
         }
         if widget.drag.is_some() {
@@ -2315,9 +2389,13 @@ impl Widgets {
         };
         // Its pages turned, or its list scrolled (under what is on it: the wheel over a thing on the station scrolls the
         // station, and over its bar too). Turned across, only pages.
+        // (What was said under the pointer goes, what it was said of moving: what is lit there is found again as it is
+        // drawn moved, see `hover_again`.)
         let turn = |widget: &mut Widget| {
             if widget.content.readings_mut().is_some_and(|readings| view::wheel(&mut readings.scrolls, &hit, delta, across)) {
-                widget.unsay();
+                if std::mem::take(&mut widget.saying) {
+                    crate::ui::tip::hide();
+                }
                 widget.next_frame = Instant::now();
             }
         };
@@ -2351,11 +2429,31 @@ impl Widgets {
 
     /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
     pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
+        // A thing kept at hand pressed, let go: put where it was moved to, or, let go on it, opened (its capture lost:
+        // nothing). A note's card pressed and let go on it: shown (its capture lost: nothing).
+        if let Some(index) = self.list.iter().position(|w| w.window.hwnd == hwnd && (w.apps.pressed() || w.note_press.is_some())) {
+            let widget = &mut self.list[index];
+            widget.stop_following();
+            widget.next_frame = now;
+            if widget.apps.pressed() {
+                widget.app_moved();
+                let over = cursor_position().and_then(|at| widget.hit_on_screen(at));
+                let done = widget.apps.let_go(!cancelled, over);
+                note(format!("widget: a thing kept at hand let go ({}): {done:?}", if cancelled { "its capture lost" } else { "let go" }));
+                done.act();
+                return;
+            }
+            let (name, ..) = widget.note_press.take().unwrap();
+            if !cancelled {
+                self.show_note(index, crate::notes::number_of(&name));
+            }
+            return;
+        }
         // A thing on its station pressed and let go where it was: pressed, or with Ctrl or Shift chosen (its capture
         // lost: nothing).
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
             if let Some(press) = widget.shelf_press.take() {
-                crate::ui::window::let_go_of_capture(widget.window.hwnd);
+                widget.stop_following();
                 if !cancelled && crate::station::select::release(press) {
                     crate::station::pressed(press.hit);
                 }
@@ -2515,17 +2613,18 @@ impl Widgets {
         }
     }
 
-    /// Whether a note is written in where it is now (its widget taking the keys).
+    /// Whether something on a widget is written in now, taking the keys: a note where it is, or a to-do (as the panel's
+    /// to-dos are asked of, see `ui::todo::writing`): the station's keys (Ctrl+A, Ctrl+V) left to it meanwhile.
     pub fn writing(&self) -> bool {
-        self.list.iter().any(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.taking))
+        self.list.iter().any(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.taking) || crate::ui::todo::writing(w.window.hwnd))
     }
 
-    /// The menu of the note `number` stuck on the desktop on the widget at `hwnd` (its card pressed with the right
-    /// button, or its menu's button while it is written in), up: its colours, it taken off the desktop, it taken away
-    /// (see `ui::note::menu`). Its name, and what each row does. None where it is no such note there.
+    /// The menu of the note `number` on the widget at `hwnd` (its card pressed with the right button, a note stuck on
+    /// the desktop or one on a list of notes, as the panel's are; or its menu's button while it is written in), up: its
+    /// colours, it stuck on the desktop or taken off it, it taken away (see `ui::note::menu`). Its name, and what each
+    /// row does. None where it is no such widget, or no such note.
     pub fn note_menu(&self, hwnd: HWND, number: u64, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
         let widget = self.list.iter().find(|w| w.window.hwnd == hwnd)?;
-        card_in(&widget.hits, widget.hits_from, number, 0.0)?;
         let written = widget.in_place.as_ref().filter(|in_place| in_place.number == number).map(|in_place| in_place.writing.colour);
         self.menu_of_note(number, written, lang, self.look_of(hwnd), over_the_panel)
     }
@@ -2809,6 +2908,8 @@ impl Widgets {
         let mut gone = Vec::new();
         let mut back = Vec::new();
         let mut torn = Vec::new();
+        // (Those drawn with what they show moved under the pointer: see `hover_again`.)
+        let mut moved = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
             // (Letting clicks through, but for the one on its button; and over its shadow.)
             let through = clicks_through(widget.click_through, widget.reached, cursor_position(), widget.window_rect(), widget.taking(), widget.drag.is_some());
@@ -2837,7 +2938,8 @@ impl Widgets {
             if crate::ui::todo::writing(widget.window.hwnd) {
                 let at = crate::ui::todo::caret_in(widget.window.hwnd);
                 if let Some((rect, _)) = widget.hits_on_screen().into_iter().find(|(_, hit)| *hit == view::Hit::Todo(at)) {
-                    crate::ui::todo::placed(widget.window.hwnd, rect, widget.contact.scale * widget.zoom);
+                    // (As large as the part it is in draws it, in a merged widget.)
+                    crate::ui::todo::placed(widget.window.hwnd, rect, widget.contact.scale * widget.zoom * widget.part_zoom(view::Hit::Todo(at)));
                 }
             }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
@@ -2864,7 +2966,11 @@ impl Widgets {
             if let Some(split) = widget.split.take() {
                 torn.push((index, split));
             }
-            match widget.frame(now, look, history, seen, controller) {
+            let frame = widget.frame(now, look, history, seen, controller);
+            if std::mem::take(&mut widget.hits_moved) && widget.hover {
+                moved.push(widget.window.hwnd);
+            }
+            match frame {
                 Frame::Gone => gone.push(index),
                 Frame::Back => back.push(index),
                 Frame::Moving => {
@@ -2895,6 +3001,9 @@ impl Widgets {
                     }
                 }
             }
+        }
+        for hwnd in moved {
+            self.hover_again(hwnd, look.lang);
         }
         for (index, (part, grab)) in torn {
             self.tear_part(index, part, grab);
@@ -3104,6 +3213,16 @@ fn takes(hits: &[view::HitBox], from: (f32, f32), size: (f32, f32), pinned: bool
     if let Some(hit) = hits.iter().find(under).map(|hit| hit.4).filter(|hit| hit.drags()) {
         return Takes::Shelf(hit);
     }
+    // A thing kept at hand: moved among them, or opened; a note's card on a list of notes: pulled off onto the desktop,
+    // or opened (pinned or not, as in the panel: neither moves the widget). A note stuck on the desktop is its card,
+    // its widget moved by it (its words there to be written in).
+    for &(.., hit) in hits.iter().filter(|hit| under(hit)) {
+        match hit {
+            view::Hit::App(number) => return Takes::App(number),
+            view::Hit::Note(number) if !hits.iter().any(|one| one.4 == view::Hit::Words(number)) => return Takes::Note(number),
+            _ => {}
+        }
+    }
     // The sound's track: slid along till let go (pinned or not: that is not moving it).
     if let Some(track) = hits.iter().filter(|hit| hit.4.slider().is_some()).find(under) {
         return Takes::Track(*track);
@@ -3152,6 +3271,10 @@ fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: b
 /// them), or the whole of it (moved, or what it shows there pressed as it is let go where it was).
 enum Takes {
     Shelf(view::Hit),
+    /// A thing kept at hand (by its number): moved among them, or opened (see `station::apps::Moving`).
+    App(u64),
+    /// A note's card on a list of notes (by its number): pulled off onto the desktop, or opened (see `Widget::note_press`).
+    Note(u64),
     Track(view::HitBox),
     Bar(view::HitBox),
     Nothing,
@@ -3498,6 +3621,9 @@ impl Widget {
             tip: None,
             hits: Vec::new(),
             hits_from: (0.0, 0.0),
+            hits_moved: false,
+            apps: Default::default(),
+            note_press: None,
             shelf_press: None,
             lifting: None,
             swipes: None,
@@ -3572,6 +3698,99 @@ impl Widget {
     }
 
     /// Where each thing drawn is on the screen (physical px), as it was just drawn.
+    /// The pointer taken, and followed wherever it goes while it is: a widget is not in front, and a window not in front
+    /// is told of the pointer only over itself, its capture or not (as the panel's is, see `Panel::follow_pointer`).
+    fn follow_pointer(&self) {
+        unsafe {
+            SetCapture(self.window.hwnd);
+            windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, crate::panel::FOLLOW_MS, None);
+        }
+    }
+
+    /// The pointer no longer followed, nor taken (but by what is in hand now: pages swiped, see `shelf_moved`).
+    fn stop_following(&self) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
+        }
+        if self.drag.is_none() {
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
+        }
+    }
+
+    /// Whether a thing on its station, a note's card or a thing kept at hand is pressed (see `Widgets::follow_press`).
+    fn pressing(&self) -> bool {
+        self.shelf_press.is_some() || self.note_press.is_some() || self.apps.pressed()
+    }
+
+    /// What it shows at `at` on the screen (physical px), as it was last drawn.
+    fn hit_on_screen(&self, at: POINT) -> Option<view::Hit> {
+        let px = self.contact.scale * self.zoom;
+        let (x, y) = ((at.x - self.at.x) as f32 / px - self.hits_from.0, (at.y - self.at.y) as f32 / px - self.hits_from.1);
+        view::under(&self.hits, (x, y)).next().map(|hit| hit.4)
+    }
+
+    /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which takes
+    /// the pointer from here), with what is chosen with it; stroked across its pages at once, they are swiped.
+    fn shelf_moved(&mut self) {
+        let (Some(press), Some(now)) = (self.shelf_press, cursor_position()) else { return };
+        if !crate::station::run::drag_begins(press.from, now) {
+            return;
+        }
+        self.shelf_press = None;
+        if self.swipes.is_some_and(|(.., pressed)| pressed.elapsed() < HOLD) && self.begin_swipe(press.from, now, Instant::now()) {
+            // (The pointer kept for the swipe.)
+            self.stop_following();
+            self.next_frame = Instant::now();
+            return;
+        }
+        self.stop_following();
+        // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from here, and
+        // the widget hears no more of it to take it away.)
+        self.unsay();
+        let carried = crate::station::select::drag(press);
+        if let Some(drag) = crate::station::drag_off(&carried, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+            self.lifting = Some((press.hit, carried, drag, press.from));
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// The pointer moved with a thing kept at hand pressed: far enough, held where the pointer has it (in the DIPs of
+    /// what draws it), the place it would go the one it is over.
+    fn app_moved(&mut self) {
+        let Some(now) = cursor_position() else { return };
+        let px = self.contact.scale * self.zoom;
+        let (x, y) = ((now.x - self.at.x) as f32 / px - self.hits_from.0, (now.y - self.at.y) as f32 / px - self.hits_from.1);
+        let slot = view::under(&self.hits, (x, y)).find_map(|hit| if let view::Hit::AppSlot(slot) = hit.4 { Some(slot) } else { None });
+        let own = match &self.content {
+            Content::Merged(merged) => merged.own_at((x, y)),
+            _ => (x, y),
+        };
+        if self.apps.follow(now, own, slot) {
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// A note's card pressed and pulled far enough (over the widget or past it): lifted off its card, to be stuck on the
+    /// desktop under the hand (the widget stays), from where its card is, held where it was pressed.
+    fn note_pulled(&mut self) -> Option<NotePulled> {
+        let cursor = cursor_position()?;
+        if !self.note_press.as_ref().is_some_and(|(_, from, _)| crate::station::run::drag_begins(*from, cursor)) {
+            return None;
+        }
+        let (name, from, card) = self.note_press.take()?;
+        let px = self.contact.scale * self.zoom * self.part_zoom(view::Hit::Note(crate::notes::number_of(&name)));
+        Some(NotePulled { name, card, from, over: self.rect(), px })
+    }
+
+    /// How large what it shows is drawn where `hit` was last drawn, its own DIPs to the widget's: in a merged widget, as
+    /// the part it is in draws it (see `Merged::zoom_at`); else as large.
+    fn part_zoom(&self, hit: view::Hit) -> f32 {
+        match &self.content {
+            Content::Merged(merged) => self.hits.iter().find(|one| one.4 == hit).map_or(1.0, |one| merged.zoom_at((self.hits_from.0 + one.0 + one.2 / 2.0, self.hits_from.1 + one.1 + one.3 / 2.0))),
+            _ => 1.0,
+        }
+    }
+
     fn hits_on_screen(&self) -> Vec<(RECT, view::Hit)> {
         let mut window = RECT::default();
         if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(self.window.hwnd, &mut window) }.is_err() {
@@ -3914,7 +4133,23 @@ impl Widget {
         match takes {
             Takes::Shelf(hit) => {
                 self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.content.tab(), view::lane_whole(&self.hits), keys, from));
-                unsafe { SetCapture(self.window.hwnd) };
+                self.follow_pointer();
+                return;
+            }
+            Takes::App(number) => {
+                if self.apps.press(number, from) {
+                    note("widget: a thing kept at hand pressed");
+                    self.follow_pointer();
+                }
+                return;
+            }
+            Takes::Note(number) => {
+                let card = self.hits_on_screen().into_iter().find(|(_, hit)| *hit == view::Hit::Note(number)).map(|(rect, _)| rect);
+                if let (Some(name), Some(card)) = (crate::notes::named(number), card) {
+                    self.note_press = Some((name, from, card));
+                    note("widget: a note's card pressed");
+                    self.follow_pointer();
+                }
                 return;
             }
             Takes::Track((hx, hy, wide, tall, hit)) => {
@@ -4299,7 +4534,9 @@ impl Widget {
                                     crate::ui::todo::Act::Nothing => {}
                                     crate::ui::todo::Act::Write => self.write_todo(),
                                     crate::ui::todo::Act::Edit(n, item) => {
-                                        let into = self.hits.iter().find(|region| region.4 == view::Hit::Todo(hit)).map(|region| lx - region.0);
+                                        // (In the row's own DIPs: as large as the part it is in draws it, in a
+                                        // merged widget.)
+                                        let into = self.hits.iter().find(|region| region.4 == view::Hit::Todo(hit)).map(|region| (lx - region.0) / self.part_zoom(view::Hit::Todo(hit)));
                                         if let Some(into) = into {
                                             self.edit_todo(n, item, into);
                                         }
@@ -4360,17 +4597,9 @@ impl Widget {
                                     }
                                 }
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
-                                Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
+                                Some(hit @ (view::Hit::AddApp | view::Hit::NewNote)) => {
                                     use crate::ui::beside::Page;
-                                    let page = match hit {
-                                        view::Hit::AddApp => Some(Page::Picker),
-                                        view::Hit::NewNote => Some(Page::Note(None)),
-                                        view::Hit::Note(number) => crate::notes::named(number).map(|name| Page::Note(Some(name))),
-                                        _ => None,
-                                    };
-                                    if let Some(page) = page {
-                                        self.open_beside(page);
-                                    }
+                                    self.open_beside(if hit == view::Hit::AddApp { Page::Picker } else { Page::Note(None) });
                                 }
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);
@@ -4661,7 +4890,7 @@ impl Widget {
         self.thumbs.mark_chosen(crate::station::select::marked(self.window.hwnd.0 as isize));
         if shows(|hit| matches!(hit, view::Hit::App(_) | view::Hit::AppsArea)) {
             let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
-            moving |= self.thumbs.apps(now, &order, None);
+            moving |= self.thumbs.apps(now, &order, self.apps.hold(&order));
         }
         let thumbs = self.thumbs.clone();
         // The preview's shortcut said on what the pointer rests on that may be looked at larger: not while a look is up
@@ -5412,6 +5641,7 @@ impl Widget {
             self.in_place = None;
         }
         if let Some((hits, from)) = pressed {
+            self.hits_moved |= hits != self.hits || from != self.hits_from;
             (self.hits, self.hits_from) = (hits, from);
             self.show_stations();
         }
@@ -5723,6 +5953,21 @@ mod tests {
         assert!((carried_reach(size, (100.0, 50.0), 1.0, 90.0, 0.0) - 50.0).abs() < 1e-3);
     }
 
+    /// In a merged widget, what each part shows is drawn as large as that part draws it: a to-do pressed partway along
+    /// its words, and the input method's words put at it, measured in that part's own DIPs. What plays, and between
+    /// the parts, as large as the widget.
+    #[test]
+    fn a_merged_part_tells_how_large_it_draws() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let theme = crate::ui::theme::Theme::new(Skin::Paper, false);
+        let shown = |zoom| Shown { form: choice.form, zoom, size: (100.0, 100.0), layout: view::Layout::with_columns(Vec::new(), 1, &theme), small: None, detail: view::Detail::Full };
+        let readings = |zoom| Readings { last: Some(shown(zoom)), ..Readings::new(choice) };
+        let merged = Merged { rects: vec![(0.0, 0.0, 150.0, 150.0), (150.0, 0.0, 80.0, 80.0)], ..Merged::new(vec![Content::Readings(readings(1.5)), Content::Readings(readings(0.8))], true, (230.0, 150.0)) };
+        assert_eq!(merged.zoom_at((10.0, 10.0)), 1.5);
+        assert_eq!(merged.zoom_at((160.0, 70.0)), 0.8);
+        assert_eq!(merged.zoom_at((160.0, 120.0)), 1.0);
+    }
+
     /// A tag lit over the station's page of a merged widget, drawn larger or smaller than its own size, is brought into
     /// sight by where its readings drew it in their own DIPs: turned as far as in a widget of its own.
     #[test]
@@ -5915,6 +6160,22 @@ mod tests {
         assert!(matches!(at(false, words), (shape, Takes::Whole) if shape == IDC_IBEAM));
         assert!(matches!(at(false, head), (shape, Takes::Whole) if shape == IDC_HAND));
         assert!(matches!(at(true, corner), (shape, Takes::Pressed) if shape == IDC_HAND));
+    }
+
+    /// On a widget showing quick launch or a list of notes, pinned or not: a thing kept at hand pressed is taken to be
+    /// moved among them (or opened), a note's card to be pulled off onto the desktop (or opened), as in the panel. (The
+    /// widget was moved instead, or, pinned, nothing.) A note stuck on the desktop is its card: moved by it, as it was.
+    #[test]
+    fn a_press_on_a_thing_kept_at_hand_or_a_note_takes_it() {
+        let hits = vec![(0.0, 0.0, 40.0, 40.0, view::Hit::App(3)), (0.0, 50.0, 200.0, 80.0, view::Hit::Note(5))];
+        for pinned in [false, true] {
+            assert!(matches!(takes(&hits, (0.0, 0.0), (300.0, 300.0), pinned, false, (20.0, 20.0)), Takes::App(3)), "pinned {pinned}");
+            assert!(matches!(takes(&hits, (0.0, 0.0), (300.0, 300.0), pinned, false, (100.0, 90.0)), Takes::Note(5)), "pinned {pinned}");
+        }
+        let (w, h) = view::STUCK_NOTE;
+        let (wx, wy, ww, wh) = crate::ui::note::words_in(w, h);
+        let stuck = vec![(wx, wy, ww, wh, view::Hit::Words(7)), (0.0, 0.0, w, h, view::Hit::Note(7))];
+        assert!(matches!(takes(&stuck, (0.0, 0.0), (w, h), false, false, (w / 2.0, 20.0)), Takes::Whole));
     }
 
     /// A note stuck on the desktop, its card found among what a widget drew (from its content's corner, in its window
