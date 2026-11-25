@@ -845,9 +845,10 @@ pub enum Hand {
 /// the screen behind, blurred, which the window draws), rim, and the
 /// readings on it, their words and marks in `words`' colours (see `words_kept`),
 /// at `px` physical pixels a DIP; dragged, in the colour
-/// that says it is being moved. Its shadow is drawn apart (see `shadow`).
+/// that says it is being moved. Its shadow is drawn apart (see `shadow`). Its words, marks and chart outlined as its
+/// glass is made clear where `outline` (see `halo`).
 #[allow(clippy::too_many_arguments)]
-pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, words: Tone, hand: Hand, px: f32) {
+pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, words: Tone, outline: bool, hand: Hand, px: f32) {
     let dragged = hand == Hand::Dragged;
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
@@ -870,7 +871,7 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
             _ => {}
         }
     }
-    let ringed = halo(glass, words);
+    let ringed = if outline { halo(glass, words) } else { None };
     if let Some(halo) = ringed {
         frame.ring(halo);
     }
@@ -1389,6 +1390,66 @@ mod tests {
         crate::ui::view::tests::info()
     }
 
+    /// Counts the outlines begun on it (see `Canvas::ring`), drawing nothing.
+    #[derive(Default)]
+    struct Outlines(std::cell::Cell<usize>);
+    impl Canvas for Outlines {
+        fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: crate::ui::canvas::Align) {}
+        fn markdown(&self, _: &str, _: Font, _: crate::ui::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
+        fn measure(&self, text: &str, _: Font) -> f32 {
+            text.len() as f32 * 6.0
+        }
+        fn baseline(&self, _: Font) -> (f32, f32) {
+            (10.0, 2.0)
+        }
+        fn ink(&self, _: &str, _: Font) -> (f32, f32) {
+            (2.0, 10.0)
+        }
+        fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+        fn unclip(&self) {}
+        fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_circle(&self, _: Color, _: crate::ui::canvas::Point, _: f32) {}
+        fn stroke(&self, _: &[crate::ui::canvas::Point], _: Color, _: f32) {}
+        fn stroke_dashed(&self, _: &[crate::ui::canvas::Point], _: Color, _: f32) {}
+        fn fill_shape(&self, _: &[crate::ui::canvas::Point], _: crate::ui::canvas::Fill) {}
+        fn stroke_rounded(&self, _: crate::ui::canvas::Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
+        fn arc(&self, _: crate::ui::canvas::Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn icon(&self, _: crate::ui::icons::Icon, _: crate::ui::canvas::Point, _: f32, _: Color) {}
+        fn mark(&self, _: crate::ui::marks::Mark, _: crate::ui::canvas::Point, _: f32, _: Color, _: f32) {}
+        fn picture_within(&self, _: &crate::ui::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+        fn on_pixels(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+            (x, y, w, h)
+        }
+        fn ring(&self, _: Color) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// With its glass made clear, its words are outlined where the outline is on (as it is unless turned off), and
+    /// not where it is turned off: over the same glass, the same words, in the same colours.
+    #[test]
+    fn its_words_are_outlined_unless_the_outline_is_turned_off() {
+        let mut s = sample(true);
+        s.cpu = Some(49.0);
+        let readings = readings(&s, &info(), s.game.as_ref(), false, &items(&["frames", "cpu", "gpu"]), Lang::Zh);
+        let shape = Shape { layout: Layout::Strip, rows: 1, width: f32::INFINITY };
+        let clear = Glass { tone: Tone::Dark, opacity: 0.6, presence: 0.0, behind: UNSEEN };
+        let outlines = |outline: bool| {
+            let canvas = Outlines::default();
+            paint(&canvas, &readings, &[], shape, clear, words(clear), outline, Hand::Free, 1.0);
+            canvas.0.get()
+        };
+        assert_eq!(outlines(true), 1);
+        assert_eq!(outlines(false), 0);
+        assert!(crate::settings::OverlaySettings::default().outline);
+    }
+
     /// The overlay, its buttons and a slider's knob come out the same, pixel for pixel, wherever in the compositor's
     /// atlas their surface is handed a region (its place there, in DIPs, rarely exact): no part of them moves by a
     /// pixel, nor apart from another, as the frames go (the overlay's words shook, and its buttons' rings moved off
@@ -1408,7 +1469,7 @@ mod tests {
         for scale in [1.0f32, 1.25, 1.5, 1.75] {
             let drawn = |offset: i32| -> Vec<u8> {
                 gfx.draw_in_atlas((w, h), (offset, offset), scale, |frame| {
-                    paint(frame, &readings, &[], shape, glass, words(glass), Hand::Free, scale);
+                    paint(frame, &readings, &[], shape, glass, words(glass), true, Hand::Free, scale);
                     for (place, button) in crate::ui::buttons::ALL.iter().enumerate() {
                         crate::ui::buttons::paint(frame, Point { x: 14.0 + place as f32 * 31.0, y: 47.0 }, *button, place == 1, false, true, Color::hex(0xFFFFFF, 0.3), 1.0);
                     }

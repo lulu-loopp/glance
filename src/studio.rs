@@ -1207,7 +1207,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     frame.place(at);
                     frame.crisp_text();
                     overlay::shadow(frame, &readings, shape, glass, false, px);
-                    overlay::paint(frame, &readings, &frames, shape, glass, overlay::words(glass), overlay::Hand::Free, px);
+                    overlay::paint(frame, &readings, &frames, shape, glass, overlay::words(glass), true, overlay::Hand::Free, px);
                     frame.origin(0.0, 0.0);
                 }
                 unsafe { frame.dc.PopLayer() };

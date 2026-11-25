@@ -1425,6 +1425,8 @@ enum Switch {
     TrayHidden,
     Updates,
     HeatAlert,
+    /// The overlay's words outlined as its glass is made clear (see `OverlaySettings::outline`).
+    OverlayOutline,
     /// The phone remote.
     Remote,
     /// Whether the remote sets the lights: the program that does, fetched or not.
@@ -3260,7 +3262,7 @@ impl Ui {
                 if self.settings.overlay.layout == Layout::Strip {
                     rows.push(Row::Choice(Field::OverlayRows));
                 }
-                rows.extend([Row::Slider(Field::OverlaySize), Row::Slider(Field::OverlayClear)]);
+                rows.extend([Row::Slider(Field::OverlaySize), Row::Slider(Field::OverlayClear), Row::Switch(Switch::OverlayOutline)]);
                 // What it shows, group by group, as the panel's modules are.
                 // (A battery's only on a machine that has shown one, the drives' only where one has told its
                 // temperature.)
@@ -4976,6 +4978,14 @@ impl Ui {
                 Some(p("隐藏后，再次启动 Glance 即可打开设置，通知仍会显示", "With it hidden, starting Glance again opens the settings. Notifications still show")),
                 self.settings.tray_hidden,
             ),
+            Switch::OverlayOutline => (
+                p("文字描边", "Text outline"),
+                Some(p(
+                    "玻璃调至透明时，为文字、标记与曲线添加细描边，使其在各类背景上保持清晰",
+                    "As the glass is made clearer, words, marks and the chart are finely outlined to stay legible over any background",
+                )),
+                self.settings.overlay.outline,
+            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("CPU 或 GPU 温度持续 30 秒达到警示值时，通过托盘通知", "A tray notice once the CPU or a GPU has been at the alert for 30 seconds")),
@@ -5069,6 +5079,7 @@ impl Ui {
             Switch::TearOff => settings.tear_off ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
+            Switch::OverlayOutline => settings.overlay.outline ^= true,
             Switch::TrayHidden => settings.tray_hidden ^= true,
             Switch::NearbyNotice => settings.nearby_notice ^= true,
             Switch::Nearby => {
@@ -8130,7 +8141,7 @@ It can be disconnected here at any time, and the status line command put back.",
         frame.place(placed);
         frame.crisp_text();
         super::overlay::shadow(frame, &readings, shape, glass, false, px);
-        super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::words(glass), super::overlay::Hand::Free, px);
+        super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::words(glass), overlay.outline, super::overlay::Hand::Free, px);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));

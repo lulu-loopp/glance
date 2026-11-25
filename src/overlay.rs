@@ -96,6 +96,8 @@ pub struct Overlay {
     /// clicks pass through it.
     clear: f32,
     through: bool,
+    /// Its words outlined as its glass is made clear (see `OverlaySettings::outline`).
+    outline: bool,
     /// Its buttons, in a window of their own beside it: those that show
     /// now (none: the window is away), and its content.
     bar: Window,
@@ -282,6 +284,7 @@ impl Overlay {
             locked: false,
             clear: 0.0,
             through: false,
+            outline: true,
             bar,
             bar_surface: None,
             bar_shows: Vec::new(),
@@ -329,6 +332,7 @@ impl Overlay {
             unsafe { SetTimer(Some(self.window.hwnd), SAID_TIMER, SAID_MS, None) };
         }
         self.clear = clear;
+        self.outline = settings.outline;
         self.through = settings.click_through;
         self.window.set_click_through(self.through);
         self.game = crate::ui::view::game_shown(history.last().map(std::slice::from_ref).unwrap_or_default());
@@ -518,6 +522,7 @@ impl Overlay {
         let (width, height, radius) = self.measures();
         self.shape(width, height, radius);
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
+        let outline = self.outline;
         let dragged = self.grab.is_some();
         let hand = if dragged { Hand::Dragged } else { Hand::Free };
         // Its glass is its tint alone: what is behind it is not blurred (the system's compositor would then draw
@@ -533,7 +538,7 @@ impl Overlay {
             frame.origin(at_x as f32 / scale, at_y as f32 / scale);
             frame.crisp_text();
             overlay::shadow(frame, readings, shape, glass, dragged, scale);
-            overlay::paint(frame, readings, frames, shape, glass, words, hand, scale);
+            overlay::paint(frame, readings, frames, shape, glass, words, outline, hand, scale);
             if let Some((name, figure)) = &said {
                 overlay::say(frame, (name, figure, "%"), (width as f32 / scale, height as f32 / scale), Glass { presence: 1.0, ..glass });
             }

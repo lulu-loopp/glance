@@ -3350,14 +3350,10 @@ impl Devices {
     /// As a lane laid out for `rings` alone or not, with all of it (`full`) or not, `laid` tall, draws `count` devices
     /// in `room` (as tall as it was laid out, or taller where its widget was made taller), `width` across: a lane with
     /// all of it given more room than it was laid out for tells more of each, named, in as many columns as its width
-    /// holds, where their rows fit (a widget made larger never shows less).
-    fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32) -> Devices {
-        Devices::of_wide(rings, full, count, laid, room, width, width)
-    }
-
-    /// As `of`, the lane laid out `laid_width` across: given more width than that, as given more height, it tells more
-    /// of each where their named rows fit in its height (names before larger rings: a name tells what a ring does not).
-    fn of_wide(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32, laid_width: f32) -> Devices {
+    /// holds, where their rows fit (a widget made larger never shows less). Laid out `laid_width` across: given more
+    /// width than that, as given more height, it tells more of each where their named rows fit in its height (names
+    /// before larger rings: a name tells what a ring does not).
+    fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32, laid_width: f32) -> Devices {
         let columns = Devices::columns(count, width);
         let more = room > laid + 0.5 || width > laid_width + 0.5;
         if full && more && count.div_ceil(columns) as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
@@ -5177,7 +5173,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                 // (No hover: nothing of it is pressed, and nothing more is told of a device than it shows.)
                 let room = height + (area.h - natural).max(0.0);
                 // (As wide as it was laid out, past what it is drawn wider: a widget made wider holds more across.)
-                let how = Devices::of_wide(*rings, *full, devices.len(), height, room, width, width - wider);
+                let how = Devices::of(*rings, *full, devices.len(), height, room, width, width - wider);
                 paint_devices(frame, scene, ink, devices, how, (left, y, width), &part);
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
@@ -10909,27 +10905,27 @@ seven".into()));
         let named = |count: usize| count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED);
         let rows = 3.0 * (DEVICE_ROW_GAP + DEVICE_ROW);
         let rings = |count: usize| DEVICE_RINGS_TOP + rings_tall(count);
-        assert_eq!(Devices::of(false, true, 3, rows, rows, 300.0), Devices::Rows);
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3), 300.0), Devices::Rings);
-        assert_eq!(Devices::of(false, true, 3, rows, named(3), 300.0), Devices::Named(1));
-        assert_eq!(Devices::of(true, true, 3, rings(3), named(3), 300.0), Devices::Named(1));
+        assert_eq!(Devices::of(false, true, 3, rows, rows, 300.0, 300.0), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3), 300.0, 300.0), Devices::Rings);
+        assert_eq!(Devices::of(false, true, 3, rows, named(3), 300.0, 300.0), Devices::Named(1));
+        assert_eq!(Devices::of(true, true, 3, rings(3), named(3), 300.0, 300.0), Devices::Named(1));
         // Given more, not enough for named rows: as laid out.
-        assert_eq!(Devices::of(false, true, 3, rows, named(3) - 10.0, 300.0), Devices::Rows);
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 20.0, 300.0), Devices::Rings);
+        assert_eq!(Devices::of(false, true, 3, rows, named(3) - 10.0, 300.0, 300.0), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 20.0, 300.0, 300.0), Devices::Rings);
         // One device: its named row shorter than its ring alone, which it keeps unless given more.
         assert!(named(1) < rings(1));
-        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1), 300.0), Devices::Rings);
-        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 1.0, 300.0), Devices::Named(1));
-        assert_eq!(Devices::of(true, false, 3, rings(3), 1000.0, 300.0), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1), 300.0, 300.0), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 1.0, 300.0, 300.0), Devices::Named(1));
+        assert_eq!(Devices::of(true, false, 3, rings(3), 1000.0, 300.0, 300.0), Devices::Rings);
         // A widget made larger by less than named rows one under another take, and much wider (the owner's devices
         // widget: three, 60 more tall, about 650 across): named side by side, as many columns as fit across.
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 650.0), Devices::Named(3));
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 430.0), Devices::Named(2));
-        assert_eq!(Devices::of(true, true, 5, rings(5), rings(5) + 60.0, 650.0), Devices::Named(3));
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 650.0, 650.0), Devices::Named(3));
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 430.0, 430.0), Devices::Named(2));
+        assert_eq!(Devices::of(true, true, 5, rings(5), rings(5) + 60.0, 650.0, 650.0), Devices::Named(3));
         // (Never more columns than devices: a lone one's named row takes the whole width.)
-        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 60.0, 650.0), Devices::Named(1));
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 60.0, 650.0, 650.0), Devices::Named(1));
         // Not wide enough for two: one under another, where they fit.
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 300.0), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 300.0, 300.0), Devices::Rings);
     }
 
     /// A lane with all of it made wider and no taller (a devices widget widened) names its devices where their rows
@@ -10940,15 +10936,15 @@ seven".into()));
         let rings = |count: usize| DEVICE_RINGS_TOP + rings_tall(count);
         let laid = 300.0;
         // One device, a little wider: its named row in its ring's height.
-        assert_eq!(Devices::of_wide(true, true, 1, rings(1), rings(1), 340.0, laid), Devices::Named(1));
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1), 340.0, laid), Devices::Named(1));
         // Three, wide enough for each a column: named side by side in the height of their row of rings.
-        assert_eq!(Devices::of_wide(true, true, 3, rings(3), rings(3), 650.0, laid), Devices::Named(3));
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3), 650.0, laid), Devices::Named(3));
         // Three, wide enough for two columns only: two rows of names are taller than the rings' row, so rings.
-        assert_eq!(Devices::of_wide(true, true, 3, rings(3), rings(3), 430.0, laid), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3), 430.0, laid), Devices::Rings);
         // As wide as laid out: as laid out.
-        assert_eq!(Devices::of_wide(true, true, 1, rings(1), rings(1), laid, laid), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1), laid, laid), Devices::Rings);
         // Compact (not with all of it): never named.
-        assert_eq!(Devices::of_wide(true, false, 1, rings(1), rings(1), 650.0, laid), Devices::Rings);
+        assert_eq!(Devices::of(true, false, 1, rings(1), rings(1), 650.0, laid), Devices::Rings);
     }
 
     /// Named devices in columns: each column the same width, side by side with room between, filled a row at a time.

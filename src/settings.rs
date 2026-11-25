@@ -619,6 +619,8 @@ pub struct OverlaySettings {
     /// How clear its glass is: 0, all there (what is behind tinted); 1,
     /// gone (the words alone over what is behind).
     pub clear: f32,
+    /// Its words, marks and chart outlined in the other tone as its glass is made clear (see `ui::overlay::halo`).
+    pub outline: bool,
     /// Clicks pass through it (Ctrl held, it takes them).
     pub click_through: bool,
     /// A card or a strip.
@@ -683,6 +685,7 @@ impl Default for OverlaySettings {
             screen: None,
             locked: false,
             clear: 0.0,
+            outline: true,
             click_through: false,
             layout: Default::default(),
             rows: 1,
@@ -1959,6 +1962,17 @@ mod tests {
         assert!(written.contains("\"places\"") && !written.contains("\"pushed\""));
         assert_eq!(read(&written).places(), settings.places());
         assert!(Settings::default().places().shows(Part::Monitor));
+    }
+
+    /// The overlay's outline is on in settings written before it could be turned off, and stays off once turned off.
+    #[test]
+    fn the_overlay_outline_is_on_unless_turned_off() {
+        let before: Settings = serde_json::from_str(r#"{"overlay":{"clear":0.5}}"#).unwrap();
+        assert!(before.overlay.outline);
+        let off: Settings = serde_json::from_str(r#"{"overlay":{"outline":false}}"#).unwrap();
+        assert!(!off.overlay.outline);
+        let again: Settings = serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+        assert!(!again.overlay.outline);
     }
 
     #[test]
