@@ -3132,6 +3132,8 @@ impl<'a> Panel<'a> {
         if pushed {
             crate::ui::settings_window::guide::saw(crate::ui::settings_window::guide::Saw::Pushed);
         }
+        // (The wireless devices' batteries read afresh for it, each asked now: shown as they come.)
+        crate::wireless::ask();
         let began = Instant::now();
         let mut taking = Duration::ZERO;
         // A reopening during the way out picks the panel up where it is.

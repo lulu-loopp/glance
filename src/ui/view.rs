@@ -4068,7 +4068,11 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if scene.seen.devices.is_empty() {
                 return None;
             }
-            vec![head(lang.pick("设备", "Devices"), "", "", false), Block::Devices { devices: s.devices.clone(), rings: !full || rings_alone(&s.devices), full }]
+            // (Those the lane holds, as they are now: one joined since it was laid out is taken in where it fits, see
+            // `Opening::grow`.)
+            let devices: Vec<DeviceSample> = s.devices.iter().filter(|device| scene.seen.devices.iter().any(|(key, ..)| *key == device.key)).cloned().collect();
+            let rings = !full || rings_alone(&devices);
+            vec![head(lang.pick("设备", "Devices"), "", "", false), Block::Devices { devices, rings, full }]
         }
         "wsl" => {
             use crate::reading::WslSample;
@@ -10699,6 +10703,14 @@ seven".into()));
         five.push(device("e", DeviceKind::Speaker, 90, false));
         assert_eq!(drawn(five.clone(), Detail::Full), Some((false, true)));
         assert_eq!(drawn(vec![device("a", DeviceKind::Mouse, 50, false), device("b", DeviceKind::Mouse, 60, false)], Detail::Full), Some((false, true)));
+        // A device joined since the lane was laid out (not among what it holds) is not drawn into it: it is taken in
+        // where it fits (see `Opening::grow`), else at the next opening.
+        let history = leak(vec![with(four.clone())]);
+        let mut held = Seen::of(history);
+        held.devices.retain(|(key, ..)| key != "b");
+        let laid = Scene { seen: Box::leak(Box::new(held)), ..scene(history) };
+        let shown = lane(&laid, "devices", Detail::Full).unwrap().into_iter().find_map(|block| if let Block::Devices { devices, .. } = block { Some(devices) } else { None }).unwrap();
+        assert_eq!(shown.iter().map(|device| device.key.as_str()).collect::<Vec<_>>(), ["a", "c", "d"]);
         // Compact: rings alone, however many and whatever they are.
         assert_eq!(drawn(five.clone(), Detail::Compact), Some((true, false)));
         // As tall as it draws them: rings in rows of four, each its charge under it, or rows, each a ring and a name.

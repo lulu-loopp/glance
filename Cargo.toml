@@ -44,6 +44,8 @@ objc2-io-kit = "0.3"
 windows-numerics = "0.3"
 # For `#[implement]`: the effects handed to Windows' compositor.
 windows-core = "0.62"
+# (WinRT collections handed to Windows: the properties a device watcher is asked to tell of.)
+windows-collections = "0.3"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
@@ -53,6 +55,7 @@ features = [
     "Foundation",
     "Foundation_Metadata",
     "Devices_Bluetooth",
+    "Devices_Enumeration",
     "Devices_Power",
     "Gaming_Input",
     "System_Power",

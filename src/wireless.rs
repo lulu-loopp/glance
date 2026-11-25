@@ -15,7 +15,12 @@ use std::time::{Duration, Instant};
 
 use windows::core::{GUID, PCWSTR};
 use windows::Devices::Bluetooth::BluetoothLEDevice;
-use windows::Foundation::EventHandler;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use windows::core::{IInspectable, HSTRING};
+use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind, DeviceInformationUpdate, DeviceWatcher};
+use windows::Foundation::{EventHandler, TypedEventHandler};
+use windows_collections::IIterable;
 use windows::Gaming::Input::{Gamepad, RawGameController};
 use windows::System::Power::BatteryStatus;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -94,20 +99,42 @@ static DEVICES: Mutex<Vec<Device>> = Mutex::new(Vec::new());
 const EVERY: Duration = Duration::from_secs(30);
 /// How often Logitech's devices are asked again (each answers over the air).
 const LOGITECH_EVERY: Duration = Duration::from_secs(60);
-/// How often the PMO boards are asked again: seldom, as each question goes over the air to the board and may wake it
-/// (its charge changes slowly, and between askings it is shown as last read).
+/// How often the PMO boards are asked again: seldom, as each question goes over the air to the board (its charge
+/// changes slowly, and between askings it is shown as last read). A receiver whose board did not answer (asleep, out of
+/// reach) is asked again as often as everything is read.
 const BOARDS_EVERY: Duration = Duration::from_secs(300);
 /// How long Windows' telling of devices coming and going must be quiet before they are read again (a device comes
 /// with several interfaces at once), and the longest they wait for that.
 const SETTLED: Duration = Duration::from_secs(2);
 const SETTLING_AT_MOST: Duration = Duration::from_secs(10);
 
+/// What wakes the reader before its time: Windows telling of a device (an interface come or gone, a Bluetooth device
+/// joined or left or its level changed), read once Windows has gone quiet again, or someone about to look at the
+/// devices (the panel opened), read at once.
+enum Wake {
+    Told,
+    Asked,
+}
+
+/// What the reader is woken by, once it runs.
+static WAKE: OnceLock<Sender<Wake>> = OnceLock::new();
+
 /// Starts the reader's thread, once (later calls do nothing).
 pub fn start() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
-        std::thread::Builder::new().name("glance: wireless batteries".into()).spawn(run).expect("a thread started");
+        let (wake, woken) = channel();
+        let _ = WAKE.set(wake.clone());
+        std::thread::Builder::new().name("glance: wireless batteries".into()).spawn(move || run(wake, woken)).expect("a thread started");
     });
+}
+
+/// Has everything read again now, every device asked (they are about to be looked at): the devices then as `now` gives
+/// them a moment later. Nothing where the reader has not started.
+pub fn ask() {
+    if let Some(wake) = WAKE.get() {
+        let _ = wake.send(Wake::Asked);
+    }
 }
 
 /// The devices joined now whose level is known, as last read: by kind, then by name.
@@ -117,12 +144,13 @@ pub fn now() -> Vec<Device> {
 
 /// The reader: everything read, then read again every `EVERY`, or once Windows has told of a device coming or going
 /// and gone quiet again.
-fn run() {
+fn run(told: Sender<Wake>, telling: Told<Wake>) {
     crate::actions::com();
-    let (told, telling) = channel();
     hear_devices(told.clone());
-    // (Kept for as long as the thread runs: Windows lists controllers only to a program that hears of them.)
-    let _controllers = xbox::hear(told);
+    // (Kept for as long as the thread runs: Windows lists controllers only to a program that hears of them, and tells
+    // of Bluetooth devices' properties only while its watcher of them runs.)
+    let _controllers = xbox::hear(told.clone());
+    let _bluetooth = bluetooth::hear(told);
     let mut bluetooth = bluetooth::Reader::default();
     let mut logitech = logitech::Reader::default();
     let mut boards = pmo::Reader::default();
@@ -135,7 +163,8 @@ fn run() {
         }
         let mut devices = bluetooth.read();
         devices.extend(logitech_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
-        if asked || boards_read.as_ref().is_none_or(|(at, _)| at.elapsed() >= BOARDS_EVERY) {
+        let boards_every = if boards.waiting() { EVERY } else { BOARDS_EVERY };
+        if asked || boards_read.as_ref().is_none_or(|(at, _)| at.elapsed() >= boards_every) {
             boards_read = Some((Instant::now(), boards.read()));
         }
         devices.extend(boards_read.as_ref().map(|(_, devices)| devices.clone()).unwrap_or_default());
@@ -148,16 +177,22 @@ fn run() {
     }
 }
 
-/// Waits `EVERY`, or for Windows' telling of devices to begin and then go quiet: whether it was told (none where no
-/// one can tell any more).
-fn settled(telling: &Told<()>) -> Option<bool> {
+/// Waits `EVERY`, or for Windows' telling of devices to begin and then go quiet, or for an asking: whether it was told
+/// or asked (none where no one can tell any more).
+fn settled(telling: &Told<Wake>) -> Option<bool> {
     match telling.recv_timeout(EVERY) {
-        Ok(()) => {}
+        Ok(Wake::Told) => {}
+        Ok(Wake::Asked) => return Some(true),
         Err(RecvTimeoutError::Timeout) => return Some(false),
         Err(RecvTimeoutError::Disconnected) => return None,
     }
     let since = Instant::now();
-    while since.elapsed() < SETTLING_AT_MOST && telling.recv_timeout(SETTLED).is_ok() {}
+    while since.elapsed() < SETTLING_AT_MOST {
+        match telling.recv_timeout(SETTLED) {
+            Ok(Wake::Told) => {}
+            Ok(Wake::Asked) | Err(_) => break,
+        }
+    }
     Some(true)
 }
 
@@ -170,7 +205,7 @@ fn ordered(mut devices: Vec<Device>) -> Vec<Device> {
 
 /// Has `told` sent to as any device interface comes or goes (a receiver plugged in, a Bluetooth device joined, whose
 /// sound or input then comes), for as long as the program runs.
-fn hear_devices(told: Sender<()>) {
+fn hear_devices(told: Sender<Wake>) {
     let filter = CM_NOTIFY_FILTER {
         cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
         Flags: CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES,
@@ -185,8 +220,8 @@ fn hear_devices(told: Sender<()>) {
 
 unsafe extern "system" fn interface_changed(_: HCMNOTIFICATION, context: *const core::ffi::c_void, action: CM_NOTIFY_ACTION, _: *const CM_NOTIFY_EVENT_DATA, _: u32) -> u32 {
     if action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL || action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL {
-        let told = unsafe { &*(context as *const Sender<()>) };
-        let _ = told.send(());
+        let told = unsafe { &*(context as *const Sender<Wake>) };
+        let _ = told.send(Wake::Told);
     }
     0
 }
@@ -223,6 +258,59 @@ mod bluetooth {
         /// Whether it is a Low Energy device (else classic), and a classic one's class of device.
         pub low_energy: bool,
         pub class: Option<u32>,
+    }
+
+    /// Windows' watcher of Bluetooth's device nodes, telling as a device is joined or leaves or its level changes (the
+    /// stack sets the level a moment after the device is joined): stops as it is dropped.
+    pub(super) struct Heard(DeviceWatcher);
+
+    impl Drop for Heard {
+        fn drop(&mut self) {
+            let _ = self.0.Stop();
+        }
+    }
+
+    /// Has `told` sent to as a Bluetooth device node is added or removed once the nodes there are have been listed, or
+    /// as its being joined or its battery level changes.
+    pub(super) fn hear(told: Sender<Wake>) -> Option<Heard> {
+        let watcher = watcher().ok()?;
+        // (The nodes there are as it starts are each told as added: not news.)
+        let listed = Arc::new(AtomicBool::new(false));
+        let tell = || {
+            let (told, listed) = (told.clone(), listed.clone());
+            move || {
+                if listed.load(Ordering::Relaxed) {
+                    let _ = told.send(Wake::Told);
+                }
+                Ok(())
+            }
+        };
+        let (added, removed, updated) = (tell(), tell(), tell());
+        watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, _| added())).ok()?;
+        watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, _| removed())).ok()?;
+        watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, _| updated())).ok()?;
+        watcher
+            .EnumerationCompleted(&TypedEventHandler::<DeviceWatcher, IInspectable>::new(move |_, _| {
+                listed.store(true, Ordering::Relaxed);
+                Ok(())
+            }))
+            .ok()?;
+        watcher.Start().ok()?;
+        Some(Heard(watcher))
+    }
+
+    /// A watcher of Bluetooth's device nodes (see `ENUMERATORS`), asked to tell of their being joined and their levels.
+    pub(super) fn watcher() -> windows::core::Result<DeviceWatcher> {
+        // (By their instance identifiers' beginning, the enumerator's name: Windows' device queries do not filter on the
+        // enumerator itself.)
+        let filter: Vec<String> = ENUMERATORS.iter().map(|enumerator| format!("System.Devices.DeviceInstanceId:~<\"{enumerator}\\\"")).collect();
+        let properties: IIterable<HSTRING> = vec![HSTRING::from(property_name(&CONNECTED)), HSTRING::from(property_name(&BATTERY_LEVEL))].into();
+        DeviceInformation::CreateWatcherWithKindAqsFilterAndAdditionalProperties(&HSTRING::from(filter.join(" OR ")), &properties, DeviceInformationKind::Device)
+    }
+
+    /// A property's name as Windows' device queries take it: its format id in braces, and its number.
+    pub(super) fn property_name(key: &DEVPROPKEY) -> String {
+        format!("{{{:?}}} {}", key.fmtid, key.pid)
     }
 
     /// Reads Bluetooth devices, keeping what Low Energy devices said they are (asked of Windows once each).
@@ -581,11 +669,19 @@ mod pmo {
     #[derive(Default)]
     pub(super) struct Reader {
         last: HashMap<String, Device>,
+        /// Whether a board did not answer at the last reading.
+        unanswered: bool,
     }
 
     impl Reader {
+        /// Whether a board went unanswered at the last reading (to be asked again soon).
+        pub fn waiting(&self) -> bool {
+            self.unanswered
+        }
+
         pub fn read(&mut self) -> Vec<Device> {
             let (mut read, mut kept, mut present) = (Vec::new(), Vec::new(), Vec::new());
+            self.unanswered = false;
             for path in hid::paths(&format!("{VENDOR:04x}")) {
                 let Some(product) = hid::product(&path).filter(|product| *product == RECEIVER || BOARDS.iter().any(|(board, _)| board == product)) else { continue };
                 let Some(mut channel) = hid::Collection::open(&path, |caps| caps.UsagePage == 0xFF60 && caps.Usage == 0x61 && matches!(caps.OutputReportByteLength, 33 | 65))
@@ -602,7 +698,10 @@ mod pmo {
                         self.last.insert(path, device.clone());
                         read.push(device);
                     }
-                    None => kept.extend(self.last.get(&path).cloned()),
+                    None => {
+                        self.unanswered = true;
+                        kept.extend(self.last.get(&path).cloned());
+                    }
                 }
             }
             self.last.retain(|path, _| present.contains(path));
@@ -1085,15 +1184,15 @@ mod xbox {
     }
 
     /// Has `told` sent to as a gamepad comes or goes, while what is given back is kept.
-    pub(super) fn hear(told: Sender<()>) -> Option<Heard> {
+    pub(super) fn hear(told: Sender<Wake>) -> Option<Heard> {
         let gone = told.clone();
         let added = Gamepad::GamepadAdded(&EventHandler::new(move |_, _| {
-            let _ = told.send(());
+            let _ = told.send(Wake::Told);
             Ok(())
         }))
         .ok()?;
         let removed = Gamepad::GamepadRemoved(&EventHandler::new(move |_, _| {
-            let _ = gone.send(());
+            let _ = gone.send(Wake::Told);
             Ok(())
         }))
         .ok()?;
@@ -1338,6 +1437,69 @@ mod tests {
         ]);
         let keys: Vec<&str> = ordered.iter().map(|device| device.key.as_str()).collect();
         assert_eq!(keys, ["b", "d", "a", "e", "c"]);
+    }
+
+    /// An asking (the panel opened) has the devices read at once, also while Windows is still telling of devices; a
+    /// telling alone waits for Windows to go quiet; no one left to wake the reader ends it.
+    #[test]
+    fn an_asking_is_read_at_once() {
+        let (wake, woken) = channel();
+        wake.send(Wake::Asked).unwrap();
+        let since = Instant::now();
+        assert_eq!(settled(&woken), Some(true));
+        assert!(since.elapsed() < SETTLED / 4, "{:?}", since.elapsed());
+        wake.send(Wake::Told).unwrap();
+        wake.send(Wake::Asked).unwrap();
+        let since = Instant::now();
+        assert_eq!(settled(&woken), Some(true));
+        assert!(since.elapsed() < SETTLED / 4, "{:?}", since.elapsed());
+        wake.send(Wake::Told).unwrap();
+        let since = Instant::now();
+        assert_eq!(settled(&woken), Some(true));
+        assert!(since.elapsed() >= SETTLED);
+        drop(wake);
+        assert_eq!(settled(&woken), None);
+    }
+
+    /// The properties the Bluetooth watcher is asked to tell of, named as Windows' device queries name them.
+    #[test]
+    fn bluetooth_properties_are_named_as_windows_names_them() {
+        use super::bluetooth::property_name;
+        let connected = DEVPROPKEY { fmtid: GUID::from_u128(0x83da6326_97a6_4088_9453_a1923f573b29), pid: 15 };
+        assert_eq!(property_name(&connected), "{83DA6326-97A6-4088-9453-A1923F573B29} 15");
+    }
+
+    /// The watcher of Bluetooth's device nodes starts with its filter and properties, lists the nodes there are, and
+    /// tells each one's being joined and its level (printed: run with a Bluetooth device paired).
+    #[test]
+    #[ignore = "watches this machine's Bluetooth devices"]
+    fn watches_the_bluetooth_devices() {
+        let watcher = super::bluetooth::watcher().unwrap();
+        let (seen, saw) = channel();
+        watcher
+            .Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, information| {
+                let information = information.as_ref().unwrap();
+                let properties = information.Properties()?;
+                let told = |name: &str| properties.Lookup(&HSTRING::from(name)).map(|value| format!("{value:?}")).unwrap_or_default();
+                let _ = seen.send(format!(
+                    "{} | joined {} | level {}",
+                    information.Name()?,
+                    told("{83DA6326-97A6-4088-9453-A1923F573B29} 15"),
+                    told("{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2")
+                ));
+                Ok(())
+            }))
+            .unwrap();
+        watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(|_, _| Ok(()))).unwrap();
+        watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(|_, _| Ok(()))).unwrap();
+        watcher.Start().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let listed: Vec<String> = saw.try_iter().collect();
+        for node in &listed {
+            println!("{node}");
+        }
+        let _ = watcher.Stop();
+        assert!(!listed.is_empty());
     }
 
     #[test]
