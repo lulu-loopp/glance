@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver as Told, RecvTimeoutError, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::{GUID, PCWSTR};
@@ -25,7 +25,7 @@ use windows::Gaming::Input::{Gamepad, RawGameController};
 use windows::System::Power::BatteryStatus;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_DevNode_PropertyW, CM_Get_Device_IDW, CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW, CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeW,
-    CM_Get_Device_Interface_PropertyW, CM_Get_Parent, CM_Locate_DevNodeW, CM_Register_Notification, CM_GETIDLIST_FILTER_ENUMERATOR, CM_GETIDLIST_FILTER_PRESENT,
+    CM_Get_Device_Interface_PropertyW, CM_Get_Parent, CM_Locate_DevNodeW, CM_Register_Notification, CM_Unregister_Notification, CM_GETIDLIST_FILTER_ENUMERATOR, CM_GETIDLIST_FILTER_PRESENT,
     CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_LOCATE_DEVNODE_NORMAL, CM_NOTIFY_ACTION, CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL, CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL,
     CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, CONFIGRET, CR_BUFFER_SMALL, CR_SUCCESS,
     HCMNOTIFICATION,
@@ -110,15 +110,19 @@ const SETTLED: Duration = Duration::from_secs(2);
 const SETTLING_AT_MOST: Duration = Duration::from_secs(10);
 
 /// What wakes the reader before its time: Windows telling of a device (an interface come or gone, a Bluetooth device
-/// joined or left or its level changed), read once Windows has gone quiet again, or someone about to look at the
-/// devices (the panel opened), read at once.
+/// joined or left or its level changed), read once Windows has gone quiet again, someone about to look at the devices
+/// (the panel opened), read at once, or the devices no longer wanted (their module switched off), the reader ended.
 enum Wake {
     Told,
     Asked,
+    Leave,
 }
 
-/// What the reader is woken by, once it runs.
-static WAKE: OnceLock<Sender<Wake>> = OnceLock::new();
+/// What the reader is woken by, while it runs.
+static WAKE: Mutex<Option<Sender<Wake>>> = Mutex::new(None);
+/// Whether the devices are wanted (see `want`), and whether the reader's thread runs.
+static WANTED: AtomicBool = AtomicBool::new(false);
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// The receivers (by vendor and product, as `hardware` gives them) a keyboard on which went unanswered at the last
 /// reading: asleep, as it is woken by a key pressed on it (see `keys_from`).
@@ -163,20 +167,41 @@ fn hardware(device: &str) -> Option<String> {
     (id.get(8..13) == Some("&pid_")).then(|| id.to_string())
 }
 
-/// Starts the reader's thread, once (later calls do nothing).
-pub fn start() {
-    static STARTED: OnceLock<()> = OnceLock::new();
-    STARTED.get_or_init(|| {
-        let (wake, woken) = channel();
-        let _ = WAKE.set(wake.clone());
-        std::thread::Builder::new().name("glance: wireless batteries".into()).spawn(move || run(wake, woken)).expect("a thread started");
-    });
+/// Whether the devices are wanted (their module on): the reader's thread started as they first are (later calls do
+/// nothing while it runs); no longer, it ends, and nothing is read, heard or asked of a device till they are again
+/// (none shown meanwhile, and no keyboard waited for).
+pub fn want(on: bool) {
+    WANTED.store(on, Ordering::Release);
+    if !on {
+        if let Some(wake) = WAKE.lock().unwrap().take() {
+            let _ = wake.send(Wake::Leave);
+        }
+        return;
+    }
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (wake, woken) = channel();
+    *WAKE.lock().unwrap() = Some(wake.clone());
+    std::thread::Builder::new()
+        .name("glance: wireless batteries".into())
+        .spawn(move || {
+            run(wake, woken);
+            DEVICES.lock().unwrap().clear();
+            WAITING.lock().unwrap().clear();
+            RUNNING.store(false, Ordering::Release);
+            // (Wanted again as it ended: run again.)
+            if WANTED.load(Ordering::Acquire) {
+                want(true);
+            }
+        })
+        .expect("a thread started");
 }
 
 /// Has everything read again now, every device asked (they are about to be looked at): the devices then as `now` gives
-/// them a moment later. Nothing where the reader has not started.
+/// them a moment later. Nothing where the reader does not run.
 pub fn ask() {
-    if let Some(wake) = WAKE.get() {
+    if let Some(wake) = WAKE.lock().unwrap().as_ref() {
         let _ = wake.send(Wake::Asked);
     }
 }
@@ -187,10 +212,10 @@ pub fn now() -> Vec<Device> {
 }
 
 /// The reader: everything read, then read again every `EVERY`, or once Windows has told of a device coming or going
-/// and gone quiet again.
+/// and gone quiet again; till it is told to leave (see `want`).
 fn run(told: Sender<Wake>, telling: Told<Wake>) {
     crate::actions::com();
-    hear_devices(told.clone());
+    let _devices = hear_devices(told.clone());
     // (Kept for as long as the thread runs: Windows lists controllers only to a program that hears of them, and tells
     // of Bluetooth devices' properties only while its watcher of them runs.)
     let _controllers = xbox::hear(told.clone());
@@ -259,29 +284,34 @@ mod kept {
 }
 
 /// Waits `EVERY`, or for Windows' telling of devices to begin and then go quiet, or for an asking: whether it was told
-/// or asked (none where no one can tell any more).
+/// or asked (none where it is told to leave, or no one can tell any more).
 fn settled(telling: &Told<Wake>) -> Option<bool> {
     match telling.recv_timeout(EVERY) {
         Ok(Wake::Told) => {}
-        Ok(Wake::Asked) => return Some(heard_out(telling)),
+        Ok(Wake::Asked) => return heard_out(telling),
+        Ok(Wake::Leave) | Err(RecvTimeoutError::Disconnected) => return None,
         Err(RecvTimeoutError::Timeout) => return Some(false),
-        Err(RecvTimeoutError::Disconnected) => return None,
     }
     let since = Instant::now();
     while since.elapsed() < SETTLING_AT_MOST {
         match telling.recv_timeout(SETTLED) {
             Ok(Wake::Told) => {}
-            Ok(Wake::Asked) => return Some(heard_out(telling)),
-            Err(_) => break,
+            Ok(Wake::Asked) => return heard_out(telling),
+            Ok(Wake::Leave) | Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => break,
         }
     }
     Some(true)
 }
 
-/// Takes what else was told or asked meanwhile (all of it answered by the one reading about to be done): true.
-fn heard_out(telling: &Told<Wake>) -> bool {
-    while telling.try_recv().is_ok() {}
-    true
+/// Takes what else was told or asked meanwhile (all of it answered by the one reading about to be done): true, or none
+/// where it was told to leave meanwhile.
+fn heard_out(telling: &Told<Wake>) -> Option<bool> {
+    let mut leave = false;
+    while let Ok(wake) = telling.try_recv() {
+        leave |= matches!(wake, Wake::Leave);
+    }
+    (!leave).then_some(true)
 }
 
 /// How long Windows is waited for to tell what is asked of it over the air (a Bluetooth device's appearance), at most:
@@ -314,17 +344,35 @@ fn ordered(mut devices: Vec<Device>) -> Vec<Device> {
 
 /// Has `told` sent to as any device interface comes or goes (a receiver plugged in, a Bluetooth device joined, whose
 /// sound or input then comes), for as long as the program runs.
-fn hear_devices(told: Sender<Wake>) {
+fn hear_devices(told: Sender<Wake>) -> DevicesHeard {
     let filter = CM_NOTIFY_FILTER {
         cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
         Flags: CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES,
         FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
         ..Default::default()
     };
-    // (Never let go of: heard for as long as the program runs.)
-    let context = Box::into_raw(Box::new(told)) as *const core::ffi::c_void;
+    // (Let go of as what is given back is: see `DevicesHeard`.)
+    let context = Box::into_raw(Box::new(told));
     let mut heard = HCMNOTIFICATION::default();
-    unsafe { CM_Register_Notification(&filter, Some(context), Some(interface_changed), &mut heard) };
+    let registered = unsafe { CM_Register_Notification(&filter, Some(context as *const core::ffi::c_void), Some(interface_changed), &mut heard) } == CR_SUCCESS;
+    DevicesHeard { heard: registered.then_some(heard), context }
+}
+
+/// Windows' telling of device interfaces heard (see `hear_devices`) while it is kept: dropped, no longer, and what it
+/// told to let go of.
+struct DevicesHeard {
+    heard: Option<HCMNOTIFICATION>,
+    context: *mut Sender<Wake>,
+}
+
+impl Drop for DevicesHeard {
+    fn drop(&mut self) {
+        // (Unregistered, no telling is under way or comes after: `CM_Unregister_Notification` waits for one under way.)
+        if let Some(heard) = self.heard {
+            unsafe { CM_Unregister_Notification(heard) };
+        }
+        drop(unsafe { Box::from_raw(self.context) });
+    }
 }
 
 unsafe extern "system" fn interface_changed(_: HCMNOTIFICATION, context: *const core::ffi::c_void, action: CM_NOTIFY_ACTION, _: *const CM_NOTIFY_EVENT_DATA, _: u32) -> u32 {
@@ -1780,6 +1828,16 @@ mod tests {
         assert!(woken.try_recv().is_err());
         drop(wake);
         assert_eq!(settled(&woken), None);
+        // Told to leave (the devices no longer wanted): ended at once, whether waiting, settling, or asked with it.
+        let (wake, woken) = channel();
+        for wakes in [vec![Wake::Leave], vec![Wake::Told, Wake::Leave], vec![Wake::Asked, Wake::Leave]] {
+            for one in wakes {
+                wake.send(one).unwrap();
+            }
+            let since = Instant::now();
+            assert_eq!(settled(&woken), None);
+            assert!(since.elapsed() < SETTLED / 4, "{:?}", since.elapsed());
+        }
     }
 
     /// The properties the Bluetooth watcher is asked to tell of, named as Windows' device queries name them.
@@ -1826,11 +1884,23 @@ mod tests {
     #[test]
     #[ignore = "reads this machine's wireless devices"]
     fn reads_the_devices() {
-        start();
+        want(true);
         // (Controllers are listed only after Windows has told of them.)
         std::thread::sleep(Duration::from_secs(8));
         for device in now() {
             println!("{device:?}");
         }
+        // No longer wanted: the reader ends, nothing shown or waited for; wanted again, it reads again.
+        want(false);
+        let since = Instant::now();
+        while RUNNING.load(Ordering::Acquire) && since.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        println!("ended in {:?}", since.elapsed());
+        assert!(!RUNNING.load(Ordering::Acquire) && now().is_empty() && !hears_keys());
+        want(true);
+        std::thread::sleep(Duration::from_secs(8));
+        println!("again: {} devices", now().len());
+        assert!(RUNNING.load(Ordering::Acquire));
     }
 }

@@ -9,11 +9,11 @@ use crate::ui::text::Lang;
 use crate::wireless::{self, Kind, Via};
 
 /// The devices connected now with their charge, as a sample carries them, while `on` (their module on: else none, and
-/// none read): the reader started as they are first asked for, in the order they are shown (by what they are, then by
-/// name). Kept as the latest too, for what else shows them (see `latest`).
+/// none read, the reader ended: see `wireless::want`): the reader started as they are first asked for, in the order
+/// they are shown (by what they are, then by name). Kept as the latest too, for what else shows them (see `latest`).
 pub fn read(on: bool) -> Vec<DeviceSample> {
+    wireless::want(on);
     let devices = if on {
-        wireless::start();
         let mut devices: Vec<DeviceSample> = wireless::now().into_iter().map(of).collect();
         devices.sort_by(|a, b| (a.kind as u8, &a.name, &a.key).cmp(&(b.kind as u8, &b.name, &b.key)));
         devices
