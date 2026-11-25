@@ -80,6 +80,9 @@ pub struct Volume {
     current: AtomicBool,
     /// The folders whose sizes were told (see `within`), by their ids.
     told: Mutex<HashMap<u64, Told>>,
+    /// How many times its index was put anew in its place (read as kept, or kept anew and read back): its entries'
+    /// places are not what they were before (see `read_drive`).
+    replaced: AtomicU64,
 }
 
 /// A folder whose size was told: the number what it held then goes by (another each time it may have changed, never
@@ -98,7 +101,13 @@ fn stamp() -> u64 {
 
 impl Volume {
     fn new(drive: Arc<Drive>, index: Index) -> Volume {
-        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), current: AtomicBool::new(false), told: Mutex::new(HashMap::new()) }
+        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), current: AtomicBool::new(false), told: Mutex::new(HashMap::new()), replaced: AtomicU64::new(0) }
+    }
+
+    /// `index` put in its place, its entries' places not those of the one before.
+    fn put(&self, index: Index) {
+        *self.index.write().unwrap() = index;
+        self.replaced.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Its index holding all its names as they are now (see `current`): once more of the drives listed (see `listed`).
@@ -111,6 +120,11 @@ impl Volume {
     /// Whether it is no longer followed: gone, or let go of as Windows asked to take it out.
     fn away(&self) -> bool {
         self.gone.load(Ordering::Relaxed) || self.drive.left()
+    }
+
+    /// Whether what was read of its index may no longer be so (see `search::read_since`).
+    fn read_since(&self, replaced: u64, watch: &Watch) -> bool {
+        self.away() || self.replaced.load(Ordering::Relaxed) != replaced || self.changed(watch)
     }
 
     /// Whether anything in the folder `watch` is of may have changed since its size was told.
@@ -227,6 +241,60 @@ fn held_on(volume: &Volume, rest: &Path, most: usize) -> Holds {
     let held = index.within(place, most);
     let largest = held.largest.iter().map(|&(place, bytes)| (index.name(place).to_string_lossy().into_owned(), bytes)).collect();
     Holds::Told { bytes: held.bytes, files: held.files, largest, watch: current.then(|| Watch { root: volume.drive.path.clone(), id, stamp }) }
+}
+
+/// What reading a drive's index whole came to (see `read_drive`).
+pub enum Reading<R> {
+    /// Its drive is not listed whole yet.
+    Listing,
+    /// No drive by that root is searched (a network drive, or one gone).
+    Nowhere,
+    /// What was read, and what tells whether it may no longer be so (see `read_since`): how many times its index had
+    /// been put anew (its entries' places), and what tells whether anything on the drive changed since.
+    Read { read: R, replaced: u64, watch: Watch },
+}
+
+/// The index of the drive at `root` ("C:\\") read by `read` as it is now, held from being changed meanwhile (what
+/// changes on the drive is taken in after): an index's entries are known by their places only while it is not put
+/// anew, which `Reading::Read` tells the number of (see `read_since`).
+pub fn read_drive<R>(root: &str, read: impl FnOnce(&Index) -> R) -> Reading<R> {
+    let volume = {
+        let volumes = VOLUMES.lock().unwrap();
+        if volumes.is_empty() {
+            return Reading::Listing;
+        }
+        volumes.iter().find(|volume| volume.drive.path.eq_ignore_ascii_case(root)).cloned()
+    };
+    match volume {
+        Some(volume) => read_volume(&volume, read),
+        None => Reading::Nowhere,
+    }
+}
+
+/// `volume`'s index read by `read` (see `read_drive`).
+fn read_volume<R>(volume: &Volume, read: impl FnOnce(&Index) -> R) -> Reading<R> {
+    if !volume.ready.load(Ordering::Relaxed) {
+        return Reading::Listing;
+    }
+    let index = volume.index.read().unwrap();
+    // (Its root told before it is read, under the same hold: what changes it after is told.)
+    let Some(id) = index.id(index::ROOT) else { return Reading::Nowhere };
+    let stamp = {
+        let mut told = volume.told.lock().unwrap();
+        let told = told.entry(id).or_insert_with(|| Told { stamp: stamp(), changed: false });
+        told.changed = false;
+        told.stamp
+    };
+    let replaced = volume.replaced.load(Ordering::Relaxed);
+    let read = read(&index);
+    Reading::Read { read, replaced, watch: Watch { root: volume.drive.path.clone(), id, stamp } }
+}
+
+/// Whether what was read of a drive's index (`replaced` and `watch`, as `read_drive` told them) may no longer be so:
+/// its drive gone, its index put anew, or anything on it changed since.
+pub fn read_since(replaced: u64, watch: &Watch) -> bool {
+    let volumes = VOLUMES.lock().unwrap();
+    volumes.iter().find(|volume| volume.drive.path == watch.root).is_none_or(|volume| volume.read_since(replaced, watch))
 }
 
 /// Whether anything in the folder `watch` is of may have changed since its size was told (its drive gone, or come again
@@ -358,14 +426,14 @@ fn follow(volume: &Arc<Volume>) {
         let whole = match (begun(kept.as_ref().map(|(_, kept)| kept), &journal), kept) {
             // (Its folders marked to be listed listed first: a first listing cut short goes on.)
             (Begun::ReadOn, Some((index, kept))) => {
-                *volume.index.write().unwrap() = index;
+                volume.put(index);
                 *volume.kept.lock().unwrap() = Some(kept);
                 volume.ready.store(kept.whole, Ordering::Relaxed);
                 !kept.whole
             }
             // Searched at once as it was kept, every folder listed again behind it.
             (Begun::Relisted, Some((index, kept))) => {
-                *volume.index.write().unwrap() = index;
+                volume.put(index);
                 *volume.kept.lock().unwrap() = Some(store::Kept { whole: kept.whole, ..from_now });
                 volume.ready.store(kept.whole, Ordering::Relaxed);
                 mark_all(volume);
@@ -389,7 +457,7 @@ fn follow(volume: &Arc<Volume>) {
         // running); else all of it listed.
         let whole = match kept.filter(|(index, kept)| index.by_id() == drive.by_id() && kept.journal.is_none()) {
             Some((index, kept)) => {
-                *volume.index.write().unwrap() = index;
+                volume.put(index);
                 volume.ready.store(kept.whole, Ordering::Relaxed);
                 mark_all(volume);
                 kept.whole
@@ -542,7 +610,7 @@ impl Keeping {
                 };
                 match written {
                     Ok(index) => {
-                        *volume.index.write().unwrap() = index;
+                        volume.put(index);
                         store::let_go(volume.drive.serial);
                         self.kept(Instant::now());
                     }
@@ -961,6 +1029,39 @@ mod tests {
         assert!(keeping.due(at(201), false, false, much, false), "kept, as before");
     }
 
+    /// A drive's index read whole is told to be so till anything on it is listed again as changed, or its index is put
+    /// anew (its places others then): read again, it is so again.
+    #[test]
+    fn a_drive_read_whole_is_so_till_anything_on_it_changes_or_its_index_is_put_anew() {
+        let root = tree("read", 2, 2, 3);
+        let drive = Arc::new(Drive::open(&format!("{}\\", root.display())).unwrap());
+        let pool = Arc::new(walk::Pool::new(2, 1 << 20));
+        let volume = Volume::new(drive, Index::new(0, true));
+        volume.put(Index::new(volume.drive.root_id, true));
+        assert!(matches!(read_volume(&volume, |_| ()), Reading::Listing));
+        sweep(&volume, &pool, &mut Keeping::new(), false);
+        let read = |volume: &Volume| match read_volume(volume, |index| index.within(index::ROOT, 0).files) {
+            Reading::Read { read, replaced, watch } => (read, replaced, watch),
+            _ => panic!("not read"),
+        };
+        let (files, replaced, watch) = read(&volume);
+        assert!(files > 0);
+        assert!(!volume.read_since(replaced, &watch));
+        // Anything changed deep in it: read again, it is so till the next.
+        let deep = volume.index.read().unwrap().place_of(Path::new("folder 1/folder 0")).unwrap();
+        std::fs::write(root.join("folder 1").join("folder 0").join("new.txt"), [0u8; 10]).unwrap();
+        walk::round(&volume.index, &volume.drive, &[deep], &pool, None);
+        volume.relisted(&[deep]);
+        assert!(volume.read_since(replaced, &watch));
+        let (again, replaced, watch) = read(&volume);
+        assert_eq!(again, files + 1);
+        assert!(!volume.read_since(replaced, &watch));
+        // Its index put anew (its places others).
+        let anew = std::mem::replace(&mut *volume.index.write().unwrap(), Index::new(0, true));
+        volume.put(anew);
+        assert!(volume.read_since(replaced, &watch));
+    }
+
     /// A folder's size is told by its path, and told to have changed as anything in it is listed again: a file come in a
     /// folder in it, not one come elsewhere. Told again, it has not.
     #[test]
@@ -969,7 +1070,7 @@ mod tests {
         let drive = Arc::new(Drive::open(&format!("{}\\", root.display())).unwrap());
         let pool = Arc::new(walk::Pool::new(2, 1 << 20));
         let volume = Volume::new(drive, Index::new(0, true));
-        *volume.index.write().unwrap() = Index::new(volume.drive.root_id, true);
+        volume.put(Index::new(volume.drive.root_id, true));
         sweep(&volume, &pool, &mut Keeping::new(), false);
         let folder = Path::new("folder 0");
         let held = |volume: &Volume| match held_on(volume, folder, 3) {

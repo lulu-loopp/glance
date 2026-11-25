@@ -70,6 +70,9 @@ mod reading;
 mod remote;
 #[cfg(windows)]
 pub mod search;
+/// What a drive holds, as the disk organizer shows it.
+#[cfg(windows)]
+pub mod disk;
 #[cfg(windows)]
 mod settle;
 // (What a touch of the PC said: read the same way by Glance and by its remote, of which this file is a part too.)

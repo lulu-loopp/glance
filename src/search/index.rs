@@ -570,7 +570,7 @@ impl Index {
 
     /// Each live entry in `folder` given to `each` once, in no order: as `held_by`, with nothing made where nothing came
     /// to the folder since it was kept.
-    fn each_in(&self, folder: u32, mut each: impl FnMut(u32, Entry)) {
+    pub fn each_in(&self, folder: u32, mut each: impl FnMut(u32, Entry)) {
         let kept = self.kept_in(folder);
         let mut came: Vec<u32> = self.adopted.get(&folder).into_iter().flatten().copied().filter(|place| !kept.contains(place)).collect();
         came.sort_unstable();
