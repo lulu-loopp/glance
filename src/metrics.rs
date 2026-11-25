@@ -1043,25 +1043,75 @@ impl Cores {
 /// a base clock raised (to 105 MHz, say) leaves every clock read from it that much short (HWiNFO's, read from the
 /// cores, are not). Intel's timestamp counter runs from a crystal of its own, not from the base clock MPERF follows:
 /// there the nominal clock is taken as Windows says.
+/// The counter's rate is timed only over the stretches between readings the machine was awake through: asleep or
+/// hibernated, the counter stops, or starts again from nothing, as the time does not (timed over that, it read short
+/// for good, or wildly).
+#[derive(Default)]
 struct Reference {
-    /// The timestamp counter's count when it was first read, and when that was; none where it is not the reference.
-    from: Option<(u64, Instant)>,
+    /// Where it is the reference: the counter and the time as last read (see `Mark`); none before it is first read.
+    last: Option<Mark>,
+    reference: bool,
+    /// What the counter counted and the time awake (100 ns) over every stretch it was timed over.
+    counted: (u64, u64),
 }
 
+/// The timestamp counter as read, with the system's time awake then (100 ns, its interrupt time less the time it
+/// slept) and the time it had slept.
+#[derive(Clone, Copy)]
+struct Mark {
+    count: u64,
+    awake: u64,
+    slept: u64,
+}
+
+impl Mark {
+    fn now() -> Mark {
+        use windows::Win32::System::WindowsProgramming::{QueryInterruptTimePrecise, QueryUnbiasedInterruptTimePrecise};
+        let (interrupt, awake) = unsafe { (QueryInterruptTimePrecise(), QueryUnbiasedInterruptTimePrecise()) };
+        Mark { count: timestamp(), awake, slept: interrupt.saturating_sub(awake) }
+    }
+}
+
+/// How far the time slept may seem to move between readings with no sleep between them (100 ns): the two times it is
+/// told by are read a moment apart. Asleep, it moves by seconds at least.
+const SLEPT_JITTER: u64 = 100_000;
+
 impl Reference {
+    /// Its first reading taken now, where the counter is the reference: the first sample's clock is timed from here.
     fn of_this_machine() -> Self {
-        Reference { from: counter_is_reference().then(|| (timestamp(), Instant::now())) }
+        let mut reference = Reference { reference: counter_is_reference(), ..Reference::default() };
+        if reference.reference {
+            reference.took(Mark::now());
+        }
+        reference
     }
 
     /// How much faster than `nominal_mhz` (as Windows says it) the reference runs: its timestamp counter's rate
-    /// (MHz) since it was first read, over that; 1 where that is not the reference, or no time has gone by.
-    fn scale(&self, nominal_mhz: f64) -> f64 {
-        let Some((count, at)) = self.from else { return 1.0 };
-        let seconds = at.elapsed().as_secs_f64();
-        if seconds <= 0.0 {
+    /// (MHz) over the time it was timed awake, over that; 1 where that is not the reference, or no time is timed yet.
+    fn scale(&mut self, nominal_mhz: f64) -> f64 {
+        if !self.reference {
             return 1.0;
         }
-        Self::scale_of(timestamp().wrapping_sub(count) as f64 / seconds / 1e6, nominal_mhz)
+        self.took(Mark::now());
+        self.counter_mhz().map_or(1.0, |mhz| Self::scale_of(mhz, nominal_mhz))
+    }
+
+    /// The counter and the time read at `now`: the stretch since the last reading timed where the machine did not
+    /// sleep through it and the counter went on (not started again).
+    fn took(&mut self, now: Mark) {
+        if let Some(last) = self.last {
+            if now.slept.abs_diff(last.slept) <= SLEPT_JITTER && now.count > last.count && now.awake > last.awake {
+                self.counted.0 += now.count - last.count;
+                self.counted.1 += now.awake - last.awake;
+            }
+        }
+        self.last = Some(now);
+    }
+
+    /// The counter's rate (MHz) over the time it was timed: none before any.
+    fn counter_mhz(&self) -> Option<f64> {
+        let (count, awake) = self.counted;
+        (awake > 0).then(|| count as f64 / (awake as f64 * 1e-7) / 1e6)
     }
 
     /// How much faster a reference running at `counter_mhz` is than `nominal_mhz`.
@@ -2346,6 +2396,29 @@ mod tests {
         assert!((super::clock_ghz(4300.0, 120.93, 1.0) - 5.20).abs() < 0.005);
         // (This PC's 9950X at its base clock: its counter's 4,299.82 MHz is the nominal 4,300 to within a ten-thousandth.)
         assert!((super::clock_ghz(4300.0, 123.7, Reference::scale_of(4299.82, 4300.0)) - 5.319).abs() < 0.001);
+    }
+
+    /// The counter's rate is timed over the stretches the machine was awake through: asleep or hibernated the counter
+    /// stopped, or started again from nothing, and timed over that it read short for good, or wildly; a stretch slept
+    /// through is left out, and timing goes on from the reading after it.
+    #[test]
+    fn the_counters_rate_is_timed_awake() {
+        // (4,515 counts a microsecond: 451.5 per 100 ns.)
+        let at = |count: u64, awake_s: u64, slept_s: u64| Mark { count, awake: awake_s * 10_000_000, slept: slept_s * 10_000_000 };
+        let mhz = |marks: &[Mark]| {
+            let mut reference = Reference { reference: true, ..Reference::default() };
+            marks.iter().for_each(|mark| reference.took(*mark));
+            reference.counter_mhz()
+        };
+        let second = 4_515_000_000u64;
+        assert_eq!(mhz(&[at(1_000, 100, 0)]), None);
+        assert_eq!(mhz(&[at(1_000, 100, 0), at(1_000 + 2 * second, 102, 0)]), Some(4515.0));
+        // (Slept an hour, the counter stopped there: the hour left out.)
+        assert_eq!(mhz(&[at(1_000, 100, 0), at(1_000 + second, 101, 0), at(1_000 + second, 102, 3600), at(1_000 + 3 * second, 104, 3600)]), Some(4515.0));
+        // (Hibernated, the counter started again from nothing: neither the stretch over it nor a wrapped count.)
+        assert_eq!(mhz(&[at(9 * second, 100, 0), at(10 * second, 101, 0), at(5_000, 102, 7200), at(5_000 + second, 103, 7200)]), Some(4515.0));
+        // (Slept with the counter going on, a stretch with the sleep's counts and none of its time: left out too.)
+        assert_eq!(mhz(&[at(0, 100, 0), at(second, 101, 0), at(3602 * second, 102, 3600)]), Some(4515.0));
     }
 
     #[test]
