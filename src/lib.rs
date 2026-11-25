@@ -103,8 +103,6 @@ mod sound;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
-mod wireless;
-#[cfg(windows)]
 mod devices;
 #[cfg(windows)]
 mod cover;
@@ -150,6 +148,8 @@ mod remind;
 mod toast;
 #[cfg(windows)]
 mod watch;
+#[cfg(windows)]
+pub mod wireless;
 #[cfg(windows)]
 mod carry;
 #[cfg(windows)]
