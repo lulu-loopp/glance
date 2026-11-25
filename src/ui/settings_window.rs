@@ -57,7 +57,7 @@ use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::motion::{Easing, Transition};
 use super::overlay::{Layout, ROWS};
-use super::prefs::{self, LanguagePref, MusicGround, Prefs, ThemePref};
+use super::prefs::{self, DevicesForm, LanguagePref, MusicGround, Prefs, ThemePref};
 use super::arrange::{self, GAP};
 use super::life::Lives;
 use super::render::{self, PanelLayers};
@@ -1055,6 +1055,7 @@ fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit, Field::PingTarget],
         "processes" => &[Field::ProcessCount],
+        "devices" => &[Field::DevicesForm],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         "todo" => &[Field::TodoLead, Field::TodoDayAt],
         "search" => &[Field::WebSearch],
@@ -1224,6 +1225,8 @@ enum Field {
     /// What the music widgets are drawn on (see `prefs::MusicGround`).
     MusicGround,
     ProcessCount,
+    /// How the wireless devices are shown (see `prefs::DevicesForm`).
+    DevicesForm,
     Interval,
     Span,
     TempAlert,
@@ -4452,6 +4455,11 @@ impl Ui {
                 vec!["5".into(), "8".into(), "12".into()],
                 at(&[5, 8, 12], prefs.processes.count as u64),
             ),
+            Field::DevicesForm => (
+                pick(lang, "显示方式", "Shown as"),
+                vec![s("圆环", "Rings"), s("列表", "List")],
+                DevicesForm::ALL.iter().position(|&form| form == prefs.devices.form),
+            ),
             Field::Interval => (
                 pick(lang, "刷新间隔", "Refresh interval"),
                 vec![seconds("0.5"), seconds("1"), seconds("2")],
@@ -4518,6 +4526,7 @@ impl Ui {
             Field::PingTarget => prefs.network.ping = Some(prefs::PingTarget::ALL[index]),
             Field::MusicGround => prefs.music.ground = MusicGround::ALL[index],
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
+            Field::DevicesForm => prefs.devices.form = DevicesForm::ALL[index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::OverlaySize | Field::OverlayClear => {}
@@ -4914,6 +4923,11 @@ impl Ui {
         match field {
             Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "What devices trusted send is taken without asking")),
             Field::AiLeft => Some(pick(self.lang, "按已用多少显示，或按还剩多少显示", "By how much of each limit is used, or how much is left")),
+            Field::DevicesForm => Some(pick(
+                self.lang,
+                "圆环仅在设备不超过四个且类型各不相同时使用，否则以列表显示",
+                "Rings are shown while there are four devices at most, each of a different kind. Otherwise they are listed",
+            )),
             Field::AiForm => Some(pick(
                 self.lang,
                 "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情。位于顶部边缘时横向排列",

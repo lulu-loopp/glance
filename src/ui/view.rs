@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::canvas::{Align, Canvas, Color, Fill, Font, Point};
 use super::icons::Icon;
-use super::prefs::{Prefs, ProcessSort};
+use super::prefs::{DevicesForm, Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
@@ -4313,7 +4313,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             // (Those the lane holds, as they are now: one joined since it was laid out is taken in where it fits, see
             // `Opening::grow`.)
             let devices: Vec<DeviceSample> = s.devices.iter().filter(|device| scene.seen.devices.iter().any(|(key, ..)| *key == device.key)).cloned().collect();
-            let rings = !full || rings_alone(&devices);
+            // (Listed, a row for each, compact too: as chosen. As rings, compact, their rings alone whatever they are.)
+            let rings = scene.prefs.devices.form == DevicesForm::Rings && (!full || rings_alone(&devices));
             vec![head(lang.pick("设备", "Devices"), "", "", false), Block::Devices { devices, rings, full }]
         }
         "wsl" => {
@@ -9806,6 +9807,133 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The devices' lane with two devices and with four (Glass, light) as each of its forms draws it (rings, rows,
+    /// named), and as forms drafted to compare (bars as a drive's, facts as a module's, closer rings), with the memory
+    /// and storage lanes to judge them by: `cargo test --features studio --lib -- --ignored devices_forms` writes
+    /// `target/devices/<form>-<count>.png`, `memory.png` and `storage.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn devices_forms() {
+        use crate::reading::{DeviceSample, DeviceVia};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/devices", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let device = |name: &str, kind: DeviceKind, via: DeviceVia, level: Option<u8>, charging: bool| DeviceSample { key: name.into(), name: name.into(), kind, via, level, charging, container: None };
+        let all = vec![
+            device("WAVE 75", DeviceKind::Keyboard, DeviceVia::Receiver, Some(35), false),
+            device("MX Master 4", DeviceKind::Mouse, DeviceVia::Logitech, Some(40), false),
+            device("WH-1000XM5", DeviceKind::Headphones, DeviceVia::Bluetooth, Some(15), false),
+            device("Xbox Wireless Controller", DeviceKind::Gamepad, DeviceVia::Xbox, Some(80), true),
+        ];
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample { devices: all.clone(), ..sample(None, None, None) })]));
+        let seen = Seen::of(history);
+        let prefs = Prefs::resolve(&serde_json::Value::Null, &["devices".to_string(), "memory".to_string()]);
+        let theme = Theme::new(Skin::Glass, false);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        // A device's row as a drafted form draws it from (`left`, `top`), `width` across: its icon and name where a
+        // label goes, then a bar of its charge and its figure at the end ("bars", as a drive's row in Storage), or its
+        // figure where a value goes ("facts", as a module's facts). Low, the signal colour, charging, a bolt.
+        fn drafted(frame: &dyn Canvas, theme: &Theme, ink: Ink, device: &DeviceSample, bars: bool, (left, top, width): (f32, f32, f32)) {
+            const ICON: f32 = 14.0;
+            const ICON_GAP: f32 = 7.0;
+            let read = device.level.is_some();
+            frame.icon(device_icon(device.kind), Point { x: left + ICON / 2.0, y: top + LINE / 2.0 }, ICON, if read { theme.text2 } else { theme.text3 });
+            let words = left + ICON + ICON_GAP;
+            let name = crate::ui::canvas::fitted(frame, &device.name, theme.small, LABEL - ICON - ICON_GAP);
+            frame.text(&name, theme.small, theme.text2, words, top, LABEL - ICON - ICON_GAP, Align::Start);
+            let figure = device.level.map_or(UNREAD.to_string(), |level| format!("{level}%"));
+            let low = device.low();
+            let bolt = |x: f32| {
+                let points: Vec<Point> = BOLT.iter().map(|(bx, by)| Point { x: x + bx * 1.3, y: top + LINE / 2.0 + by * 1.3 }).collect();
+                frame.fill_shape(&points, Fill::Solid(ink.trace));
+            };
+            let plot_left = left + LABEL + LABEL_GAP;
+            if bars {
+                let widest = frame.measure("100%", theme.small);
+                let wide = frame.measure(&figure, theme.small);
+                frame.text(&figure, theme.small, if low { theme.signal } else { theme.text2 }, left, top, width, Align::End);
+                if device.charging {
+                    bolt(left + width - wide - 7.0);
+                }
+                let bar_width = left + width - widest - 14.0 - LABEL_GAP - plot_left;
+                let bar_y = top + (LINE - theme.meter_height) / 2.0;
+                let (bx, by, bw, bh) = frame.on_pixels(plot_left, bar_y, bar_width, theme.meter_height);
+                frame.fill_rounded(theme.track, bx, by, bw, bh, theme.meter_radius);
+                let fraction = device.level.unwrap_or(0) as f32 / 100.0;
+                if fraction > 0.0 {
+                    frame.clip_part(plot_left, bar_y, bar_width, theme.meter_height, fraction, false);
+                    frame.fill_rounded(if low { theme.signal } else { ink.trace }, bx, by, bw, bh, theme.meter_radius);
+                    frame.unclip();
+                }
+            } else {
+                frame.text(&figure, theme.small, if low { theme.signal } else { theme.text }, plot_left, top, width, Align::Start);
+                if device.charging {
+                    bolt(plot_left + frame.measure(&figure, theme.small) + 8.0);
+                }
+            }
+        }
+        let save = |lane: &Lane, rows: &dyn Fn(&dyn Canvas, f32), tall: f32, name: String| {
+            let (w, h) = (COLUMN_WIDTH, lane.height(&theme) + tall);
+            let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                frame.fill(Color::hex(0xFBFBFB, 1.0), 0.0, 0.0, w, h);
+                paint_lane(frame, &scene, lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), Pass::Content, &mut Vec::new());
+                rows(frame, theme.pad_top + lane.blocks.iter().map(Block::height).sum::<f32>());
+            }).expect("drawn");
+            crate::studio::save_png(&out.join(format!("{name}.png")), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+        };
+        let ink = theme.ink("devices");
+        let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
+        for count in [2usize, 4] {
+            let devices = &all[..count];
+            let rings = Lane { id: "devices".into(), blocks: vec![head("设备", "", "", false), Block::Devices { devices: devices.to_vec(), rings: true, full: true }], ink };
+            save(&rings, &|_, _| {}, 0.0, format!("rings-{count}"));
+            // (As drawn now with more devices than a row of rings holds, or two alike, and as a widget made larger
+            // tells each.)
+            let rows = Lane { id: "devices".into(), blocks: vec![head("设备", "", "", false), Block::Devices { devices: devices.to_vec(), rings: false, full: true }], ink };
+            save(&rows, &|_, _| {}, 0.0, format!("rows-{count}"));
+            let bare = Lane { id: "devices".into(), blocks: vec![head("设备", "", "", false)], ink };
+            let named = |frame: &dyn Canvas, top: f32| paint_devices(frame, &scene, ink, devices, Devices::Named(1), (theme.pad_x, top, width), &|_| {});
+            save(&bare, &named, count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED), format!("named-{count}"));
+            // (The rows of small rings drawn as close as the bars' rows: a smaller ring, its name up to its figure.)
+            let close = |frame: &dyn Canvas, top: f32| {
+                const RING: (f32, f32, f32) = (20.0, 2.0, 11.0);
+                let figure = frame.measure("100%", theme.small);
+                for (i, device) in devices.iter().enumerate() {
+                    let row_top = top + i as f32 * (LINE + 8.0);
+                    device_ring(frame, &theme, ink, device, Point { x: theme.pad_x + RING.0 / 2.0, y: row_top + LINE / 2.0 }, RING);
+                    let words = theme.pad_x + RING.0 + 8.0;
+                    frame.text(&device.name, theme.small, theme.text2, words, row_top, theme.pad_x + width - figure - 8.0 - words, Align::Start);
+                    frame.text(&format!("{}%", device.level.unwrap_or(0)), theme.small, if device.low() { theme.signal } else { theme.text2 }, theme.pad_x, row_top, width, Align::End);
+                }
+            };
+            save(&bare, &close, count as f32 * (LINE + 8.0) - 8.0, format!("close-{count}"));
+            for (bars, step) in [(true, LINE + 8.0), (false, LINE + FACT_GAP)] {
+                let rows = |frame: &dyn Canvas, top: f32| {
+                    for (i, device) in devices.iter().enumerate() {
+                        drafted(frame, &theme, ink, device, bars, (theme.pad_x, top + i as f32 * step, width));
+                    }
+                };
+                save(&bare, &rows, count as f32 * step - (step - LINE), format!("{}-{count}", if bars { "bars" } else { "facts" }));
+            }
+        }
+        let meter = |label: &str, fraction: f32, value: &str, gap: f32| Block::Meter { label: label.into(), fraction, value: value.into(), hot: false, gap, opens: None };
+        let storage = Lane {
+            id: "storage".into(),
+            blocks: vec![head("存储", "", "", false), meter("C:", 0.58, "347 / 600 GB", 0.0), meter("D:", 0.24, "303 / 1262 GB", 8.0), meter("E:", 0.68, "1275 / 1863 GB", 8.0), meter("F:", 0.21, "1564 / 7452 GB", 8.0)],
+            ink: theme.ink("storage"),
+        };
+        save(&storage, &|_, _| {}, 0.0, "storage".into());
+        let facts = |rows: &[(&str, &str)]| Block::Facts { rows: rows.iter().map(|(label, value)| (label.to_string(), value.to_string(), false)).collect(), gap: 0.0, presses: Vec::new() };
+        let memory = Lane { id: "memory".into(), blocks: vec![head("内存", "2 × 32 GB DDR5-6000", "", false), facts(&[("频率", "6000 MT/s"), ("内存条 1", "40 °C"), ("内存条 2", "36 °C")])], ink: theme.ink("memory") };
+        save(&memory, &|_, _| {}, 0.0, "memory".into());
+    }
+
     /// The network lane's gateway row as its name gives way to the word saying it was copied, frame by frame (Glass,
     /// dark): `cargo test --features studio --lib -- --ignored copied_row` writes `target/copied/<ms>.png`.
     #[test]
@@ -11292,14 +11420,24 @@ seven".into()));
         assert!(between(was.0, goes.0, on_its_way.0) && between(was.1, goes.1, on_its_way.1) && on_its_way != goes, "{was:?} {on_its_way:?} {goes:?}");
     }
 
-    /// The devices' lane shows only while a device is connected: their rings alone while each is told by its icon (four
-    /// at most, no two alike), else a row for each. Compact, their rings alone whatever they are. Nothing of it is lit
-    /// under the pointer (no hit).
+    /// The devices' lane shows only while a device is connected. Listed (as unchosen), a row for each, compact or not.
+    /// Shown as rings: their rings alone while each is told by its icon (four at most, no two alike), else a row for
+    /// each, and compact, their rings alone whatever they are. Nothing of it is lit under the pointer (no hit).
     #[test]
     fn devices_show_while_connected_as_rings_or_rows() {
         let (info, theme) = (info(), Theme::new(Skin::Paper, false));
         // (On unless switched off, as a module new to the settings is.)
-        let prefs = Prefs::resolve(&serde_json::json!({}), &["devices".to_string()]);
+        let listed = Prefs::resolve(&serde_json::json!({}), &["devices".to_string()]);
+        assert_eq!(listed.devices.form, DevicesForm::Rows);
+        let prefs = Prefs::resolve(&serde_json::json!({ "devices": { "form": "rings" } }), &["devices".to_string()]);
+        assert_eq!(prefs.devices.form, DevicesForm::Rings);
+        // (What it is shown as is drawn from: a cached layer is drawn afresh as it is chosen.)
+        let drawn_key = |prefs: &Prefs| {
+            let mut key = std::collections::hash_map::DefaultHasher::new();
+            prefs.hash_drawn(&mut key);
+            key.finish()
+        };
+        assert_ne!(drawn_key(&listed), drawn_key(&prefs));
         let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let with = |devices: Vec<DeviceSample>| {
             let mut s = sample(None, None, None);
@@ -11313,6 +11451,10 @@ seven".into()));
         assert_eq!(drawn(Vec::new(), Detail::Full), None);
         // Headphones, a keyboard, a mouse, a controller: each told by its icon, rings alone.
         let four = vec![device("a", DeviceKind::Headphones, 10, false), device("b", DeviceKind::Keyboard, 70, false), device("c", DeviceKind::Mouse, 26, false), device("d", DeviceKind::Gamepad, 55, true)];
+        // Listed: rows, compact too.
+        let listed_scene = Scene { prefs: &listed, ..scene(leak(vec![with(four.clone())])) };
+        let listed_drawn = |detail| lane(&listed_scene, "devices", detail).unwrap().into_iter().find_map(|block| if let Block::Devices { rings, full, .. } = block { Some((rings, full)) } else { None });
+        assert_eq!((listed_drawn(Detail::Full), listed_drawn(Detail::Compact)), (Some((false, true)), Some((false, false))));
         assert!(lanes(&scene(leak(vec![with(four.clone())]))).iter().any(|lane| lane.id == "devices"));
         assert_eq!(drawn(four.clone(), Detail::Full), Some((true, true)));
         // A fifth, or two alike: a row for each.

@@ -28,6 +28,7 @@ pub struct Prefs {
     pub network: NetworkPrefs,
     pub processes: ProcessPrefs,
     pub music: MusicPrefs,
+    pub devices: DevicesPrefs,
     #[serde(rename = "chartSeconds")]
     pub chart_seconds: f64,
     #[serde(rename = "hotTemp")]
@@ -267,6 +268,27 @@ pub struct MusicPrefs {
     pub ground: MusicGround,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DevicesPrefs {
+    pub form: DevicesForm,
+}
+
+/// How the wireless devices' lane shows them: a row for each (its ring, its name, its charge), or their rings alone in
+/// a row where they fit so (four at most, no two alike: see `view::rings_alone`).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DevicesForm {
+    #[default]
+    Rows,
+    Rings,
+}
+
+impl DevicesForm {
+    /// As the settings list them.
+    pub const ALL: [DevicesForm; 2] = [DevicesForm::Rings, DevicesForm::Rows];
+}
+
 /// What the music widgets are drawn on, as the stored settings say: as chosen; never chosen, none where the lyrics'
 /// switch for no ground (up to 0.4.2) was on, else the cover.
 pub fn music_ground(stored: &serde_json::Value) -> MusicGround {
@@ -326,6 +348,7 @@ impl Default for Prefs {
             network: NetworkPrefs::default(),
             processes: ProcessPrefs::default(),
             music: MusicPrefs::default(),
+            devices: DevicesPrefs::default(),
             chart_seconds: 60.0,
             hot_temp: 85.0,
             ai_left: false,
@@ -485,7 +508,7 @@ impl Prefs {
     pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         (&self.modules, self.across).hash(key);
-        (self.hot_temp.to_bits(), self.chart_seconds.to_bits(), self.ai_left).hash(key);
+        (self.hot_temp.to_bits(), self.chart_seconds.to_bits(), self.ai_left, self.devices.form).hash(key);
     }
 
     /// The same, the AI component laid out across or not (see `across`).
