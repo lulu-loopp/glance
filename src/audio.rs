@@ -209,6 +209,7 @@ static MIXER: Mutex<Mixer> = Mutex::new(Mixer { outputs: Vec::new(), current: No
 static PEAKS: Mutex<Option<HashMap<String, f32>>> = Mutex::new(None);
 
 /// What is asked to be set, on the thread that reads and sets (see the top).
+#[derive(Debug, PartialEq)]
 enum Set {
     Output(String),
     App(String, Option<u8>, Option<bool>),
@@ -270,23 +271,15 @@ fn run(sets: &Receiver<Set>) {
     while ASKED.lock().unwrap().is_some_and(|at| at.elapsed() < KEPT_ON) {
         // (Counted before what was asked is set: see `ASKED_TO_SET`.)
         let asked_before = ASKED_TO_SET.load(Ordering::Acquire);
-        let mut chosen = None;
-        let mut apps: Vec<(String, Option<u8>, Option<bool>)> = Vec::new();
-        while let Ok(set) = sets.try_recv() {
-            match set {
-                Set::Output(id) => chosen = Some(id),
-                Set::App(key, level, muted) => match apps.iter_mut().find(|(of, _, _)| *of == key) {
-                    Some(app) => *app = (key, level.or(app.1), muted.or(app.2)),
-                    None => apps.push((key, level, muted)),
-                },
+        let steps = in_order(sets.try_iter());
+        let had_sets = !steps.is_empty();
+        for step in steps {
+            match step {
+                Step::Apps(apps) => set_apps(&devices, &apps),
+                Step::Output(id) => {
+                    let _ = make_default(&id);
+                }
             }
-        }
-        let had_sets = chosen.is_some() || !apps.is_empty();
-        if let Some(id) = chosen {
-            let _ = make_default(&id);
-        }
-        if !apps.is_empty() {
-            set_apps(&devices, &apps);
         }
         if had_sets || read_at.is_none_or(|at| at.elapsed() >= READ_EVERY) {
             read_at = Some(Instant::now());
@@ -302,6 +295,45 @@ fn run(sets: &Receiver<Set>) {
         std::thread::sleep(PEAKS_EVERY);
     }
     *PEAKS.lock().unwrap() = None;
+}
+
+/// What is done of what was asked to be set, in the order it was asked: the programs' levels and mutes asked one after
+/// another set together (each program's last asked), on the output played on as they were asked; an output chosen
+/// between them, chosen between them. (Each program's asked before another output was chosen are set on the output it
+/// was asked on, not the one chosen after.)
+#[derive(Debug, PartialEq)]
+enum Step {
+    Apps(Vec<(String, Option<u8>, Option<bool>)>),
+    Output(String),
+}
+
+/// `sets`, as they were asked, as the steps they are done in (see `Step`).
+fn in_order(sets: impl IntoIterator<Item = Set>) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let mut apps: Vec<(String, Option<u8>, Option<bool>)> = Vec::new();
+    for set in sets {
+        match set {
+            Set::Output(id) => {
+                if !apps.is_empty() {
+                    steps.push(Step::Apps(std::mem::take(&mut apps)));
+                }
+                // (Chosen twice in a row: the last.)
+                if let Some(Step::Output(last)) = steps.last_mut() {
+                    *last = id;
+                } else {
+                    steps.push(Step::Output(id));
+                }
+            }
+            Set::App(key, level, muted) => match apps.iter_mut().find(|(of, _, _)| *of == key) {
+                Some(app) => *app = (key, level.or(app.1), muted.or(app.2)),
+                None => apps.push((key, level, muted)),
+            },
+        }
+    }
+    if !apps.is_empty() {
+        steps.push(Step::Apps(apps));
+    }
+    steps
 }
 
 fn enumerator() -> Result<IMMDeviceEnumerator> {
@@ -553,6 +585,24 @@ fn make_default(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What was asked to be set is done in the order asked: a program's level asked before another output was chosen
+    /// is set before it is chosen (batched with the choosing, it was set on the output chosen after); each program's
+    /// last asked counts, and an output chosen twice in a row, the last.
+    #[test]
+    fn what_is_asked_is_set_in_the_order_asked() {
+        let app = |key: &str, level: Option<u8>, muted: Option<bool>| Set::App(key.into(), level, muted);
+        let steps = in_order([app("a", Some(20), None), app("a", None, Some(true)), Set::Output("B".into()), Set::Output("C".into()), app("a", Some(70), None), app("b", Some(5), None)]);
+        assert_eq!(
+            steps,
+            [
+                Step::Apps(vec![("a".into(), Some(20), Some(true))]),
+                Step::Output("C".into()),
+                Step::Apps(vec![("a".into(), Some(70), None), ("b".into(), Some(5), None)]),
+            ]
+        );
+        assert!(in_order([]).is_empty());
+    }
 
     #[test]
     fn an_output_on_a_device_of_its_own_is_said_to_be_on_its_bus() {
