@@ -238,7 +238,10 @@ impl Seen {
         }
     }
 
-    /// This and `other` together: everything either holds.
+    /// This and `other` together: everything either holds, but for the lanes shown only while what they tell of is
+    /// there now (a game, WSL, Docker, the wireless devices: see the top), each there as it is in `other` (a lane gone
+    /// since, laid out anew without it, came back with what this held, and was laid out anew again at each look).
+    /// While the devices' lane is there, it keeps the devices it held.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
         let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "devices", "docker", "wsl"].map(String::from).to_vec();
@@ -249,6 +252,12 @@ impl Seen {
             }
         }
         joined.rename(other);
+        joined.game = other.game;
+        joined.wsl = other.wsl;
+        joined.docker = other.docker;
+        if other.devices.is_empty() {
+            joined.devices.clear();
+        }
         joined
     }
 
@@ -451,5 +460,20 @@ mod tests {
         assert!(joined.battery);
         // A drive's model read late: its name, not a second row.
         assert_eq!(joined.drives, [(0, "Samsung SSD".to_string())]);
+    }
+
+    /// The lanes shown only while what they tell of is there now are there as they are now: the last device gone, WSL
+    /// and Docker stopped, the game left, none of their lanes is laid out again (it was, and the panel found its lanes
+    /// changed at every look, and laid itself out anew each time). While a device is connected, those held stay.
+    #[test]
+    fn a_lane_gone_since_is_not_joined_back() {
+        use crate::reading::DeviceKind;
+        let device = |key: &str| (key.to_string(), key.to_string(), DeviceKind::Mouse);
+        let held = Seen { devices: vec![device("a")], wsl: true, docker: true, game: true, containers: 3, ..Seen::default() };
+        let joined = held.join(&Seen::default(), &info());
+        assert!(joined.devices.is_empty() && !joined.wsl && !joined.docker && !joined.game);
+        assert_eq!(joined.containers, 3);
+        let now = Seen { devices: vec![device("b")], ..Seen::default() };
+        assert_eq!(held.join(&now, &info()).devices, [device("b"), device("a")]);
     }
 }
