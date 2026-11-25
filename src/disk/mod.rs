@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::search::index::{flag, Index, ROOT};
 
+pub mod act;
 pub mod map;
 
 /// What a file is for, as the map colours it: as Explorer's own icons colour videos, pictures, music and documents,
@@ -236,8 +237,9 @@ pub struct Survey {
     pub total: u64,
     pub free: u64,
     pub other: u64,
-    /// The Recycle Bin's folder, where the drive has one.
+    /// The Recycle Bin's folder, where the drive has one, and Windows' own, where it is on it.
     pub bin: Option<u32>,
+    pub windows: Option<u32>,
     /// The folders under OneDrive.
     pub onedrive: HashSet<u32>,
     /// When it was surveyed, and before when a file was written "over a year ago".
@@ -338,7 +340,7 @@ impl Survey {
         }
         let counted = folders.get(&ROOT).map_or(0, |root| root.held.bytes);
         let used = total.saturating_sub(free);
-        Survey { root: root.to_string(), other: used.saturating_sub(counted), folders, total, free, bin, onedrive, at: now, old_before }
+        Survey { root: root.to_string(), other: used.saturating_sub(counted), folders, total, free, bin, windows, onedrive, at: now, old_before }
     }
 
     pub fn folder(&self, place: u32) -> Option<&Folder> {
@@ -639,14 +641,17 @@ pub const EXTENSIONS_LISTED: usize = 40;
 impl Detail {
     /// The lists for `focus` of the drive `survey` surveyed (its index `index`), filtered by `filter` and lit by
     /// `light`, its map drawn from `tree`. (What is in the Recycle Bin only where it is the folder shown, or in it.)
+    /// Where a filter is on, or a type or a time lights the map, the folders holding a file that passes and is lit are
+    /// told (and the rests holding one): a kind alone lights the map by what its blocks mostly are.
     pub fn take(index: &Index, survey: &Survey, focus: u32, filter: Filter, light: Option<&Light>, tree: &Tree) -> Detail {
         let mut detail = Detail::default();
         let in_bin = survey.in_bin(focus);
+        let marks = filter.on() || matches!(light, Some(Light::Extension(_) | Light::Age(_)));
         let mut largest: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32)>> = std::collections::BinaryHeap::new();
         let mut kinds: HashMap<u32, Kind> = HashMap::new();
-        let mut extensions: HashMap<String, (u64, u64, [u64; 9])> = HashMap::new();
-        let mut stack = vec![focus];
-        while let Some(folder) = stack.pop() {
+        let mut extensions: HashMap<&str, (u64, u64, [u64; 9])> = HashMap::new();
+        let mut stack = vec![(focus, Drawn::of(tree, focus, None))];
+        while let Some((folder, drawn)) = stack.pop() {
             if !in_bin && Some(folder) == survey.bin {
                 continue;
             }
@@ -654,7 +659,7 @@ impl Detail {
             index.each_in(folder, |place, entry| {
                 if entry.folder() {
                     if entry.flags & flag::LINK == 0 {
-                        stack.push(place);
+                        stack.push((place, Drawn::of(tree, place, Some((folder, drawn)))));
                     }
                     return;
                 }
@@ -667,19 +672,18 @@ impl Detail {
                 if filter.on() && !filter.passes(stat.size, stat.written, is.system, survey.old_before) {
                     return;
                 }
-                let extension = extensions.entry(extension_of(name).to_string()).or_default();
+                let extension = extensions.entry(extension_of(name)).or_default();
                 extension.0 += stat.size;
                 extension.1 += 1;
                 extension.2[is.kind.at()] += stat.size;
                 let age = &mut detail.ages[age_of(stat.written, survey.at)];
                 age.0 += 1;
                 age.1 += stat.size;
-                let lit = light.is_none_or(|light| light.lights(name, is.kind, stat.written, survey.at));
-                if !lit {
+                if !light.is_none_or(|light| light.lights(name, is.kind, stat.written, survey.at)) {
                     return;
                 }
-                if matches!(light, Some(Light::Extension(_) | Light::Age(_))) {
-                    mark_lit(survey, tree, focus, folder, place, &mut detail);
+                if marks {
+                    detail.mark(survey, focus, folder, drawn, tree.by_place.contains_key(&place));
                 }
                 if is.system {
                     return;
@@ -701,35 +705,55 @@ impl Detail {
             .into_iter()
             .filter_map(|(bytes, place)| Some(Row { place, name: index.name(place).to_string_lossy().into_owned(), path: index.path(place, &survey.root)?, bytes, written: index.stat(place).written, kind: kinds[&place] }))
             .collect();
-        let mut extensions: Vec<Extension> = extensions.into_iter().map(|(extension, (bytes, files, kinds))| Extension { extension, bytes, files, kind: Held { kinds, ..Held::default() }.kind() }).collect();
+        let mut extensions: Vec<Extension> = extensions.into_iter().map(|(extension, (bytes, files, kinds))| Extension { extension: extension.to_string(), bytes, files, kind: Held { kinds, ..Held::default() }.kind() }).collect();
         extensions.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.extension.cmp(&b.extension)));
         extensions.truncate(EXTENSIONS_LISTED);
         detail.extensions = extensions;
         detail
     }
+
+    /// A file lit in `folder` (itself drawn, or not), `drawn` telling how `folder` is drawn: each folder from it up to
+    /// the one shown (`focus`) told as holding one (those above one told already are), and the rest it is drawn in.
+    fn mark(&mut self, survey: &Survey, focus: u32, folder: u32, drawn: Drawn, file_drawn: bool) {
+        let mut at = folder;
+        while self.lit_folders.insert(at) && at != focus && at != ROOT {
+            match survey.folder(at) {
+                Some(above) => at = above.parent,
+                None => break,
+            }
+        }
+        match drawn {
+            Drawn::Opened if !file_drawn => {
+                self.lit_rests.insert(folder);
+            }
+            Drawn::InRestOf(owner) => {
+                self.lit_rests.insert(owner);
+            }
+            _ => {}
+        }
+    }
 }
 
-/// The file at `place` in `folder` lit: each folder from the one shown (`focus`) down to it marked as holding one, as
-/// far as they are drawn, and the folder whose rest it is drawn in (see `Tree`).
-fn mark_lit(survey: &Survey, tree: &Tree, focus: u32, folder: u32, place: u32, detail: &mut Detail) {
-    let mut chain = vec![place, folder];
-    let mut at = folder;
-    while at != focus && at != ROOT {
-        let Some(above) = survey.folder(at) else { return };
-        at = above.parent;
-        chain.push(at);
-    }
-    chain.reverse();
-    for pair in chain.windows(2) {
-        let (above, place) = (pair[0], pair[1]);
-        detail.lit_folders.insert(above);
-        let Some(&drawn) = tree.by_place.get(&above) else { return };
-        if !tree.nodes[drawn].opened {
-            return;
-        }
-        if !tree.by_place.contains_key(&place) {
-            detail.lit_rests.insert(above);
-            return;
+/// How a folder is drawn on the map (see `Tree`): what it holds drawn, or itself as one, or in the rest of the folder
+/// drawn whose (as all in it then), or in one drawn as one (as all in it then).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Drawn {
+    Opened,
+    Whole,
+    InRestOf(u32),
+    InWhole,
+}
+
+impl Drawn {
+    /// How `place` is drawn, the folder it is in (and how that is drawn) told where it is not the one shown.
+    fn of(tree: &Tree, place: u32, above: Option<(u32, Drawn)>) -> Drawn {
+        let own = tree.by_place.get(&place).map(|&at| if tree.nodes[at].opened { Drawn::Opened } else { Drawn::Whole });
+        match (above, own) {
+            (None, Some(own)) | (Some((_, Drawn::Opened)), Some(own)) => own,
+            (None, None) => Drawn::InWhole,
+            (Some((folder, Drawn::Opened)), None) => Drawn::InRestOf(folder),
+            (Some((_, Drawn::InRestOf(owner))), _) => Drawn::InRestOf(owner),
+            (Some(_), _) => Drawn::InWhole,
         }
     }
 }

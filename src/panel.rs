@@ -564,7 +564,13 @@ impl Controller {
         self.in_front(front, 1);
     }
 
-    /// The window `front` in front, or none (`which`: 0 the settings, 1 the page beside), told to the panel's thread.
+    /// The disk organizer came to the front (`Some`: it), or left it: as the settings (see `settings_front`).
+    pub fn disk_front(&self, front: Option<HWND>) {
+        self.in_front(front, 2);
+    }
+
+    /// The window `front` in front, or none (`which`: 0 the settings, 1 the page beside, 2 the disk organizer), told to
+    /// the panel's thread.
     fn in_front(&self, front: Option<HWND>, which: isize) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
@@ -735,8 +741,8 @@ impl Controller {
         // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
         let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
         let mut closing_press = ClosingPress::default();
-        // The windows in front the panel and the widgets give way to: the settings, the page beside.
-        let mut in_front: (Option<HWND>, Option<HWND>) = (None, None);
+        // The windows in front the panel and the widgets give way to: the settings, the page beside, the disk organizer.
+        let mut in_front: (Option<HWND>, Option<HWND>, Option<HWND>) = (None, None, None);
         let mut msg = MSG::default();
         // In motion: when the next frame is due, with the screen's. Messages
         // that come before are taken as they come, not each followed by a
@@ -791,7 +797,7 @@ impl Controller {
                 // they are drawn, a panel came over it and went under it by turns).
                 let menu_up = menu.as_ref().map(|(open, _)| open.hwnd());
                 for panel in panels.iter_mut() {
-                    let give_way = menu_up.or(in_front.0.filter(|_| !panel.forward));
+                    let give_way = menu_up.or(in_front.0.or(in_front.2).filter(|_| !panel.forward));
                     if panel.window.gives_way_to() != give_way {
                         panel.window.yield_to(give_way);
                     }
@@ -1310,14 +1316,18 @@ impl Controller {
                 // widgets to the page while it is up, else to the settings.
                 SETTINGS_FRONT => {
                     let front = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
-                    if msg.lParam.0 == 0 {
-                        in_front.0 = front;
+                    if msg.lParam.0 == 0 || msg.lParam.0 == 2 {
+                        if msg.lParam.0 == 0 {
+                            in_front.0 = front;
+                        } else {
+                            in_front.2 = front;
+                        }
                         for panel in panels.iter_mut() {
                             // (Come in front again: given way to again, as it was pressed before.)
                             if front.is_some() {
                                 panel.forward = false;
                             }
-                            panel.settings_front(front);
+                            panel.settings_front(front.or(in_front.0).or(in_front.2));
                         }
                     } else {
                         in_front.1 = front;
@@ -1328,7 +1338,7 @@ impl Controller {
                             }
                         }
                     }
-                    widgets.settings_front(in_front.1.or(in_front.0));
+                    widgets.settings_front(in_front.1.or(in_front.0).or(in_front.2));
                 }
                 RESTYLE => {
                     for panel in panels.iter_mut() {
@@ -5275,7 +5285,7 @@ impl<'a> Panel<'a> {
                 crate::ui::music::play_line(index);
                 self.music.back_to_now();
             }
-            Some(Hit::Drive(letter)) => open_drive(letter),
+            Some(Hit::Drive(letter)) => open_drive(letter, self.hit_on_screen(Hit::Drive(letter))),
             Some(Hit::Folder(number)) => open_folder(number),
             Some(Hit::Address(address)) => {
                 copy_address(address, self.window.hwnd);
@@ -5691,11 +5701,15 @@ fn exclusive_fullscreen() -> bool {
     unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
 }
 
-/// What a press on the row of the drive `name` does, said.
-pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
-    match lang {
-        Lang::Zh => format!("打开 {name}"),
-        Lang::En => format!("Open {name}"),
+/// What a press on the row of the drive `letter` does, said: shown in the disk organizer, where search knows its every
+/// file, else opened.
+pub(crate) fn opens_drive(letter: char, lang: Lang) -> String {
+    let organized = crate::ui::disk::shows(&format!("{letter}:\\"));
+    match (lang, organized) {
+        (Lang::Zh, true) => format!("在磁盘整理中查看 {letter}:"),
+        (Lang::En, true) => format!("Show {letter}: in Disk Organizer"),
+        (Lang::Zh, false) => format!("打开 {letter}:"),
+        (Lang::En, false) => format!("Open {letter}:"),
     }
 }
 
@@ -5718,7 +5732,7 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
         return Some(name);
     }
     match hit {
-        Hit::Drive(letter) => Some(opens_drive(&format!("{letter}:"), lang)),
+        Hit::Drive(letter) => Some(opens_drive(letter, lang)),
         // (The address whole: a long one shows shortened.)
         Hit::Address(address) => {
             let latest = crate::app().controller.history.latest()?;
@@ -5742,9 +5756,15 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
     }
 }
 
-/// Opens the drive seen at `place` (see `Hit::Drive`) where the user browses files, on another thread (the shell may
-/// take a while).
-pub(crate) fn open_drive(letter: char) {
+/// The drive `letter` (see `Hit::Drive`) shown in the disk organizer, poured out of its row at `place` (physical px),
+/// where search knows its every file; else opened where the user browses files, on another thread (the shell may take
+/// a while).
+pub(crate) fn open_drive(letter: char, place: Option<RECT>) {
+    let root = format!("{letter}:\\");
+    if crate::ui::disk::shows(&root) {
+        crate::ui::disk::open_drive(&root, place);
+        return;
+    }
     std::thread::spawn(move || {
         let root = windows::core::HSTRING::from(format!("{letter}:\\"));
         unsafe {

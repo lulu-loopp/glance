@@ -356,6 +356,8 @@ enum Act {
     Show,
     Copy,
     CopyPath,
+    /// A folder shown in the disk organizer.
+    Organize,
 }
 
 /// What a menu up is for: a name's (what can be done with it, and its place among those shown), or the order.
@@ -1298,6 +1300,7 @@ impl Finder {
         self.waiting |= drawn;
         let icon = match row.kind {
             Kind::Program => Icon::AppWindow,
+            Kind::Page if matches!(row.what, What::Page(at) if matches!(PAGES[at].opens, Opens::DiskOrganizer)) => Icon::Disk,
             Kind::Page => Icon::Settings,
             Kind::Tool => Icon::Wrench,
             Kind::Folder => Icon::Folder,
@@ -1506,8 +1509,11 @@ impl Finder {
             choices.push((Act::Admin, lang.pick("以管理员身份运行", "Run as administrator"), Icon::AppWindow));
         }
         match &picked.what {
-            What::Path(_) => {
+            What::Path(path) => {
                 choices.push((Act::Show, lang.pick("打开所在位置", "Open file location"), Icon::Folder));
+                if picked.kind == Kind::Folder && path.to_str().and_then(|path| path.get(..3)).is_some_and(crate::ui::disk::shows) {
+                    choices.push((Act::Organize, lang.pick("在磁盘整理中查看", "Show in Disk Organizer"), Icon::Disk));
+                }
                 if picked.kind != Kind::Folder {
                     choices.push((Act::Copy, lang.pick("复制", "Copy"), Icon::Copy));
                 }
@@ -1821,7 +1827,7 @@ impl Finder {
         self.act_found = None;
         let Some(row) = self.picked().cloned() else { return };
         let lang = self.lang;
-        let opens = matches!(act, Act::Open | Act::Admin | Act::Show);
+        let opens = matches!(act, Act::Open | Act::Admin | Act::Show | Act::Organize);
         // (What opens it comes to the front, the window gone meanwhile.)
         if opens {
             let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
@@ -1832,7 +1838,20 @@ impl Finder {
             (What::Page(at), Act::Open | Act::Admin) => match PAGES[*at].opens {
                 Opens::Settings(uri) => shell("open", uri, ""),
                 Opens::Tool(program, given) => shell(if act == Act::Admin { "runas" } else { "open" }, program, given),
+                Opens::DiskOrganizer => {
+                    let by = self.sheet_on_screen();
+                    self.close(false);
+                    crate::ui::disk::open_last(Some(by));
+                    return;
+                }
             },
+            (What::Path(path), Act::Organize) => {
+                let by = self.sheet_on_screen();
+                let path = path.clone();
+                self.close(false);
+                crate::ui::disk::open_folder(&path, Some(by));
+                return;
+            }
             (What::Path(path), Act::Open) => run::ask(Ask::Files(vec![path.clone()], FilesAct::Open)),
             (What::Path(path), Act::Admin) if runs_as_admin(&row) => shell("runas", &path.display().to_string(), ""),
             (What::Path(path), Act::Show) => run::ask(Ask::Files(vec![path.clone()], FilesAct::Show)),

@@ -4557,7 +4557,7 @@ impl Widget {
                                 },
                                 Some(view::Hit::Ai(source)) => view::ai::toggle(source),
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
-                                Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
+                                Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter, self.hits_on_screen().into_iter().find(|(_, on)| *on == view::Hit::Drive(letter)).map(|(rect, _)| rect)),
                                 Some(view::Hit::Folder(number)) => crate::panel::open_folder(number),
                                 Some(view::Hit::Address(address)) => {
                                     crate::panel::copy_address(address, self.window.hwnd);

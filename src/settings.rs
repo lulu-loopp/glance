@@ -890,6 +890,8 @@ pub struct Settings {
     pub preview_shortcut: Option<Shortcut>,
     /// The order search puts the files and folders it finds in: as last chosen there.
     pub search_order: crate::search::Order,
+    /// The drive the disk organizer showed last (its root, "D:\\"): what it opens on when asked for by name.
+    pub disk_drive: Option<String>,
     /// What search looks for words on the web with.
     pub web_search: WebSearch,
     /// How loud a video or a sound looked at plays (0 to 1), and whether it is muted: as it was last set there.
@@ -1170,6 +1172,7 @@ impl Default for Settings {
             search_shortcut: Some(Shortcut::search()),
             preview_shortcut: Some(Shortcut::preview()),
             search_order: Default::default(),
+            disk_drive: None,
             web_search: WebSearch::default(),
             look_volume: 0.7,
             look_muted: false,

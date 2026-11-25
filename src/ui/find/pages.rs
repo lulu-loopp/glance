@@ -1,5 +1,5 @@
-//! The pages of Windows' Settings, and the system's own tools (Device Manager, the environment variables), found by
-//! search as programs are: each by its name as Windows 11 shows it, in Chinese and in English, where it is in Settings,
+//! The pages of Windows' Settings, and the system's own tools (Device Manager, the environment variables), and
+//! Glance's own (the disk organizer), found by search as programs are: each by its name as Windows 11 shows it, in Chinese and in English, where it is in Settings,
 //! the other words it is looked for by, and what opens it.
 
 use crate::ui::text::Lang;
@@ -13,13 +13,15 @@ pub struct Page {
     pub at_en: &'static str,
     /// Other words it is looked for by, either language's.
     pub also: &'static [&'static str],
-    /// What opens it: a Settings page's address (`ms-settings:…`), or a program and what it is given.
+    /// What opens it: a Settings page's address (`ms-settings:…`), a program and what it is given, or Glance's own.
     pub opens: Opens,
 }
 
 pub enum Opens {
     Settings(&'static str),
     Tool(&'static str, &'static str),
+    /// The disk organizer, on the drive it showed last (see `ui::disk::open_last`).
+    DiskOrganizer,
 }
 
 impl Page {
@@ -132,6 +134,7 @@ pub const PAGES: &[Page] = &[
     tool("任务计划程序", "Task Scheduler", &["计划任务", "taskschd"], "taskschd.msc", ""),
     tool("资源监视器", "Resource Monitor", &["resmon"], "resmon.exe", ""),
     tool("注册表编辑器", "Registry Editor", &["注册表", "regedit", "registry"], "regedit.exe", ""),
+    Page { zh: "磁盘整理", en: "Disk Organizer", at_zh: "Glance", at_en: "Glance", also: &["磁盘空间", "大文件", "清理磁盘", "disk space", "large files", "clean up disk"], opens: Opens::DiskOrganizer },
 ];
 
 #[cfg(test)]
@@ -148,6 +151,7 @@ mod tests {
             match page.opens {
                 Opens::Settings(uri) => assert!(uri.starts_with("ms-settings:") && !page.at_zh.is_empty()),
                 Opens::Tool(program, _) => assert!(!program.is_empty()),
+                Opens::DiskOrganizer => assert_eq!(page.at_en, "Glance"),
             }
         }
     }
