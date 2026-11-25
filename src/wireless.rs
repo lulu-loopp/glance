@@ -302,10 +302,12 @@ mod bluetooth {
         match major {
             // Phone.
             0x02 => Kind::Phone,
-            // Audio/video: a wearable headset, a hands-free device; headphones; a loudspeaker, portable audio, hi-fi.
+            // Audio/video: headphones (and a wearable headset, as nearly every pair with a microphone says it is: its
+            // sound played on it as on headphones, the sound's page draws it so), a hands-free device, a loudspeaker,
+            // portable audio, hi-fi.
             0x04 => match minor {
-                0x01 | 0x02 => Kind::Headset,
-                0x06 => Kind::Headphones,
+                0x01 | 0x06 => Kind::Headphones,
+                0x02 => Kind::Headset,
                 0x05 | 0x07 | 0x0A => Kind::Speaker,
                 _ => Kind::Other,
             },
@@ -965,8 +967,9 @@ mod tests {
 
     #[test]
     fn classes_of_device() {
-        // The Sony WH-1000XM5's: audio/video, a wearable headset.
-        assert_eq!(class_kind(0x240404), Kind::Headset);
+        // The Sony WH-1000XM5's: audio/video, a wearable headset, drawn as the headphones it is.
+        assert_eq!(class_kind(0x240404), Kind::Headphones);
+        assert_eq!(class_kind(0x240408), Kind::Headset);
         assert_eq!(class_kind(0x240418), Kind::Headphones);
         assert_eq!(class_kind(0x240414), Kind::Speaker);
         assert_eq!(class_kind(0x002540), Kind::Keyboard);
@@ -1091,13 +1094,13 @@ mod tests {
     fn devices_are_ordered_by_kind_then_name() {
         let ordered = ordered(vec![
             device("c", "mx master", Kind::Mouse),
-            device("b", "WH-1000XM5", Kind::Headset),
+            device("b", "WH-1000XM5", Kind::Headphones),
             device("a", "MX Keys", Kind::Keyboard),
             device("d", "Buds", Kind::Earbuds),
             device("e", "Anker", Kind::Mouse),
         ]);
         let keys: Vec<&str> = ordered.iter().map(|device| device.key.as_str()).collect();
-        assert_eq!(keys, ["d", "b", "a", "e", "c"]);
+        assert_eq!(keys, ["b", "d", "a", "e", "c"]);
     }
 
     #[test]
