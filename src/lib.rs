@@ -147,6 +147,8 @@ mod toast;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
+pub mod wireless;
+#[cfg(windows)]
 mod carry;
 #[cfg(windows)]
 mod widget;
