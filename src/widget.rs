@@ -4213,7 +4213,9 @@ impl Widget {
 
     /// The card beside it, as it was just drawn in `theme` from `prefs`: of the spot of the AI component's dock the
     /// pointer is on (what every source spent today, a source's ring, the sessions at work), or of the folder in the
-    /// storage lane it rests on, on the side of the screen with more room (under or over it, laid across); else none.
+    /// storage lane it rests on, on the side of the screen with more room; else none. (Beside it, along the row, for a
+    /// folder, one of a list down its lane, as on a panel; for the dock's spots, under or over a widget laid across, as
+    /// they are laid along it.)
     fn follow_card(&mut self, theme: &Theme, prefs: &crate::ui::prefs::Prefs, lang: crate::ui::text::Lang) {
         let hit = match self.hit_hover {
             Some(hit) if hit.carded() => hit,
@@ -4232,15 +4234,8 @@ impl Widget {
         // (Every spot that has one: what is behind each one's card is taken with this one's, see `hover_card::show`.)
         let on_screen = self.hits_on_screen();
         let spots: Vec<_> = on_screen.iter().filter(|(_, hit)| hit.carded()).map(|&(rect, hit)| (hit, rect)).collect();
-        use crate::ui::hover_card::Side;
         let (by, screen) = (self.rect(), self.contact.monitor);
-        let side = if by.right - by.left > by.bottom - by.top {
-            if (by.top + by.bottom) / 2 < (screen.top + screen.bottom) / 2 { Side::Below } else { Side::Above }
-        } else if (by.left + by.right) / 2 < (screen.left + screen.right) / 2 {
-            Side::Right
-        } else {
-            Side::Left
-        };
+        let side = side_of(hit, by, screen);
         let look = self.menu_look();
         // (Clear of its buttons, wherever they are outside it: the card lay over them.)
         let clear = self.content.buttons().iter().filter_map(|button| self.button_rect(*button)).reduce(|all, button| RECT {
@@ -5684,7 +5679,9 @@ impl Widget {
         }
         self.window.place_keeping(window);
         self.window.show_in_place();
-        if self.tip.is_some() {
+        // (A tip it shows, of a button or of what a press on a row does, over it again: drawn after a press, as a copied
+        // address says so, it had come over the tip.)
+        if self.tip.is_some() || self.saying {
             crate::ui::tip::above();
         }
         if self.carding {
@@ -5871,9 +5868,42 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 /// What a widget's buttons do: the window in front taken for a game (one
 /// played in a window, that would not be found), the settings, pinned,
 /// put away.
+/// Which side of a widget at `by` (on `screen`) the card of `hit` shows on, toward the more room: a folder's beside it,
+/// left or right, as a folder is one of a list down its lane (the card along its row, as on a panel at a side); the
+/// dock's spots', as they are laid along it: under or over a widget laid across, beside one laid down.
+fn side_of(hit: view::Hit, by: RECT, screen: RECT) -> crate::ui::hover_card::Side {
+    use crate::ui::hover_card::Side;
+    let across = by.right - by.left > by.bottom - by.top;
+    if across && !matches!(hit, view::Hit::Folder(_)) {
+        if (by.top + by.bottom) / 2 < (screen.top + screen.bottom) / 2 { Side::Below } else { Side::Above }
+    } else if (by.left + by.right) / 2 < (screen.left + screen.right) / 2 {
+        Side::Right
+    } else {
+        Side::Left
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder's card shows beside a widget, toward the more room, however the widget is shaped (one laid across, low on
+    /// the screen, had it over the widget, far from the row); the dock's spots' under or over a widget laid across.
+    #[test]
+    fn a_folders_card_shows_beside_the_widget() {
+        use crate::ui::hover_card::Side;
+        let screen = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let rect = |left, top, wide, tall| RECT { left, top, right: left + wide, bottom: top + tall };
+        let (low_wide, high_wide, tall_one) = (rect(1500, 900, 440, 255), rect(300, 100, 440, 255), rect(300, 400, 240, 500));
+        let folder = view::Hit::Folder(1);
+        assert_eq!(side_of(folder, low_wide, screen), Side::Left);
+        assert_eq!(side_of(folder, high_wide, screen), Side::Right);
+        assert_eq!(side_of(folder, tall_one, screen), Side::Right);
+        let dock = view::Hit::AiSlot(view::ai::Spot::Today);
+        assert_eq!(side_of(dock, low_wide, screen), Side::Above);
+        assert_eq!(side_of(dock, high_wide, screen), Side::Below);
+        assert_eq!(side_of(dock, tall_one, screen), Side::Right);
+    }
 
     /// A widget that can show the wireless devices (the readings' lanes, all or that one alone) has them read as it
     /// comes, as the panel does as it opens; one that cannot, not.
