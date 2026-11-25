@@ -2932,6 +2932,15 @@ impl Block {
         }
     }
 
+    /// How tall it is drawn given the room to tell more (see `Devices::of`): a devices' block with all of it, its
+    /// devices named; any other, as tall as it is.
+    pub fn told_height(&self) -> f32 {
+        match self {
+            Block::Devices { devices, full, .. } => devices_told(*full, devices.len(), self.height()),
+            _ => self.height(),
+        }
+    }
+
     fn height(&self) -> f32 {
         match self {
             Block::Head { .. } | Block::Dated { .. } => HEAD + HEAD_GAP,
@@ -3267,6 +3276,10 @@ const DEVICE_ROW_RING: (f32, f32, f32) = (26.0, 2.5, 13.0);
 const DEVICE_NAMED: f32 = 42.0;
 const DEVICE_NAMED_GAP: f32 = 8.0;
 const DEVICE_NAMED_RING: (f32, f32, f32) = (38.0, 3.0, 16.0);
+/// The least a named device takes across (its ring, a name of some length, its figure), and the room between two side
+/// by side: a lane wide enough has them in as many columns as fit.
+const DEVICE_NAMED_WIDE: f32 = 200.0;
+const DEVICE_NAMED_APART: f32 = 24.0;
 
 /// How tall `count` of the devices' rings alone are, in rows of `DEVICE_RINGS_ACROSS`, each its charge under it.
 fn rings_tall(count: usize) -> f32 {
@@ -3299,23 +3312,41 @@ pub(crate) fn device_icon(kind: DeviceKind) -> Icon {
     }
 }
 
-/// How the devices' lane draws them: rings alone in rows, a row for each named, or a row for each named and told what
-/// it is reached by.
+/// How the devices' lane draws them: rings alone in rows, a row for each named, or each named and told what it is
+/// reached by, in as many columns side by side as the lane's width holds.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Devices {
     Rings,
     Rows,
-    Named,
+    Named(usize),
+}
+
+/// How tall a devices' block with all of it (`full`) is drawn given the room to tell more (see `Devices::of`): its
+/// `count` devices named one under another, where that is taller than as `laid`.
+fn devices_told(full: bool, count: usize, laid: f32) -> f32 {
+    if full {
+        laid.max(count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED))
+    } else {
+        laid
+    }
 }
 
 impl Devices {
+    /// The columns `count` named devices take in `width`: as many as fit across, each `DEVICE_NAMED_WIDE` at least,
+    /// and no more than there are devices (one at least).
+    fn columns(count: usize, width: f32) -> usize {
+        let fit = ((width + DEVICE_NAMED_APART) / (DEVICE_NAMED_WIDE + DEVICE_NAMED_APART)).floor().max(1.0) as usize;
+        fit.min(count.max(1))
+    }
+
     /// As a lane laid out for `rings` alone or not, with all of it (`full`) or not, `laid` tall, draws `count` devices
-    /// in `room` (as tall as it was laid out, or taller where its widget was made taller): a lane with all of it given
-    /// more room than it was laid out for tells more of each, as rows named, where they fit (a widget made larger never
-    /// shows less).
-    fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32) -> Devices {
-        if full && room > laid + 0.5 && count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
-            Devices::Named
+    /// in `room` (as tall as it was laid out, or taller where its widget was made taller), `width` across: a lane with
+    /// all of it given more room than it was laid out for tells more of each, named, in as many columns as its width
+    /// holds, where their rows fit (a widget made larger never shows less).
+    fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32, width: f32) -> Devices {
+        let columns = Devices::columns(count, width);
+        if full && room > laid + 0.5 && count.div_ceil(columns) as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
+            Devices::Named(columns)
         } else if rings {
             Devices::Rings
         } else {
@@ -3356,13 +3387,19 @@ fn paint_devices(frame: &dyn Canvas, scene: &Scene, ink: Ink, devices: &[DeviceS
                 }
             }
         }
-        Devices::Rows | Devices::Named => {
-            let named = how == Devices::Named;
+        Devices::Rows | Devices::Named(_) => {
+            let (named, columns) = match how {
+                Devices::Named(columns) => (true, columns.max(1)),
+                _ => (false, 1),
+            };
             let (tall, gap, ring) = if named { (DEVICE_NAMED, DEVICE_NAMED_GAP, DEVICE_NAMED_RING) } else { (DEVICE_ROW, DEVICE_ROW_GAP, DEVICE_ROW_RING) };
             let figure = frame.measure("100%", theme.small);
+            let across = (width - DEVICE_NAMED_APART * (columns - 1) as f32) / columns as f32;
             for (i, device) in devices.iter().enumerate() {
                 part(&device.key);
-                let row_top = top + gap + i as f32 * (gap + tall);
+                let (row, column) = (i / columns, i % columns);
+                let row_top = top + gap + row as f32 * (gap + tall);
+                let (left, width) = (left + column as f32 * (across + DEVICE_NAMED_APART), across);
                 device_ring(frame, theme, ink, device, Point { x: left + ring.0 / 2.0, y: row_top + tall / 2.0 }, ring);
                 let words = left + ring.0 + if named { 12.0 } else { 10.0 };
                 let room = (left + width - figure - 8.0 - words).max(0.0);
@@ -3438,9 +3475,11 @@ fn shown<T>(value: Option<T>, show: impl Fn(T) -> String) -> String {
 /// Each lane's module and its height at every detail (see
 /// `arrange::Heights`), for the modules that are on and have something to
 /// show.
-pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
-    let height = |id: &str, detail: Detail| lane(scene, id, detail).map(|blocks| scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>());
-    lane_ids(scene.prefs).into_iter().filter_map(|id| Some(([height(&id, Detail::Full)?, height(&id, Detail::Compact)?], id))).map(|(heights, id)| (id, heights)).collect()
+pub fn heights(scene: &Scene) -> Vec<(String, [f32; 3])> {
+    let pads = scene.theme.pad_top + scene.theme.pad_bottom;
+    let height = |id: &str, detail: Detail| lane(scene, id, detail).map(|blocks| pads + blocks.iter().map(Block::height).sum::<f32>());
+    let told = |id: &str| lane(scene, id, Detail::Full).map(|blocks| pads + blocks.iter().map(Block::told_height).sum::<f32>());
+    lane_ids(scene.prefs).into_iter().filter_map(|id| Some(([height(&id, Detail::Full)?, height(&id, Detail::Compact)?, told(&id)?], id))).map(|(heights, id)| (id, heights)).collect()
 }
 
 /// How much shorter than designed each lane of `heights` may be drawn (its list at its foot given way to
@@ -5067,7 +5106,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Devices { devices, rings, full }, Pass::Content) => {
                 // (No hover: nothing of it is pressed, and nothing more is told of a device than it shows.)
                 let room = height + (area.h - natural).max(0.0);
-                paint_devices(frame, scene, ink, devices, Devices::of(*rings, *full, devices.len(), height, room), (left, y, width), &part);
+                paint_devices(frame, scene, ink, devices, Devices::of(*rings, *full, devices.len(), height, room, width), (left, y, width), &part);
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
@@ -10736,18 +10775,49 @@ seven".into()));
         let named = |count: usize| count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED);
         let rows = 3.0 * (DEVICE_ROW_GAP + DEVICE_ROW);
         let rings = |count: usize| DEVICE_RINGS_TOP + rings_tall(count);
-        assert_eq!(Devices::of(false, true, 3, rows, rows), Devices::Rows);
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3)), Devices::Rings);
-        assert_eq!(Devices::of(false, true, 3, rows, named(3)), Devices::Named);
-        assert_eq!(Devices::of(true, true, 3, rings(3), named(3)), Devices::Named);
+        assert_eq!(Devices::of(false, true, 3, rows, rows, 300.0), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3), 300.0), Devices::Rings);
+        assert_eq!(Devices::of(false, true, 3, rows, named(3), 300.0), Devices::Named(1));
+        assert_eq!(Devices::of(true, true, 3, rings(3), named(3), 300.0), Devices::Named(1));
         // Given more, not enough for named rows: as laid out.
-        assert_eq!(Devices::of(false, true, 3, rows, named(3) - 10.0), Devices::Rows);
-        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 20.0), Devices::Rings);
+        assert_eq!(Devices::of(false, true, 3, rows, named(3) - 10.0, 300.0), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 20.0, 300.0), Devices::Rings);
         // One device: its named row shorter than its ring alone, which it keeps unless given more.
         assert!(named(1) < rings(1));
-        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1)), Devices::Rings);
-        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 1.0), Devices::Named);
-        assert_eq!(Devices::of(true, false, 3, rings(3), 1000.0), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1), 300.0), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 1.0, 300.0), Devices::Named(1));
+        assert_eq!(Devices::of(true, false, 3, rings(3), 1000.0, 300.0), Devices::Rings);
+        // A widget made larger by less than named rows one under another take, and much wider (the owner's devices
+        // widget: three, 60 more tall, about 650 across): named side by side, as many columns as fit across.
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 650.0), Devices::Named(3));
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 430.0), Devices::Named(2));
+        assert_eq!(Devices::of(true, true, 5, rings(5), rings(5) + 60.0, 650.0), Devices::Named(3));
+        // (Never more columns than devices: a lone one's named row takes the whole width.)
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 60.0, 650.0), Devices::Named(1));
+        // Not wide enough for two: one under another, where they fit.
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 60.0, 300.0), Devices::Rings);
+    }
+
+    /// Named devices in columns: each column the same width, side by side with room between, filled a row at a time.
+    #[test]
+    fn named_devices_go_in_columns() {
+        use super::super::morph::{Op, Recorder};
+        let (info, theme) = (info(), Theme::new(Skin::Paper, false));
+        let prefs = Prefs::resolve(&serde_json::json!({}), &["devices".to_string()]);
+        let history: &'static [Arc<Sample>] = Box::leak(vec![Arc::new(sample(None, None, None))].into_boxed_slice());
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let devices = [device("a", DeviceKind::Headphones, 100, false), device("b", DeviceKind::Keyboard, 42, false), device("c", DeviceKind::Mouse, 40, false), device("d", DeviceKind::Gamepad, 70, false)];
+        let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+        paint_devices(&recorder, &scene, theme.ink("devices"), &devices, Devices::Named(3), (10.0, 0.0, 648.0), &|_| {});
+        let centres: Vec<Point> = recorder.parts().into_iter().flat_map(|part| part.ops).filter_map(|op| if let Op::Icon { centre, .. } = op { Some(centre) } else { None }).collect();
+        let across = (648.0 - 2.0 * DEVICE_NAMED_APART) / 3.0;
+        let (first, rows) = (10.0 + DEVICE_NAMED_RING.0 / 2.0, DEVICE_NAMED_GAP + DEVICE_NAMED);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert_eq!(centres.len(), 4);
+        for (i, centre) in centres.iter().enumerate() {
+            assert!(near(centre.x, first + (i % 3) as f32 * (across + DEVICE_NAMED_APART)), "{i}: {centres:?}");
+            assert!(near(centre.y, centres[0].y + (i / 3) as f32 * rows), "{i}: {centres:?}");
+        }
     }
 
     /// A device's ring: its track all round and its charge from the top clockwise as far as it goes, in the lane's

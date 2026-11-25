@@ -392,8 +392,26 @@ struct Placed {
     /// The lanes it shows, in order (the shot's if absent).
     #[serde(default)]
     modules: Option<Vec<String>>,
+    /// The form it was kept in, as a widget's settings keep it (its form's key, scale and extra room): shown so, not
+    /// laid out for `room`.
+    #[serde(default)]
+    kept: Option<Kept>,
     #[serde(flatten)]
     track: Track,
+}
+
+/// A widget's form as its settings keep it (see `settings::Widget`'s layout).
+#[derive(Deserialize)]
+struct Kept {
+    form: String,
+    scale: f32,
+    extra: (f32, f32),
+}
+
+impl Kept {
+    fn choice(&self) -> Choice {
+        Choice { form: Form::from_key(&self.form).expect("a form's key"), scale: self.scale, extra: self.extra }
+    }
 }
 
 /// Where a widget is taken, key by key; and where it shows it would stick
@@ -1048,7 +1066,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         .collect();
     // The widgets: the one torn off (once it is), then those placed.
     let mut torn: Option<Filming> = None;
-    let mut placed_widgets: Vec<Filming> = shot.widgets.iter().map(|w| Filming::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) }, w.at)).collect();
+    let mut placed_widgets: Vec<Filming> = shot
+        .widgets
+        .iter()
+        .map(|w| Filming::new(w.kept.as_ref().map_or(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) }, Kept::choice), w.at))
+        .collect();
     let work = (sw, sh - script.taskbar);
     let mut placements = Vec::new();
     // The files' pictures (a station's, quick launch's) come as they are made, on their own thread: the first frame
@@ -1104,7 +1126,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         let fresh = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, seen: &seen, buttons: false, theme: &widget_theme, ..scene };
         let mut showing: Vec<(usize, bool, Option<Shows>)> = Vec::new();
         let tracks: Vec<Following> = std::iter::once((shot.torn.as_ref().filter(|torn| t >= torn.at).map(|torn| &torn.track), None))
-            .chain(shot.widgets.iter().map(|w| (Some(&w.track), Some(w.room))))
+            .chain(shot.widgets.iter().map(|w| (Some(&w.track), w.kept.is_none().then_some(w.room))))
             .collect();
         if let Some(torn_off) = shot.torn.as_ref().filter(|torn_off| t >= torn_off.at && torn.is_none()) {
             // Whole, from where the panel rests; a lane alone, from where it is on it, in one column.

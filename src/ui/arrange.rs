@@ -122,7 +122,9 @@ fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, wide: f32, wor
 }
 
 /// A lane's height with all of it, and compact.
-pub type Heights = [f32; 2];
+/// A lane's heights: with all of it, compact, and with all of it given the room to tell more of what it shows (the
+/// devices' lane naming its devices: see `view::Devices`), as tall as with all of it where it tells no more.
+pub type Heights = [f32; 3];
 
 fn at(heights: &Heights, detail: Detail) -> f32 {
     match detail {
@@ -223,6 +225,10 @@ const STICK: f32 = 1.25;
 /// one; and a hand going to and fro moved that room with it.)
 const UP: f32 = 1.15;
 
+/// How much taller a form of lanes may be drawn than designed, at least (its lanes taking more to tell more of what
+/// they show: as far as they take).
+const STRETCH_DOWN: f32 = 60.0;
+
 /// A form the panel offers, its size as designed, how much wider and
 /// taller it may be drawn, and the least it may be scaled to.
 #[derive(Clone, Copy, Debug)]
@@ -247,10 +253,20 @@ impl Ladder {
         for detail in [Detail::Full, Detail::Compact] {
             for columns in (1..=MAX_COLUMNS.min(lanes.len())).rev() {
                 let layout = Layout::with_columns(lanes.iter().map(|heights| at(heights, detail)).collect(), columns, theme).widened(wide);
+                // (Down, as far as its lanes take to tell more, where that is further: the column taking most.)
+                let more = match detail {
+                    Detail::Full => (0..layout.columns)
+                        .map(|column| {
+                            let end = layout.cuts.get(column + 1).copied().unwrap_or(lanes.len());
+                            lanes[layout.cuts[column]..end].iter().map(|heights| (heights[2] - heights[0]).max(0.0)).sum::<f32>()
+                        })
+                        .fold(0.0, f32::max),
+                    _ => 0.0,
+                };
                 rungs.push(Rung {
                     form: Form::Lanes { detail, columns },
                     size: (layout.width(), layout.height()),
-                    stretch: (120.0 * columns as f32, 60.0),
+                    stretch: (120.0 * columns as f32, STRETCH_DOWN.max(more)),
                     floor: LANES_FLOOR,
                 });
             }
@@ -521,7 +537,7 @@ mod tests {
     #[test]
     fn a_rail_alone_has_room_for_its_foot() {
         let theme = Theme::new(Skin::Fluent, false);
-        for (heights, rail) in [(vec![120.0], 0), (vec![40.0, 120.0], 1)] {
+        for (heights, rail) in [(vec![120.0], 0), (vec![40.0, 120.0, 40.0], 1)] {
             for edge in [Edge::Left, Edge::Right] {
                 let (layout, _) = arrange(&theme, edge, heights.clone(), 0.0, (1920.0, 1080.0), None, 1.0, Some(rail));
                 let lanes = layout.lanes();
@@ -607,7 +623,7 @@ mod tests {
 
     /// Six lanes 300 DIPs tall with all of each, 150 compact.
     fn lanes() -> Vec<Heights> {
-        vec![[300.0, 150.0]; 6]
+        vec![[300.0, 150.0, 300.0]; 6]
     }
 
     #[test]
@@ -645,10 +661,36 @@ mod tests {
         }
     }
 
+    /// A form of all of each lane may be drawn taller by what its lanes take to tell more (the devices' lane, its
+    /// devices named, one under another), where that is more than it is stretched by anyway: the column taking most
+    /// to. Compact, they tell no more.
+    #[test]
+    fn a_form_stretches_as_far_as_its_lanes_tell_more() {
+        let theme = Theme::new(Skin::Paper, false);
+        let full = |ladder: &Ladder, columns| ladder.rung(Form::Lanes { detail: Detail::Full, columns }).unwrap().stretch.1;
+        let compact = |ladder: &Ladder| ladder.rung(Form::Lanes { detail: Detail::Compact, columns: 1 }).unwrap().stretch.1;
+        // Telling no more: as before.
+        let ladder = Ladder::new(&theme, &[[300.0, 150.0, 300.0]], 0.0, Shows::Readings(6));
+        assert_eq!(full(&ladder, 1), 60.0);
+        // The owner's devices widget: three devices' rings in 127, named in 199.
+        let ladder = Ladder::new(&theme, &[[127.0, 127.0, 199.0]], 0.0, Shows::Readings(6));
+        assert_eq!(full(&ladder, 1), 72.0);
+        assert_eq!(compact(&ladder), 60.0);
+        // In two columns, each column's lanes together: the devices' with another under it, the other column by itself.
+        let ladder = Ladder::new(&theme, &[[127.0, 127.0, 227.0], [300.0, 150.0, 300.0], [200.0, 100.0, 200.0]], 0.0, Shows::Readings(6));
+        let layout = Layout::with_columns(vec![127.0, 300.0, 200.0], 2, &theme);
+        let with_devices = (0..layout.columns).find(|&column| layout.cuts[column] == 0).unwrap();
+        assert_eq!(with_devices, 0);
+        assert_eq!(full(&ladder, 2), 100.0);
+        // A widget kept stretched that far keeps it.
+        let kept = ladder.keep(Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 100.0) });
+        assert_eq!(kept.extra.1, 100.0);
+    }
+
     #[test]
     fn a_level_left_comes_back_only_with_room_to_spare() {
         let theme = Theme::new(Skin::Paper, false);
-        let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
+        let lanes = [[196.0, 89.0, 196.0], [177.0, 113.0, 177.0], [134.0, 89.0, 134.0], [111.0, 85.0, 111.0], [85.0, 85.0, 85.0], [159.0, 115.0, 159.0], [89.0, 89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Narrowed a pixel at a time until the level drops, then widened:
         // a few pixels back keep the level it dropped to; `UP` times the
@@ -721,7 +763,7 @@ mod tests {
     #[test]
     fn a_room_grown_one_way_as_it_shrinks_the_other_turns_its_level_once_at_most() {
         let theme = Theme::new(Skin::Paper, false);
-        let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
+        let lanes = [[196.0, 89.0, 196.0], [177.0, 113.0, 177.0], [134.0, 89.0, 134.0], [111.0, 85.0, 111.0], [85.0, 85.0, 85.0], [159.0, 115.0, 159.0], [89.0, 89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Dragged by a corner, wider and shorter at each step: the level only ever goes down, never back up and
         // down again.
@@ -743,7 +785,7 @@ mod tests {
     #[test]
     fn a_narrow_tall_room_gets_the_corner_on_end() {
         let theme = Theme::new(Skin::Paper, false);
-        let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
+        let lanes = [[196.0, 89.0, 196.0], [177.0, 113.0, 177.0], [134.0, 89.0, 134.0], [111.0, 85.0, 111.0], [85.0, 85.0, 85.0], [159.0, 115.0, 159.0], [89.0, 89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         assert_eq!(ladder.choose((260.0, 420.0), None).form, Form::Small(Small::Tall));
         assert_eq!(ladder.choose((320.0, 190.0), None).form, Form::Small(Small::Corner));
@@ -752,7 +794,7 @@ mod tests {
     #[test]
     fn the_less_room_the_less_shows_never_back() {
         let theme = Theme::new(Skin::Paper, false);
-        let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
+        let lanes = [[196.0, 89.0, 196.0], [177.0, 113.0, 177.0], [134.0, 89.0, 134.0], [111.0, 85.0, 111.0], [85.0, 85.0, 85.0], [159.0, 115.0, 159.0], [89.0, 89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Narrower and narrower, then shorter and shorter, each from the
         // form shown: the level only goes down, and passes the tiles on the
@@ -794,7 +836,7 @@ mod tests {
     #[test]
     fn a_kept_form_is_held_to_the_screen() {
         let theme = Theme::new(Skin::Paper, false);
-        let lanes = [("cpu", [300.0, 150.0]), ("gpu:0", [300.0, 150.0]), ("memory", [300.0, 150.0])];
+        let lanes = [("cpu", [300.0, 150.0, 300.0]), ("gpu:0", [300.0, 150.0, 300.0]), ("memory", [300.0, 150.0, 300.0])];
         let three = Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.3, extra: (0.0, 0.0) };
         // Room for it: as kept.
         let opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(three), Seen::default());
@@ -834,7 +876,7 @@ mod tests {
         // share the other, and the room it has below them.
         let mut opened = Seen::default();
         opened.gpus.push(crate::ui::seen::GpuSeen { present: true, ..Default::default() });
-        let lanes = [("cpu", [700.0; 2]), ("gpu:0", [100.0; 2]), ("memory", [100.0; 2])];
+        let lanes = [("cpu", [700.0; 3]), ("gpu:0", [100.0; 3]), ("memory", [100.0; 3])];
         let mut opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(3), (1400.0, 900.0), None, 1.0, Want::Itself, opened.clone());
         assert_eq!(opening.layout.columns, 2);
         let (layout, zoom) = (opening.layout.height(), opening.zoom);

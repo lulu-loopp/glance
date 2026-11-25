@@ -2749,7 +2749,7 @@ struct Panel<'a> {
     /// with them (see `arrange`).
     game_at: (bool, bool),
     /// The AI component's lanes' heights as `opening` was laid out for them (see `arrange_lanes`).
-    ai_heights: Vec<(String, [f32; 2])>,
+    ai_heights: Vec<(String, arrange::Heights)>,
     /// What a panel laid out afresh while up (the settings changed) still
     /// holds from before: a volume unplugged stays until it closes.
     held: Option<Seen>,
