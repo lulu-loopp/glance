@@ -3217,13 +3217,16 @@ fn takes(hits: &[view::HitBox], from: (f32, f32), size: (f32, f32), pinned: bool
     }
     // A thing kept at hand: moved among them, or opened; a note's card on a list of notes: pulled off onto the desktop,
     // or opened (pinned or not, as in the panel: neither moves the widget). A note stuck on the desktop is its card,
-    // its widget moved by it (its words there to be written in).
-    for &(.., hit) in hits.iter().filter(|hit| under(hit)) {
+    // its widget moved by it (its words there to be written in). Each only where it is the first thing under the press
+    // that a press acts on, as the panel takes it (past what it lies in, the room things are dropped in): a button on
+    // a note's card, the one that writes a new note, is that button's.
+    for &(.., hit) in hits.iter().filter(|hit| under(hit)).filter(|hit| hit.4.takes_press()) {
         match hit {
             view::Hit::App(number) => return Takes::App(number),
             view::Hit::Note(number) if !hits.iter().any(|one| one.4 == view::Hit::Words(number)) => return Takes::Note(number),
             _ => {}
         }
+        break;
     }
     // The sound's track: slid along till let go (pinned or not: that is not moving it).
     if let Some(track) = hits.iter().filter(|hit| hit.4.slider().is_some()).find(under) {
@@ -3780,6 +3783,14 @@ impl Widget {
             return None;
         }
         let (name, from, card) = self.note_press.take()?;
+        // Stroked across its pages at once: they are swiped, as they are from a thing on a station (see `shelf_moved`),
+        // not the note pulled off.
+        if self.swipes.is_some_and(|(.., pressed)| pressed.elapsed() < HOLD) && self.begin_swipe(from, cursor, Instant::now()) {
+            // (The pointer kept for the swipe.)
+            self.stop_following();
+            self.next_frame = Instant::now();
+            return None;
+        }
         let px = self.contact.scale * self.zoom * self.part_zoom(view::Hit::Note(crate::notes::number_of(&name)));
         Some(NotePulled { name, card, from, over: self.rect(), px })
     }
@@ -6212,6 +6223,14 @@ mod tests {
         let (wx, wy, ww, wh) = crate::ui::note::words_in(w, h);
         let stuck = vec![(wx, wy, ww, wh, view::Hit::Words(7)), (0.0, 0.0, w, h, view::Hit::Note(7))];
         assert!(matches!(takes(&stuck, (0.0, 0.0), (w, h), false, false, (w / 2.0, 20.0)), Takes::Whole));
+        // The button that writes a new note, on a note's card that fills a small widget: the button's, not the card's
+        // (the card was taken, and opened, where a new note was asked for). Past it, the card's still.
+        let small = vec![(160.0, 10.0, 28.0, 28.0, view::Hit::NewNote), (0.0, 0.0, 200.0, 120.0, view::Hit::Note(9))];
+        assert!(!matches!(takes(&small, (0.0, 0.0), (200.0, 120.0), false, false, (170.0, 20.0)), Takes::Note(_)));
+        assert!(matches!(takes(&small, (0.0, 0.0), (200.0, 120.0), false, false, (60.0, 80.0)), Takes::Note(9)));
+        // (Past the room things are dropped in, which acts on no press.)
+        let slots = vec![(0.0, 0.0, 300.0, 300.0, view::Hit::AppSlot(0)), (0.0, 0.0, 40.0, 40.0, view::Hit::App(3))];
+        assert!(matches!(takes(&slots, (0.0, 0.0), (300.0, 300.0), false, false, (20.0, 20.0)), Takes::App(3)));
     }
 
     /// A note stuck on the desktop, its card found among what a widget drew (from its content's corner, in its window
