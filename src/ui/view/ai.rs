@@ -1048,12 +1048,15 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
         blocks.push(balance);
     }
     // Opened, or showing all (where it spent today): what it spent, by model and by kind, and its sessions; else, with
-    // no limit to show, what it spent today (a provider's, where its records on this PC tell it spent anything).
+    // no limit to show, what it spent today (a provider's, where its records on this PC tell it spent anything), and
+    // in the card, where it spent nothing today, that it did not (its models, kinds and sessions are today's).
     if !open.unwrap_or(true) || total.total() == 0 {
         // (What it spent is told by its head in the component's lane.)
-        let today = open.is_none() && if source.keyed() { total.total() > 0 && !shown_limit } else { limit.is_none() };
+        let spent = total.total();
+        let today = open.is_none() && (spent == 0 || if source.keyed() { !shown_limit } else { limit.is_none() });
         if today {
-            blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), short(total.total(), lang), false)], gap: GAP });
+            let told = if spent == 0 { lang.pick("暂无", "None").to_string() } else { short(spent, lang) };
+            blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), told, false)], gap: GAP });
         }
         return Some(blocks);
     }
@@ -2848,6 +2851,24 @@ pub(super) mod tests {
             assert!(matches!(&blocks[1], Block::Facts { rows, .. } if rows[0].1 == "正在读取"));
         }
 
+        /// A source with nothing spent today: the card beside the dock says so under its limit (a card with no models,
+        /// kinds or sessions under it reads as missing them), and says it of a source with no limit too; the lane in
+        /// the component, compact, does not.
+        #[test]
+        fn a_card_says_nothing_was_spent_today() {
+            let mut usage = day();
+            usage.spent_today.retain(|(tool, _, _)| *tool != crate::ai::Tool::Codex);
+            usage.sessions.retain(|session| session.tool != crate::ai::Tool::Codex);
+            let none_today = |blocks: &[Block]| matches!(blocks.last(), Some(Block::Facts { rows, .. }) if rows.as_slice() == [("今日用量".to_string(), "暂无".to_string(), false)]);
+            let card = lane_of("ai:codex", &Prefs::default(), Lang::Zh, Some(&usage), NOON, None).unwrap();
+            assert!(matches!(card.as_slice(), [Block::Ai(AiBlock::Head { .. }), Block::Ai(AiBlock::Windows(_)), _]), "{} blocks", card.len());
+            assert!(none_today(&card));
+            assert!(!none_today(&lane("ai:codex", Some(&usage))));
+            usage.spent_today.clear();
+            usage.sessions.clear();
+            assert!(none_today(&lane_of("ai:claude", &Prefs::default(), Lang::Zh, Some(&usage), NOON, None).unwrap()));
+        }
+
         /// The card beside the dock's 今日: the figure and how it mounted, each source's share of it (the most first, a
         /// source of records by its tool's name), and the whole by kind with every session of today.
         #[test]
@@ -2945,15 +2966,16 @@ pub(super) mod tests {
             assert_eq!(drawn(&whole[1..]), drawn(&blocks[1..]));
         }
 
-        /// Nothing spent today, a source's lane opens nothing, as it is toggled or beside the dock.
+        /// Nothing spent today, a source's lane opens nothing, as it is toggled or beside the dock: its head and its
+        /// windows, and beside the dock that nothing was spent today (see `a_card_says_nothing_was_spent_today`).
         #[test]
         fn a_source_that_spent_nothing_opens_nothing() {
             let mut usage = day();
             usage.spent_today.retain(|(tool, _, _)| *tool != crate::ai::Tool::Codex);
-            for open in [Some(true), Some(false), None] {
+            for (open, count) in [(Some(true), 2), (Some(false), 2), (None, 3)] {
                 let blocks = lane_of("ai:codex", &Prefs::default(), Lang::Zh, Some(&usage), NOON, open).unwrap();
                 assert!(matches!(&blocks[0], Block::Ai(AiBlock::Head { opened: None, .. })), "{open:?}");
-                assert_eq!(blocks.len(), 2, "{open:?}");
+                assert_eq!(blocks.len(), count, "{open:?}");
             }
         }
 
