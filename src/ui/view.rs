@@ -3621,8 +3621,9 @@ pub fn gives(scene: &Scene) -> Vec<f32> {
 /// shorter than they all give (smaller than its least: a widget's lanes take shapes then, see `widget`), is it shared
 /// by all.
 /// Taller, the lanes that tell more given more room (`tells`: how much more each takes to, see `Block::told_height`)
-/// take that first, in order, as far as it goes; the rest as `shared`.
-fn shares(gives: &[f32], tells: &[f32], change: f32) -> Vec<f32> {
+/// take that first, in order, as far as it goes; the rest as `shared`. Each lane's whole share, and how much of it is
+/// taken to tell more in (not its charts' to grow into: see `Layout::grows`).
+fn shares(gives: &[f32], tells: &[f32], change: f32) -> Vec<(f32, f32)> {
     let mut left = change;
     let mut told = vec![0.0; gives.len()];
     for (at, tell) in tells.iter().enumerate().take(gives.len()) {
@@ -3630,11 +3631,7 @@ fn shares(gives: &[f32], tells: &[f32], change: f32) -> Vec<f32> {
         told[at] = taken;
         left -= taken;
     }
-    let mut shares = shared(gives, left);
-    for (share, told) in shares.iter_mut().zip(told) {
-        *share += told;
-    }
-    shares
+    shared(gives, left).into_iter().zip(told).map(|(share, told)| (share + told, told)).collect()
 }
 
 /// What each of a column's lanes is drawn taller (or shorter) by, as `shares` says, of what is left to share.
@@ -4753,20 +4750,36 @@ impl Layout {
         (cards_across(inner), ((inner / APP_CELL_W) as usize).max(1))
     }
 
-    /// How much each lane's charts may grow, in order of the lanes: its
-    /// column's share of what the layout was stretched by.
+    /// How much each lane's charts may grow, in order of the lanes: its even share of what the layout was stretched
+    /// by, as far as the room it is given takes it, past what it takes to tell more in (see `shares`: where the lanes
+    /// that tell more took the stretch, the others' charts grew past their lanes, over the lane under).
     pub fn grows(&self) -> Vec<f32> {
-        let mut grows: Vec<f32> = (0..self.columns)
-            .flat_map(|column| {
-                let start = self.cuts[column];
-                let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
-                std::iter::repeat_n(self.grow / (end - start).max(1) as f32, end - start)
-            })
+        let mut grows: Vec<f32> = self
+            .allotted()
+            .into_iter()
+            .map(|(_, count, (extra, told))| (self.grow / count as f32).min(extra - told).max(0.0))
             .collect();
         if let Some((at, _)) = self.rail {
             grows.insert(at.min(grows.len()), 0.0);
         }
         grows
+    }
+
+    /// Each lane (not the rail's) by its place in order: its column, how many lanes are in that column, and what it is
+    /// given past its height and how much of that to tell more in (see `shares`). A shorter column's lanes share
+    /// what is left over, so every column ends at the same line.
+    fn allotted(&self) -> Vec<(usize, usize, (f32, f32))> {
+        let mut allotted = Vec::with_capacity(self.heights.len());
+        for column in 0..self.columns {
+            let start = self.cuts[column];
+            let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
+            let count = end - start;
+            let natural = self.heights[start..end].iter().sum::<f32>() + count.saturating_sub(1) as f32 * self.lane_gap;
+            let gives: Vec<f32> = (start..end).map(|at| self.gives.get(at).copied().unwrap_or(0.0)).collect();
+            let tells: Vec<f32> = (start..end).map(|at| self.tells.get(at).copied().unwrap_or(0.0)).collect();
+            allotted.extend(shares(&gives, &tells, self.lanes_height - natural).into_iter().map(|share| (column, count, share)));
+        }
+        allotted
     }
 
     pub fn width(&self) -> f32 {
@@ -4792,19 +4805,14 @@ impl Layout {
         let (top, side, _) = self.outer;
         let column_width = (self.width() - self.rail_across() - 2.0 * side - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
         let mut boxes = Vec::with_capacity(self.heights.len() + 1);
-        for column in 0..self.columns {
-            let start = self.cuts[column];
-            let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
-            let count = (end - start) as f32;
-            let natural = self.heights[start..end].iter().sum::<f32>() + (count - 1.0).max(0.0) * self.lane_gap;
-            let gives: Vec<f32> = (start..end).map(|at| self.gives.get(at).copied().unwrap_or(0.0)).collect();
-            let tells: Vec<f32> = (start..end).map(|at| self.tells.get(at).copied().unwrap_or(0.0)).collect();
-            let x = self.column_x(column);
-            let mut y = top;
-            for (height, extra) in self.heights[start..end].iter().zip(shares(&gives, &tells, self.lanes_height - natural)) {
-                boxes.push(Rect { x, y, w: column_width, h: height + extra });
-                y += height + extra + self.lane_gap;
+        let mut y = top;
+        for (at, (column, _, (extra, _))) in self.allotted().into_iter().enumerate() {
+            if self.cuts[column] == at {
+                y = top;
             }
+            let height = self.heights[at] + extra;
+            boxes.push(Rect { x: self.column_x(column), y, w: column_width, h: height });
+            y += height + self.lane_gap;
         }
         if let Some((at, rail)) = self.rail {
             let width = self.width();
@@ -7944,6 +7952,28 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    /// A widget stretched taller: each lane's charts grow only into the room its lane is given past what it takes to
+    /// tell more in, so no lane is drawn past its box. (A lane that tells more taking the whole stretch, the charts of
+    /// the lane over it grew by half of it all the same, over it.)
+    #[test]
+    fn charts_grow_only_into_their_lanes_room() {
+        let theme = Theme::new(Skin::Glass, false);
+        let laid = |tells: Vec<f32>| Layout::with_columns(vec![120.0, 60.0], 1, &theme).stretched((0.0, 72.0)).telling(tells);
+        let fits = |layout: &Layout| layout.lanes().iter().zip(&layout.heights).zip(layout.grows()).all(|((lane, height), grow)| height + grow <= lane.h + 0.01);
+        // (The lane under telling more by all the stretch: neither's charts grow.)
+        let all = laid(vec![0.0, 72.0]);
+        assert_eq!(all.grows(), [0.0, 0.0]);
+        assert!(fits(&all));
+        // (By some of it: the rest shared evenly, each lane's charts growing into its share.)
+        let some = laid(vec![0.0, 30.0]);
+        assert_eq!(some.grows(), [21.0, 21.0]);
+        assert!(fits(&some));
+        // (Neither telling more: each grows by half.)
+        let none = laid(vec![0.0, 0.0]);
+        assert_eq!(none.grows(), [36.0, 36.0]);
+        assert!(fits(&none));
+    }
 
     /// What the pointer is over is lit (and told of, a thread's clock and load over its cell) the same in a panel and in
     /// a widget torn off it: all but a list's rows and bar, which only scroll.
