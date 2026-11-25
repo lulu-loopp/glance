@@ -1031,6 +1031,54 @@ pub enum Pass {
     Plots,
 }
 
+/// One reading in a row of `Block::Columns`: the words before it (empty for none), its value, and whether it is hot.
+#[derive(Clone, Debug, PartialEq, Hash)]
+struct Cell {
+    lead: String,
+    value: String,
+    hot: bool,
+}
+
+/// The room between the words before a reading and its value; between columns, what they leave of the room shared
+/// out (the last ending where the room does), between the least and the most; and the least of the label a row of
+/// them keeps, where they take of its room.
+const LEAD_GAP: f32 = 4.0;
+const COLUMN_GAP: f32 = 28.0;
+const COLUMN_GAP_LEAST: f32 = 6.0;
+const COLUMN_LABEL_LEAST: f32 = 64.0;
+
+/// Where each column of `rows` goes, from the start of the room they are in (`room` wide), each as wide as its widest
+/// cell as `measure`d: the words before its readings start at `.0`, its readings end at `.1` (each its value's end
+/// lined up with those above and below it). Columns empty in every row take no room. Where even the least gaps leave
+/// them short of room, they start before it, by up to `borrow` (taken from the label before them).
+fn columns(rows: &[(String, Vec<Option<Cell>>)], room: f32, borrow: f32, measure: impl Fn(&str) -> f32) -> Vec<(f32, f32)> {
+    let count = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
+    let cells = |j: usize| rows.iter().filter_map(move |(_, cells)| cells.get(j).and_then(Option::as_ref));
+    let widths: Vec<Option<(f32, f32)>> = (0..count)
+        .map(|j| {
+            let widest = |of: &dyn Fn(&Cell) -> &str| cells(j).filter(|cell| !of(cell).is_empty()).map(|cell| measure(of(cell))).fold(None, |most: Option<f32>, w| Some(most.map_or(w, |m| m.max(w))));
+            let value = widest(&|cell| &cell.value)?;
+            Some((widest(&|cell| &cell.lead).map_or(0.0, |lead| lead + LEAD_GAP), value))
+        })
+        .collect();
+    let used: f32 = widths.iter().flatten().map(|(lead, value)| lead + value).sum();
+    let shown = widths.iter().flatten().count();
+    let gaps = shown.saturating_sub(1) as f32;
+    let gap = if shown > 1 { ((room - used) / gaps).clamp(COLUMN_GAP_LEAST, COLUMN_GAP) } else { 0.0 };
+    let mut x = -(used + gap * gaps - room).clamp(0.0, borrow);
+    widths
+        .iter()
+        .map(|width| match width {
+            Some((lead, value)) => {
+                let at = (x, x + lead + value);
+                x = at.1 + gap;
+                at
+            }
+            None => (x, x),
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
@@ -1050,6 +1098,9 @@ enum Block {
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<char> },
     /// Rows of a label and its value (hot or not); `presses`: the rows a press on does something, each by its hit.
     Facts { rows: Vec<(String, String, bool)>, gap: f32, presses: Vec<(usize, Hit)> },
+    /// Rows of a label and readings set in columns (see `columns`), so the same reading lines up down the rows; a
+    /// row's `None` leaves its column empty.
+    Columns { rows: Vec<(String, Vec<Option<Cell>>)>, gap: f32 },
     /// The wireless devices connected now, each its charge's ring round its icon (see `Devices`): rings alone in a row
     /// where `rings` (each told by its icon), else a row for each, named, its charge after it.
     Devices { devices: Vec<DeviceSample>, rings: bool, full: bool },
@@ -3008,6 +3059,8 @@ impl Block {
             Block::Meter { gap, .. } => gap + LINE,
             Block::Facts { rows, gap, .. } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
             Block::Facts { .. } => 0.0,
+            Block::Columns { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
+            Block::Columns { .. } => 0.0,
             Block::Devices { devices, rings: true, .. } => DEVICE_RINGS_TOP + rings_tall(devices.len()),
             Block::Devices { devices, rings: false, .. } => devices.len() as f32 * (DEVICE_ROW_GAP + DEVICE_ROW),
             Block::Sound { .. } => MEDIA_GAP + MEDIA_ROW,
@@ -3046,6 +3099,7 @@ impl Hash for Block {
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
             Block::Facts { rows, gap, presses } => (rows, gap.to_bits(), presses).hash(state),
+            Block::Columns { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Devices { devices, rings, full } => (devices, rings, full).hash(state),
             Block::Sound { level, muted, output, open } => (level, muted, output, open).hash(state),
             Block::Playing { title, about, playing, players } => (title, about, playing, players).hash(state),
@@ -3925,27 +3979,31 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             // its temperature (unread, for one that gives none).
             // (Those the machine started with, and any that has given a
             // temperature since: one plugged in later.)
-            // Each line tells the drive's reading and writing (as switched on), then its temperature (as switched on).
+            // Each line tells the drive's reading and writing (as switched on), then its temperature (as switched on),
+            // each in a column of its own: the same reading lined up down the drives.
             let mut all: Vec<(u32, &String)> = info.drive_ids.iter().copied().zip(&info.drives).collect();
             all.extend(drives.iter().filter(|(id, _)| !info.drive_ids.contains(id)).map(|(id, name)| (*id, name)));
             let every = if on("drives") || on("rates") { all.len() } else { 0 };
+            let mut lines: Vec<(String, Vec<Option<Cell>>)> = Vec::new();
             if every > 1 {
                 for (id, name) in &all {
                     let value = temp(*id);
-                    let mut said = Vec::new();
-                    // (A drive whose rates are not read tells its temperature alone, or that it is not read.)
-                    if let Some(rates) = s.drive_rates.iter().find(|rate| rate.id == *id).filter(|_| on("rates")) {
-                        let rate = |of: Option<f64>| shown(of, |rate| text::rate(rate, false));
-                        said.push(match lang {
-                            Lang::Zh => format!("读 {}，写 {}", rate(rates.read), rate(rates.write)),
-                            Lang::En => format!("R {}, W {}", rate(rates.read), rate(rates.write)),
-                        });
+                    let mut cells = Vec::new();
+                    // (A drive whose rates are not read leaves their columns empty.)
+                    if on("rates") {
+                        let rates = s.drive_rates.iter().find(|rate| rate.id == *id);
+                        let rate = |lead: &str, of: Option<f64>| Cell { lead: lead.into(), value: shown(of, |rate| text::rate(rate, false)), hot: false };
+                        cells.push(rates.map(|rates| rate(lang.pick("读", "R"), rates.read)));
+                        cells.push(rates.map(|rates| rate(lang.pick("写", "W"), rates.write)));
                     }
-                    // (Its temperature, where it gives one: that it is not read, only where nothing else is told.)
-                    if on("drives") && value.is_some() || said.is_empty() {
-                        said.push(shown(value.filter(|_| on("drives")), celsius));
+                    if on("drives") {
+                        cells.push(value.map(|t| Cell { lead: String::new(), value: celsius(t), hot: t > hot_temp }));
                     }
-                    facts.push(((*name).clone(), said.join(" · "), on("drives") && value.is_some_and(|t| t > hot_temp)));
+                    // (One that tells nothing: that it is not read, in its first column.)
+                    if cells.iter().all(Option::is_none) {
+                        cells[0] = Some(Cell { lead: String::new(), value: UNREAD.into(), hot: false });
+                    }
+                    lines.push(((*name).clone(), cells));
                 }
             }
             if on("active") {
@@ -3955,7 +4013,10 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let aside = if drives.is_empty() { String::new() } else { shown(hottest, celsius) };
             if !full {
                 facts.clear();
+                lines.clear();
             }
+            // (The facts after the drives go on as their lines do, as one list.)
+            let lines_shown = !lines.is_empty();
             vec![
                 // Named below, where there are several.
                 head(lang.pick("磁盘", "Disk"), if every > 1 { if lang == Lang::Zh { format!("{every} 块硬盘") } else { format!("{every} drives") } } else { info.drives.join(", ") }, aside, hottest.is_some_and(|t| t > hot_temp)),
@@ -3967,7 +4028,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     plot: chart.then_some(plot),
                     scale: if chart { text::rate(scale, false) } else { String::new() },
                 },
-                Block::Facts { rows: facts, gap: 10.0, presses: Vec::new() },
+                Block::Columns { rows: lines, gap: 10.0 },
+                Block::Facts { rows: facts, gap: if lines_shown { FACT_GAP } else { 10.0 }, presses: Vec::new() },
             ]
         }
         "processes" => {
@@ -4905,6 +4967,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
             Block::Threads(_) => "threads",
             Block::Meter { .. } => "meter",
             Block::Facts { .. } => "facts",
+            Block::Columns { .. } => "columns",
             Block::Devices { .. } => "devices",
             Block::Sound { .. } => "sound",
             Block::Playing { .. } => "playing",
@@ -5276,6 +5339,27 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                     frame.text(label, theme.small, name, left, row_y, LABEL, Align::Start);
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
+                }
+            }
+            (Block::Columns { rows, gap }, Pass::Content) => {
+                // Each row's label as a fact's, its readings in columns after it, each reading's words before it as
+                // its label is, its value ended where those above and below it end.
+                let room = left + width - plot_left;
+                let at = columns(rows, room, LABEL - COLUMN_LABEL_LEAST, |text| frame.measure(text, theme.small));
+                // (The label as wide as the columns leave it.)
+                let label_w = LABEL + at.first().map_or(0.0, |(start, _)| start.min(0.0));
+                for (i, (label, cells)) in rows.iter().enumerate() {
+                    let row_y = y + gap + i as f32 * (LINE + FACT_GAP);
+                    part(&i.to_string());
+                    frame.text(label, theme.small, theme.text2, left, row_y, label_w, Align::Start);
+                    for (cell, (start, end)) in cells.iter().zip(&at) {
+                        let Some(cell) = cell else { continue };
+                        if !cell.lead.is_empty() {
+                            frame.text(&cell.lead, theme.small, theme.text2, plot_left + start, row_y, end - start, Align::Start);
+                        }
+                        let color = if cell.hot { theme.signal } else { theme.text };
+                        frame.text(&cell.value, theme.small, color, plot_left + start, row_y, end - start, Align::End);
+                    }
                 }
             }
             (Block::Table { headings, sort, rows, visible, scrolls, widths }, Pass::Content) => {
@@ -9613,6 +9697,51 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The disk lane with three drives, their readings in columns, in each skin, dark, as wide as a panel's column and
+    /// as a narrow widget: `cargo test --features studio --lib -- --ignored disk_drives` writes `target/disk/<skin>-<width>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn disk_drives() {
+        use crate::reading::{DriveRate, DriveTemperature};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/disk", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let info = StaticInfo { drives: vec!["WDC WD80EAZZ-00BKLB0".into(), "Sandisk Optimus GX PRO 850X".into(), "Samsung SSD 990 PRO 2TB".into()], drive_ids: vec![0, 1, 2], ..info() };
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample {
+            disk_read: Some(257.0 * 1024.0),
+            disk_write: Some(3.4 * 1024.0 * 1024.0),
+            drive_rates: vec![
+                DriveRate { id: 0, read: Some(0.0), write: Some(0.0) },
+                DriveRate { id: 1, read: Some(257.0 * 1024.0), write: Some(3.4 * 1024.0 * 1024.0) },
+                DriveRate { id: 2, read: Some(1.2 * 1024.0 * 1024.0 * 1024.0), write: Some(12.0) },
+            ],
+            drive_temps: [(0, 31.0), (1, 36.0), (2, 39.0)].map(|(id, celsius)| DriveTemperature { id, name: String::new(), celsius }).to_vec(),
+            ..sample(None, None, None)
+        })]));
+        let seen = Seen::of(history);
+        let prefs = Prefs::resolve(&serde_json::Value::Null, &["disk".to_string()]);
+        for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
+            let theme = Theme::new(skin, true);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+            let lane = Lane { id: "disk".into(), blocks: lane(&scene, "disk", Detail::Full).unwrap(), ink: theme.ink("disk") };
+            for w in [COLUMN_WIDTH, 300.0] {
+                let h = lane.height(&theme) + 16.0;
+                let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                    frame.fill(Color::hex(0x202124, 1.0), 0.0, 0.0, w, h);
+                    for pass in [Pass::Plots, Pass::Content] {
+                        paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), pass, &mut Vec::new());
+                    }
+                }).expect("drawn");
+                crate::studio::save_png(&out.join(format!("{skin:?}-{w}.png")), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+            }
+        }
+    }
+
     /// The notes' lane as a deck, cards and a list (the columns) in each skin, light and dark (the rows):
     /// `cargo test --features studio --lib -- --ignored notes_lanes` writes `target/notes/<row>-<column>.png`.
     #[test]
@@ -9955,13 +10084,48 @@ otepad.exe", "Notepad"),
             }
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
             let blocks = lane(&scene, "disk", Detail::Full).unwrap();
-            let rows = blocks.into_iter().find_map(|block| if let Block::Facts { rows, .. } = block { Some(rows) } else { None }).unwrap();
-            rows.into_iter().map(|(name, value, _)| format!("{name}: {value}")).collect::<Vec<_>>()
+            let rows = blocks.into_iter().find_map(|block| if let Block::Columns { rows, .. } = block { Some(rows) } else { None }).unwrap();
+            // Each row's cells, by column: "" for an empty one.
+            rows.into_iter()
+                .map(|(name, cells)| format!("{name}: {}", cells.iter().map(|cell| cell.as_ref().map_or(String::new(), |cell| [cell.lead.as_str(), &cell.value].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join(" | ")))
+                .collect::<Vec<_>>()
         };
-        assert_eq!(rows(&[]), ["NVMe: 读 3.0 MB/s，写 0 B/s · 41 °C", "USB: —"]);
-        assert_eq!(rows(&["drives"]), ["NVMe: 读 3.0 MB/s，写 0 B/s", "USB: —"]);
+        assert_eq!(rows(&[]), ["NVMe: 读 3.0 MB/s | 写 0 B/s | 41 °C", "USB: — |  | "]);
+        assert_eq!(rows(&["drives"]), ["NVMe: 读 3.0 MB/s | 写 0 B/s", "USB: — | "]);
         assert_eq!(rows(&["rates"]), ["NVMe: 41 °C", "USB: —"]);
         assert!(rows(&["rates", "drives"]).is_empty());
+    }
+
+    /// Readings set in columns line up down the rows: each column's words before its readings start at one place,
+    /// its values end at one place, past the widest of them; an empty cell leaves its column where it is, a column
+    /// empty in every row takes no room, and the gaps narrow (not below the least) where the room is short.
+    #[test]
+    fn columns_line_up_down_the_rows() {
+        use super::*;
+        let cell = |lead: &str, value: &str| Some(Cell { lead: lead.into(), value: value.into(), hot: false });
+        let rows = vec![
+            ("WDC".to_string(), vec![cell("读", "0 B/s"), cell("写", "0 B/s"), None, cell("", "31 °C")]),
+            ("Sandisk".to_string(), vec![cell("读", "257 KB/s"), cell("写", "3.4 MB/s"), None, cell("", "36 °C")]),
+            ("USB".to_string(), vec![None, None, None, cell("", "—")]),
+        ];
+        // Ten DIPs a character.
+        let measure = |text: &str| text.chars().count() as f32 * 10.0;
+        let at = columns(&rows, 400.0, 0.0, measure);
+        // 读 + gap, then the widest read value (257 KB/s, 8 chars), the gap (at most the most), and on.
+        assert_eq!(at[0], (0.0, 10.0 + LEAD_GAP + 80.0));
+        assert_eq!(at[1], (at[0].1 + COLUMN_GAP, at[0].1 + COLUMN_GAP + 10.0 + LEAD_GAP + 80.0));
+        assert_eq!(at[2], (at[1].1 + COLUMN_GAP, at[1].1 + COLUMN_GAP));
+        assert_eq!(at[3], (at[1].1 + COLUMN_GAP, at[1].1 + COLUMN_GAP + 50.0));
+        // Given less, they fill the room: the last ends where it does.
+        let used = 2.0 * (10.0 + LEAD_GAP + 80.0) + 50.0;
+        let tight = columns(&rows, used + 2.0 * 8.0, 0.0, measure);
+        assert_eq!((tight[0].0, tight[1].0 - tight[0].1, tight[3].1), (0.0, 8.0, used + 16.0));
+        // Short even with the least gaps: those kept, and they start before the room, by what it is short (no more
+        // than they may borrow).
+        let short = columns(&rows, used, 40.0, measure);
+        assert_eq!((short[0].0, short[1].0 - short[0].1, short[3].1), (-2.0 * COLUMN_GAP_LEAST, COLUMN_GAP_LEAST, used));
+        let shorter = columns(&rows, used - 100.0, 40.0, measure);
+        assert_eq!(shorter[0].0, -40.0);
     }
 
     /// The storage lane tells each folder in its order under its drives, with its size (said, where that is not known),
@@ -10690,15 +10854,22 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// The facts of a lane: label and value of each row.
+    /// The facts of a lane: label and value of each row (of a row in columns, its cells told, each its words and value,
+    /// apart by " · ").
     fn facts(blocks: &[Block]) -> Vec<(String, String)> {
         blocks
             .iter()
-            .filter_map(|block| match block {
-                Block::Facts { rows, .. } => Some(rows.iter().map(|(label, value, _)| (label.clone(), value.clone()))),
-                _ => None,
+            .flat_map(|block| match block {
+                Block::Facts { rows, .. } => rows.iter().map(|(label, value, _)| (label.clone(), value.clone())).collect(),
+                Block::Columns { rows, .. } => rows
+                    .iter()
+                    .map(|(label, cells)| {
+                        let told = cells.iter().flatten().map(|cell| [cell.lead.as_str(), &cell.value].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "));
+                        (label.clone(), told.collect::<Vec<_>>().join(" · "))
+                    })
+                    .collect(),
+                _ => Vec::new(),
             })
-            .flatten()
             .collect()
     }
 
