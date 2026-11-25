@@ -508,7 +508,7 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join("limits-told");
         std::fs::create_dir_all(&folder).unwrap();
         let limit = |told| super::super::Limit { tool: Tool::Claude, id: super::super::statusline::ID.into(), name: None, plan: None, windows: vec![super::super::Window { minutes: 300, used: 40.0, resets: None }], balance: None, told };
-        let keep = |told| std::fs::write(folder.join(super::super::statusline::LIMITS), serde_json::to_vec(&limit(told)).unwrap()).unwrap();
+        let keep = |told| std::fs::write(folder.join(super::super::statusline::LIMITS), serde_json::to_vec(&super::super::statusline::Kept { answered: told, limit: limit(told) }).unwrap()).unwrap();
         let mut ledger = Ledger::default();
         assert!(!limits_told(&mut ledger, &folder));
         keep(5);

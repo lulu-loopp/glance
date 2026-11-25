@@ -33,10 +33,12 @@ pub fn folder() -> PathBuf {
     crate::settings::local_dir().join(FOLDER)
 }
 
-/// What Claude Code gives its status line, as far as the limits go.
+/// What Claude Code gives its status line, as far as the limits go: they are its session's last answer's, and that
+/// answer is dated by its transcript's last writing (see `answered`).
 #[derive(Deserialize)]
 struct Given {
     rate_limits: Option<Rates>,
+    transcript_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -55,8 +57,8 @@ struct Rate {
 /// The limit `given` tells at `now`, of an account on `plan`: none where it tells none (an account with no
 /// subscription's limits, or a session before its first answer). Each window may be left out (Claude Code drops one as
 /// it starts again, and tells none a plan does not have).
-fn limit_of(given: &[u8], plan: Option<String>, now: u64) -> Option<Limit> {
-    let rates = serde_json::from_slice::<Given>(given).ok()?.rate_limits?;
+fn limit_in(given: Given, plan: Option<String>, now: u64) -> Option<Limit> {
+    let rates = given.rate_limits?;
     let windows: Vec<Window> = [(300, rates.five_hour), (10080, rates.seven_day)]
         .into_iter()
         .filter_map(|(minutes, rate)| rate.map(|rate| Window { minutes, used: rate.used_percentage, resets: rate.resets_at.map(|seconds| (seconds * 1000.0) as u64) }))
@@ -64,23 +66,18 @@ fn limit_of(given: &[u8], plan: Option<String>, now: u64) -> Option<Limit> {
     (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan, windows, balance: None, told: now })
 }
 
-/// What is kept of the limit `told` and the one `kept` before it: each window as it is told, but where the one kept is
-/// the same window (it starts again at the same time) with more of it used, or a later window of its length (one
-/// that starts again later). Each session tells the limits of its own last answer, and one idle since tells them again
-/// as its status line is drawn: a window's use within it only grows, so less of it is an older answer's, and so is a
-/// window that started again before the one kept.
-fn newest(told: Limit, kept: Option<Limit>) -> Limit {
-    let Some(kept) = kept else { return told };
-    let windows = told
-        .windows
-        .into_iter()
-        .map(|window| match kept.windows.iter().find(|was| was.minutes == window.minutes && was.resets.is_some()) {
-            Some(was) if window.resets.is_some_and(|resets| Some(resets) < was.resets) => *was,
-            Some(was) if was.resets == window.resets && was.used > window.used => Window { used: was.used, ..window },
-            _ => window,
-        })
-        .collect();
-    Limit { windows, ..told }
+/// When the answer whose limits `given` tells was had: its session's transcript last written (milliseconds since
+/// 1970), as it is written as each answer comes. None where it names no transcript or that cannot be read.
+fn answered(given: &Given) -> Option<u64> {
+    let written = std::fs::metadata(given.transcript_path.as_ref()?).ok()?.modified().ok()?;
+    Some(written.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// The limit kept, with when the answer that told it was had (see `answered`).
+#[derive(serde::Serialize, Deserialize)]
+pub(super) struct Kept {
+    pub(super) answered: u64,
+    pub(super) limit: Limit,
 }
 
 /// Claude Code's account file, as the session that runs its status line has it: in `CLAUDE_CONFIG_DIR` where that is
@@ -113,6 +110,12 @@ fn plan_in(text: &[u8]) -> Option<String> {
 
 /// The limit last told, as kept in `folder` (none where none was, or it cannot be read).
 pub(super) fn told_in(folder: &Path) -> Option<Limit> {
+    kept_in(folder).map(|kept| kept.limit)
+}
+
+/// The limit kept in `folder` with when its answer was had (none where none was, or it cannot be read: as one kept
+/// before answers were dated).
+fn kept_in(folder: &Path) -> Option<Kept> {
     serde_json::from_slice(&std::fs::read(folder.join(LIMITS)).ok()?).ok()
 }
 
@@ -132,14 +135,19 @@ pub fn run() -> i32 {
     }
 }
 
-/// The limit `given` tells at `now` (of an account on `plan`) kept in `folder` with what was kept there (see `newest`),
-/// where it tells one.
+/// The limit `given` tells at `now` (of an account on `plan`) kept in `folder`, where it tells one and its answer is
+/// no older than the one kept (see `answered`). Each session tells its own last answer's limits, an idle one again as
+/// its status line is drawn: the newest answer's are the account's as they are now, whatever they say (less used
+/// than before in the same window too, as when its use was put back).
 fn keep_told(given: &[u8], plan: Option<String>, folder: &Path, now: u64) {
-    if let Some(limit) = limit_of(given, plan, now) {
-        let limit = newest(limit, told_in(folder));
-        if std::fs::create_dir_all(folder).is_ok() {
-            let _ = super::write_whole(folder, LIMITS, &serde_json::to_vec(&limit).unwrap_or_default());
-        }
+    let Ok(given) = serde_json::from_slice::<Given>(given) else { return };
+    let Some(answered) = answered(&given) else { return };
+    let Some(limit) = limit_in(given, plan, now) else { return };
+    if kept_in(folder).is_some_and(|kept| kept.answered > answered) {
+        return;
+    }
+    if std::fs::create_dir_all(folder).is_ok() {
+        let _ = super::write_whole(folder, LIMITS, &serde_json::to_vec(&Kept { answered, limit }).unwrap_or_default());
     }
 }
 
@@ -497,38 +505,63 @@ mod tests {
         assert!(limit_of(br#"{"model":{}}"#, None, 7).is_none() && limit_of(br#"{"rate_limits":{}}"#, None, 7).is_none() && limit_of(b"not json", None, 7).is_none());
     }
 
+    /// The limit Claude Code's `given` (as it gives it) tells (see `limit_in`).
+    fn limit_of(given: &[u8], plan: Option<String>, now: u64) -> Option<Limit> {
+        limit_in(serde_json::from_slice::<Given>(given).ok()?, plan, now)
+    }
+
+    /// A session's transcript in `folder`, last written `at` (seconds since 1970): what it tells its status line as
+    /// Claude Code gives it, with `limits` (its `rate_limits`' JSON).
+    fn session(folder: &Path, name: &str, at: u64, limits: &str) -> Vec<u8> {
+        std::fs::create_dir_all(folder).unwrap();
+        let transcript = folder.join(format!("{name}.jsonl"));
+        let file = std::fs::File::create(&transcript).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at)).unwrap();
+        serde_json::to_vec(&serde_json::json!({"session_id": name, "transcript_path": transcript, "rate_limits": serde_json::from_str::<serde_json::Value>(limits).unwrap()})).unwrap()
+    }
+
     /// The limit told kept in Glance's folder for it, and read from there as it was told; none told, the one kept before
-    /// left as it was.
+    /// left as it was, and none kept from a telling that names no transcript (no answer to date it by).
     #[test]
     fn keeps_the_limits_it_is_told() {
         let folder = folder().join("keeps");
-        keep_told(br#"{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1738425600}}}"#, None, &folder, 9);
+        let _ = std::fs::remove_dir_all(&folder);
+        keep_told(&session(&folder, "a", 1_000, r#"{"five_hour":{"used_percentage":12,"resets_at":1738425600}}"#), None, &folder, 9);
         let kept = told_in(&folder).unwrap();
         assert_eq!((kept.told, kept.windows.as_slice()), (9, [Window { minutes: 300, used: 12.0, resets: Some(1_738_425_600_000) }].as_slice()));
         keep_told(br#"{"model":{}}"#, None, &folder, 10);
-        assert_eq!(told_in(&folder).unwrap().told, 9);
+        keep_told(br#"{"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":1738425600}}}"#, None, &folder, 11);
+        assert_eq!((told_in(&folder).unwrap().told, told_in(&folder).unwrap().windows[0].used), (9, 12.0));
         let _ = std::fs::remove_dir_all(&folder);
     }
 
-    /// Told by sessions one after another: a window as the newest answer has it, the same window told with less of it
-    /// used again (a session idle since) kept as it was, told again once it has started again, and the window before
-    /// told again after that not taking its place; the plan as told.
+    /// Told by sessions one after another, the limits of the newest answer are kept, whichever session tells them and
+    /// whatever they say: a session idle since tells its last answer's again (less used, or more), and is not heard
+    /// over the newer; a window used less than before in the same week (its use put back, as a reset the account was
+    /// given does) is kept as told by the newest answer; a window that started again is told by the newest answer too.
+    /// The plan as told with them.
     #[test]
     fn keeps_the_newest_answers_limits_whichever_session_tells_them() {
         let folder = folder().join("newest");
         let _ = std::fs::remove_dir_all(&folder);
-        let week = |used: u32, resets: u64| format!(r#"{{"rate_limits":{{"seven_day":{{"used_percentage":{used},"resets_at":{resets}}}}}}}"#);
+        let week = |used: u32, resets: u64| format!(r#"{{"seven_day":{{"used_percentage":{used},"resets_at":{resets}}}}}"#);
         let used = || told_in(&folder).unwrap().windows.iter().map(|window| (window.used, window.resets)).collect::<Vec<_>>();
-        keep_told(week(49, 1795449600).as_bytes(), Some("Ultra".into()), &folder, 1);
-        keep_told(week(45, 1795449600).as_bytes(), Some("Ultra".into()), &folder, 2);
+        keep_told(&session(&folder, "busy", 2_000, &week(49, 1795449600)), Some("Ultra".into()), &folder, 1);
+        keep_told(&session(&folder, "idle", 1_000, &week(45, 1795449600)), Some("Ultra".into()), &folder, 2);
         assert_eq!(used(), [(49.0, Some(1_795_449_600_000))]);
-        assert_eq!((told_in(&folder).unwrap().told, told_in(&folder).unwrap().plan.as_deref()), (2, Some("Ultra")));
-        keep_told(week(52, 1795449600).as_bytes(), None, &folder, 3);
-        assert_eq!(used(), [(52.0, Some(1_795_449_600_000))]);
-        keep_told(week(3, 1796054400).as_bytes(), None, &folder, 4);
-        assert_eq!(used(), [(3.0, Some(1_796_054_400_000))]);
-        // (A session idle since the window before told that one again, more of it used: the later window kept.)
-        keep_told(week(95, 1795449600).as_bytes(), None, &folder, 5);
+        assert_eq!(told_in(&folder).unwrap().plan.as_deref(), Some("Ultra"));
+        // Used up, then put back to 13 in the same week: the newest answer's 13 kept, the idle session's 100 not.
+        keep_told(&session(&folder, "busy", 3_000, &week(100, 1795449600)), None, &folder, 3);
+        keep_told(&session(&folder, "busy", 4_000, &week(13, 1795449600)), None, &folder, 4);
+        assert_eq!(used(), [(13.0, Some(1_795_449_600_000))]);
+        keep_told(&session(&folder, "other", 3_500, &week(100, 1795449600)), None, &folder, 5);
+        assert_eq!(used(), [(13.0, Some(1_795_449_600_000))]);
+        // The idle session answering again: its answer now the newest.
+        keep_told(&session(&folder, "idle", 5_000, &week(15, 1795449600)), None, &folder, 6);
+        assert_eq!(used(), [(15.0, Some(1_795_449_600_000))]);
+        // A new week, then a session idle since the week before telling that one again: the new week kept.
+        keep_told(&session(&folder, "busy", 6_000, &week(3, 1796054400)), None, &folder, 7);
+        keep_told(&session(&folder, "other", 3_500, &week(95, 1795449600)), None, &folder, 8);
         assert_eq!(used(), [(3.0, Some(1_796_054_400_000))]);
         let _ = std::fs::remove_dir_all(&folder);
     }
