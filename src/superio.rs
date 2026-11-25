@@ -297,15 +297,16 @@ impl SuperIo {
                     continue;
                 }
             };
-            // The embedded controller's space sits 4 into an 8-port block.
+            // (The embedded controller's space sits 4 into its block.)
             let usable = match kind {
-                Kind::NuvotonEc => base >= 0x100 && base & 0xF007 == EC_OFFSET,
-                _ => base >= 0x100 && base & 0xF007 == 0,
+                Kind::NuvotonEc => block_at(base - EC_OFFSET).map(|block| block + EC_OFFSET),
+                _ => block_at(base),
             };
-            if !usable {
+            let read = base;
+            let Some(base) = usable else {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
-            }
+            };
             let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()), spun: 0 };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
@@ -320,6 +321,9 @@ impl SuperIo {
                 None => return Ok(found),
                 // The other port may hold the chip to read.
                 Some(why) => {
+                    // (Its base given with low bits set, its block not had by the driver: PawnIO's LpcIO allows the
+                    // ports of a block only as the chip gave it, those bits cleared only where they read 5.)
+                    let why = if read & 7 != 0 && read & 7 != 5 && !matches!(kind, Kind::NuvotonEc) { format!("{why} (its base read {read:#X}: its ports at {base:#X} not allowed by the PawnIO driver)") } else { why };
                     seen.push(format!("{port:#X}: chip {chip:04X}, {why}"));
                     module = found.module;
                 }
@@ -648,6 +652,15 @@ fn find_ite(module: &Module, slot: u64, port: u64) -> Result<(Kind, u16, u64), P
 
 /// A Nuvoton chip at `port`, as `find_ite`. A monitor the firmware has
 /// locked is unlocked (see `NUVOTON_IO_LOCK`).
+/// Where a chip's monitor is, its base address register reading `read`: the block of 8 ports it is in, the register's
+/// low three bits no part of the address (the chip decodes the block whole: firmware may leave them set, ASUS's B850
+/// boards' giving 0x207, as Linux's nct6775 and it87 drivers mask them off); none where that block is not in the ISA
+/// range past its legacy ports (0x100 to 0xFFF), not set up.
+fn block_at(read: u64) -> Option<u64> {
+    let block = read & !7;
+    (0x100..0x1000).contains(&block).then_some(block)
+}
+
 fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> {
     let found = (|| {
         // Nuvoton's key into configuration mode.
@@ -663,7 +676,7 @@ fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> 
             if !enabled {
                 return Err(Some(format!("Nuvoton chip {chip:04X}, its embedded controller disabled")));
             }
-            let address = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)? & !7;
+            let address = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)?;
             return Ok((Kind::NuvotonEc, chip, address + EC_OFFSET));
         }
         let Some((temps, fans)) = nuvoton_layout(chip) else {
@@ -734,6 +747,20 @@ fn plausible(celsius: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    /// A monitor's block is where its base address register says, its low three bits masked off (ASUS's B850-F gives
+    /// 0x207: the block at 0x200); none where that is not set up in the ISA range past its legacy ports.
+    #[test]
+    fn a_monitor_is_in_the_block_its_base_names() {
+        assert_eq!(super::block_at(0x207), Some(0x200));
+        assert_eq!(super::block_at(0x290), Some(0x290));
+        assert_eq!(super::block_at(0xA45), Some(0xA40));
+        assert_eq!(super::block_at(0xFFF), Some(0xFF8));
+        assert_eq!(super::block_at(0x0), None);
+        assert_eq!(super::block_at(0xFF), None);
+        assert_eq!(super::block_at(0x1000), None);
+        assert_eq!(super::block_at(0xFFFF), None);
+    }
+
     /// Inputs with nothing on them are not shown: 0, −128, 127, nor the 111 to 125 °C of those left floating (as two
     /// boards' reports had them); a board's parts at their hottest are.
     #[test]
