@@ -46,6 +46,8 @@ windows-numerics = "0.3"
 windows-core = "0.62"
 # (WinRT collections handed to Windows: the properties a device watcher is asked to tell of.)
 windows-collections = "0.3"
+# (WinRT's asynchronous operations, waited for no longer than Glance means to: a Bluetooth device's appearance.)
+windows-future = "0.3"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"

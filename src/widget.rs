@@ -1508,6 +1508,9 @@ struct Readings {
     scrolls: view::Scrolls,
     /// Its station's page shown (see `view::Tab`).
     tab: view::Tab,
+    /// Its lanes and their heights as it was last laid out (see `view::heights`): moved, it is drawn as it was laid out
+    /// only while they are still so.
+    laid: Vec<(String, arrange::Heights)>,
     /// Whose lanes it shows: the readings', the workbench's or the AI component's (torn off that one's panel).
     lanes: crate::settings::Part,
     /// The one lane it shows (its module's id: torn off by that lane's head), whatever else the panel shows, and shown
@@ -1531,7 +1534,7 @@ impl Readings {
     }
 
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), arranged: None, away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), arranged: None, away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), laid: Vec::new(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), choice_shown: view::ChoiceShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -4772,20 +4775,25 @@ impl Widget {
         let sized_to = self.room.filter(|_| matches!(self.drag, Some(Drag::Size { .. })));
         match &mut self.content {
             Content::Readings(readings) => {
-                let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
+                // (The form shown, which a readings' widget's kept choice may not be: see below.)
+                let showing = readings.last.as_ref().map_or(readings.choice.form, |last| last.form);
+                // (Moved, drawn as it was laid out: unless what it shows came, went or grew meanwhile, a device joined or
+                // gone, which that layout has no room or no lane for.)
+                let heights = view::heights(&scene);
+                let shown = match readings.last.clone().filter(|last| only_moved && last.form == showing && heights == readings.laid) {
                     Some(last) => last,
                     // The workbench's lanes, or the AI component's: laid out again for the size it is made (see `laid_out`).
                     None if readings.lanes != crate::settings::Part::Monitor => {
                         let (choice, layout, detail) = laid_out(&scene, &theme, readings.lanes, readings.choice, page, sized_to, (work.0 - 2.0 * margin, work.1 - 2.0 * margin));
                         readings.choice = choice;
+                        readings.laid = heights;
                         Shown { form: choice.form, zoom: choice.scale, size: (layout.width(), layout.height()), layout, small: None, detail }
                     }
                     None => {
-                        let heights = view::heights(&scene);
                         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
                         let readings_count = forms::shows(&scene);
                         let want = match sized_to {
-                            Some(room) => Want::Room(room, Some(readings.taken.filter(|taken| taken.form == readings.choice.form).unwrap_or(arrange::Shown { form: readings.choice.form, taken: room }))),
+                            Some(room) => Want::Room(room, Some(readings.taken.filter(|taken| taken.form == showing).unwrap_or(arrange::Shown { form: showing, taken: room }))),
                             None => Want::Kept(readings.choice),
                         };
                         let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, view::wide(&scene), readings_count, work, None, 1.0, want, seen.clone());
@@ -4796,10 +4804,14 @@ impl Widget {
                             self.window.hide();
                             return Frame::Rest;
                         };
+                        // Its choice kept as it was made: what is shown gives way to fewer lanes or less to tell for a
+                        // while (a device gone, as far as it stretched to name them), and comes back with them. Made
+                        // anew only as it is sized.
                         if let Some(room) = sized_to {
                             readings.taken = Some(arrange::Shown::after(readings.taken, choice.form, room));
+                            readings.choice = choice;
                         }
-                        readings.choice = choice;
+                        readings.laid = heights.clone();
                         Shown { form: choice.form, zoom: opening.zoom, size: opening.size, layout: opening.layout.clone(), small: opening.small(), detail: opening.detail() }
                     }
                 };

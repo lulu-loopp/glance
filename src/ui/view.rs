@@ -3506,7 +3506,25 @@ pub fn gives(scene: &Scene) -> Vec<f32> {
 /// fill them as they are: drawn shorter, they were drawn over the lane under). Only with none to take it, or made
 /// shorter than they all give (smaller than its least: a widget's lanes take shapes then, see `widget`), is it shared
 /// by all.
-fn shares(gives: &[f32], change: f32) -> Vec<f32> {
+/// Taller, the lanes that tell more given more room (`tells`: how much more each takes to, see `Block::told_height`)
+/// take that first, in order, as far as it goes; the rest as `shared`.
+fn shares(gives: &[f32], tells: &[f32], change: f32) -> Vec<f32> {
+    let mut left = change;
+    let mut told = vec![0.0; gives.len()];
+    for (at, tell) in tells.iter().enumerate().take(gives.len()) {
+        let taken = tell.min(left).max(0.0);
+        told[at] = taken;
+        left -= taken;
+    }
+    let mut shares = shared(gives, left);
+    for (share, told) in shares.iter_mut().zip(told) {
+        *share += told;
+    }
+    shares
+}
+
+/// What each of a column's lanes is drawn taller (or shorter) by, as `shares` says, of what is left to share.
+fn shared(gives: &[f32], change: f32) -> Vec<f32> {
     let count = gives.len();
     let mut takers: Vec<usize> = (0..count).filter(|&at| gives[at] > 0.0).collect();
     let mut shares = vec![0.0; count];
@@ -4401,6 +4419,8 @@ pub struct Layout {
     pub lanes_height: f32,
     /// How much shorter than in `heights` each lane may be drawn (see `giving`); none, each lane takes an even share of
     /// what its column is made taller or shorter by.
+    /// How much more each lane takes to tell more, given more room (see `telling`).
+    tells: Vec<f32>,
     gives: Vec<f32>,
     outer: (f32, f32, f32),
     lane_gap: f32,
@@ -4448,6 +4468,7 @@ impl Layout {
             cuts,
             heights,
             lanes_height: tallest,
+            tells: Vec::new(),
             gives: Vec::new(),
             outer: theme.outer,
             lane_gap: theme.lane_gap,
@@ -4462,6 +4483,13 @@ impl Layout {
 
     /// The same with each lane able to be drawn shorter by `gives` (in the order of the lanes, see `gives`): made larger
     /// or smaller than its lanes need (see `fitted`), the lanes with a list at their foot take it (see `shares`).
+    /// The same with each lane given more room first by as much as it takes to tell more (`tells`, in the order of the
+    /// lanes: see `Block::told_height`), where it is made taller.
+    pub fn telling(mut self, tells: Vec<f32>) -> Self {
+        self.tells = tells;
+        self
+    }
+
     pub fn giving(mut self, gives: Vec<f32>) -> Self {
         self.gives = gives;
         self
@@ -4605,9 +4633,10 @@ impl Layout {
             let count = (end - start) as f32;
             let natural = self.heights[start..end].iter().sum::<f32>() + (count - 1.0).max(0.0) * self.lane_gap;
             let gives: Vec<f32> = (start..end).map(|at| self.gives.get(at).copied().unwrap_or(0.0)).collect();
+            let tells: Vec<f32> = (start..end).map(|at| self.tells.get(at).copied().unwrap_or(0.0)).collect();
             let x = self.column_x(column);
             let mut y = top;
-            for (height, extra) in self.heights[start..end].iter().zip(shares(&gives, self.lanes_height - natural)) {
+            for (height, extra) in self.heights[start..end].iter().zip(shares(&gives, &tells, self.lanes_height - natural)) {
                 boxes.push(Rect { x, y, w: column_width, h: height + extra });
                 y += height + extra + self.lane_gap;
             }

@@ -468,7 +468,9 @@ impl Opening {
         let layout = match choice.form {
             Form::Lanes { detail, columns } => {
                 let designed = Layout::with_columns(heights.iter().map(|heights| at(heights, detail)).collect(), columns, theme).widened(wide);
-                designed.stretched(choice.extra)
+                // (Compact, the lanes tell no more.)
+                let tells = heights.iter().map(|heights| if detail == Detail::Full { (heights[2] - heights[0]).max(0.0) } else { 0.0 }).collect();
+                designed.stretched(choice.extra).telling(tells)
             }
             Form::Small(_) => Layout::with_columns(heights.iter().map(|heights| heights[0]).collect(), 1, theme),
         };
@@ -678,6 +680,36 @@ mod tests {
             assert!(choice.scale <= MOST_SCALE + 1e-4);
             assert!(w <= room.0 + 0.5 && h <= room.1 + 0.5 || matches!(choice.form, Form::Small(Small::Micro)), "{room:?} {choice:?}");
         }
+    }
+
+    /// A column stretched as far as its lanes take to tell more: each lane that tells more takes what it takes first (the
+    /// devices' named, one under another), the rest shared as before; not the stretch split evenly, the devices' given
+    /// half of what they take.
+    #[test]
+    fn a_lane_that_tells_more_takes_the_stretch_it_tells_more_in() {
+        let theme = Theme::new(Skin::Paper, false);
+        let lanes = [("devices", [127.0, 127.0, 199.0]), ("cpu", [300.0, 150.0, 300.0])];
+        let made = Choice { form: Form::Lanes { detail: Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 72.0) };
+        let opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(made), Seen::default());
+        let boxes = opening.layout.lanes();
+        assert!((boxes[0].h - 199.0).abs() < 0.5 && (boxes[1].h - 300.0).abs() < 0.5, "{boxes:?}");
+        // Stretched further: the devices' as far as they tell, the rest shared as before.
+        let more = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(Choice { extra: (0.0, 60.0), ..made }), Seen::default());
+        let boxes = more.layout.lanes();
+        assert!((boxes[0].h - 187.0).abs() < 0.5 && (boxes[1].h - 300.0).abs() < 0.5, "{boxes:?}");
+    }
+
+    /// A widget's choice kept while what it shows tells less for a while (a device gone): drawn as far as it may be
+    /// now, and as it was made again once it tells as much (its kept choice asked of anew, not what was drawn).
+    #[test]
+    fn a_kept_stretch_comes_back_with_what_it_was_for() {
+        let theme = Theme::new(Skin::Paper, false);
+        let made = Choice { form: Form::Lanes { detail: Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 122.0) };
+        let four = Ladder::new(&theme, &[[147.0, 147.0, 269.0]], 0.0, Shows::Readings(6));
+        let three = Ladder::new(&theme, &[[127.0, 127.0, 199.0]], 0.0, Shows::Readings(6));
+        assert_eq!(four.keep(made).extra.1, 122.0);
+        assert_eq!(three.keep(made).extra.1, 72.0);
+        assert_eq!(four.keep(made).extra.1, 122.0);
     }
 
     /// A form of all of each lane may be drawn taller by what its lanes take to tell more (the devices' lane, its

@@ -284,6 +284,27 @@ fn heard_out(telling: &Told<Wake>) -> bool {
     true
 }
 
+/// How long Windows is waited for to tell what is asked of it over the air (a Bluetooth device's appearance), at most:
+/// the other devices are read after it.
+const ASKED_AT_MOST: Duration = Duration::from_secs(3);
+
+/// What `operation` gives, where it completes within `within`: else it is cancelled, and none.
+fn completed<T: windows::core::RuntimeType + 'static>(operation: windows_future::IAsyncOperation<T>, within: Duration) -> Option<T> {
+    use windows_future::AsyncStatus;
+    let until = Instant::now() + within;
+    loop {
+        match operation.Status().ok()? {
+            AsyncStatus::Completed => return operation.GetResults().ok(),
+            AsyncStatus::Started if Instant::now() < until => std::thread::sleep(Duration::from_millis(10)),
+            AsyncStatus::Started => {
+                let _ = operation.Cancel();
+                return None;
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// The devices in the order they are shown: by kind, then by name, then by key (two of one name in a stable order).
 fn ordered(mut devices: Vec<Device>) -> Vec<Device> {
     devices.sort_by(|a, b| (a.kind as u8, a.name.to_lowercase(), &a.key).cmp(&(b.kind as u8, b.name.to_lowercase(), &b.key)));
@@ -404,7 +425,8 @@ mod bluetooth {
     /// Reads Bluetooth devices, keeping what Low Energy devices said they are (asked of Windows once each).
     #[derive(Default)]
     pub(super) struct Reader {
-        appearances: HashMap<u64, u16>,
+        /// Each Low Energy device's appearance, as it was asked once (none where it was not told in time).
+        appearances: HashMap<u64, Option<u16>>,
     }
 
     impl Reader {
@@ -451,12 +473,12 @@ mod bluetooth {
         /// What a Low Energy device says it is (its GAP appearance), as Windows keeps it from its pairing: asked once.
         fn appearance(&mut self, address: u64) -> Option<u16> {
             if let Some(&appearance) = self.appearances.get(&address) {
-                return Some(appearance);
+                return appearance;
             }
-            let device = BluetoothLEDevice::FromBluetoothAddressAsync(address).ok()?.join().ok()?;
-            let appearance = device.Appearance().ok()?.RawValue().ok()?;
+            // (Asked of Windows, which may ask the device: not waited for longer than `ASKED_AT_MOST`, nor asked again.)
+            let appearance = completed(BluetoothLEDevice::FromBluetoothAddressAsync(address).ok()?, ASKED_AT_MOST).and_then(|device| device.Appearance().ok()?.RawValue().ok());
             self.appearances.insert(address, appearance);
-            Some(appearance)
+            appearance
         }
     }
 
@@ -1656,6 +1678,21 @@ mod tests {
         // Its receiver out: gone.
         assert!(later.took(Vec::new()).is_empty());
         assert!(later.kept().is_empty());
+    }
+
+    /// What Windows is asked over the air is waited for as long as it is meant to be, no longer: told in time, what it
+    /// gives; not told in time, none, at once (the other devices are read after it).
+    #[test]
+    fn an_answer_is_waited_for_no_longer_than_meant() {
+        let quick = windows_future::IAsyncOperation::<i32>::spawn(|| Ok(7));
+        assert_eq!(completed(quick, Duration::from_secs(2)), Some(7));
+        let slow = windows_future::IAsyncOperation::<i32>::spawn(|| {
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(7)
+        });
+        let since = Instant::now();
+        assert_eq!(completed(slow, Duration::from_millis(200)), None);
+        assert!(since.elapsed() < Duration::from_secs(1), "{:?}", since.elapsed());
     }
 
     /// A keyboard heard is matched to the receivers waited for by the vendor and product its device's name carries.
