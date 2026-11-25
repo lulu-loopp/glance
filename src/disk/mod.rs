@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::search::index::{flag, Index, ROOT};
 
+pub mod map;
+
 /// What a file is for, as the map colours it: as Explorer's own icons colour videos, pictures, music and documents,
 /// and Fluent's colours archives and disk images, programs and code, and games; the system's, and the rest.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
