@@ -146,18 +146,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Paths another start was given to send (see `ask_to_send`): chosen in the settings to send.
         windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA => {
             let data = unsafe { &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT) };
+            // Its report asked for: written in its own folder, whatever comes with the asking (see `report_file`).
+            // (Off this thread: the sensors are asked their lines, and answer within a second or two.)
+            if data.dwData == REPORT_TO {
+                std::thread::spawn(|| written_whole(&report_file(), &crate::diagnostics::report()));
+                return LRESULT(1);
+            }
             if data.lpData.is_null() {
                 return LRESULT(0);
-            }
-            if data.dwData == REPORT_TO {
-                let units = unsafe { std::slice::from_raw_parts(data.lpData as *const u16, data.cbData as usize / 2) };
-                let file = std::path::PathBuf::from(<std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(units));
-                if !file.is_absolute() {
-                    return LRESULT(0);
-                }
-                // (Off this thread: the sensors are asked their lines, and answer within a second or two.)
-                std::thread::spawn(move || write_report(&file));
-                return LRESULT(1);
             }
             if data.dwData != SEND_PATHS {
                 return LRESULT(0);
@@ -280,13 +276,56 @@ pub fn ask_to_send(paths: &[std::path::PathBuf]) {
     }
 }
 
-/// Asks the running Glance for its report (see `diagnostics::report`), written to `file` (absolute) once it is ready;
-/// whether it was asked.
-pub fn ask_for_report(file: &std::path::Path) -> bool {
-    use std::os::windows::ffi::OsStrExt;
+/// Where the running Glance writes the report it is asked for: in its own folder, never where the asker says. (Elevated,
+/// it would write where any program asked it to, over what that program may not touch; the asker takes the report
+/// from here and writes it where it wants, as itself: see `ask_for_report`.)
+fn report_file() -> std::path::PathBuf {
+    crate::settings::local_dir().join("report.txt")
+}
+
+/// What became of asking the running Glance for its report.
+#[derive(Debug, PartialEq)]
+pub enum Reported {
+    Written,
+    /// No Glance running answered.
+    NotAsked,
+    /// Asked, no report came in time, or it could not be put where it was asked for.
+    NotWritten,
+}
+
+/// How long the report asked for is waited for (the sensors' lines in it take a second or two).
+const REPORT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Asks the running Glance for its report (see `diagnostics::report`), and writes it to `file` once it is ready.
+pub fn ask_for_report(file: &std::path::Path) -> Reported {
+    let written = report_file();
+    // (One left from before is not taken for this one.)
+    let _ = std::fs::remove_file(&written);
+    if !ask_report() {
+        return Reported::NotAsked;
+    }
+    if taken_into(&written, file, REPORT_WAIT) { Reported::Written } else { Reported::NotWritten }
+}
+
+/// The file `from`, once it is there (written whole: see `written_whole`), within `wait`, copied to `into` and taken
+/// away; whether it was.
+fn taken_into(from: &std::path::Path, into: &std::path::Path, wait: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    while !from.exists() {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let copied = std::fs::copy(from, into).is_ok();
+    let _ = std::fs::remove_file(from);
+    copied
+}
+
+/// Asks the running Glance to write its report (see `report_file`); whether it said it would.
+fn ask_report() -> bool {
     let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS, None) }) else { return false };
-    let units: Vec<u16> = file.as_os_str().encode_wide().collect();
-    let data = windows::Win32::System::DataExchange::COPYDATASTRUCT { dwData: REPORT_TO, cbData: (units.len() * 2) as u32, lpData: units.as_ptr() as *mut _ };
+    let data = windows::Win32::System::DataExchange::COPYDATASTRUCT { dwData: REPORT_TO, cbData: 0, lpData: std::ptr::null_mut() };
     let mut answer = 0usize;
     let sent = unsafe {
         windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
@@ -302,10 +341,9 @@ pub fn ask_for_report(file: &std::path::Path) -> bool {
     sent.0 != 0 && answer == 1
 }
 
-/// The report written to `file`, whole: to a file beside it first, then put in its place, so that what waits for it
+/// `report` written to `file`, whole: to a file beside it first, then put in its place, so that what waits for it
 /// never reads it half written.
-fn write_report(file: &std::path::Path) {
-    let report = crate::diagnostics::report();
+fn written_whole(file: &std::path::Path, report: &str) {
     let mut writing = file.as_os_str().to_owned();
     writing.push(".writing");
     if std::fs::write(&writing, report).is_ok() {
@@ -591,6 +629,29 @@ pub fn quit() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The report asked for is written in Glance's own folder, whatever the asker names (elevated, it wrote where any
+    /// program asked); the asker takes it from there once it is whole, copies it where it asked, and takes it away.
+    #[test]
+    fn a_report_is_written_in_glances_own_folder_and_taken_from_there() {
+        assert_eq!(report_file().parent(), Some(crate::settings::local_dir().as_path()));
+        let folder = std::env::temp_dir().join(format!("glance-report-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (from, into) = (folder.join("report.txt"), folder.join("asked.txt"));
+        let writing = from.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            written_whole(&writing, &"glance report line
+".repeat(20));
+        });
+        assert!(taken_into(&from, &into, std::time::Duration::from_secs(10)));
+        writer.join().unwrap();
+        assert!(std::fs::read_to_string(&into).unwrap().len() > 100 && !from.exists());
+        // Nothing written in time: none taken.
+        assert!(!taken_into(&folder.join("never.txt"), &folder.join("none.txt"), std::time::Duration::from_millis(250)));
+        assert!(!folder.join("none.txt").exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 
     /// A shortcut is written as Windows writes its own: the Windows key first, then Ctrl, Alt and Shift.
     #[test]
