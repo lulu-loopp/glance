@@ -191,6 +191,9 @@ const GROUP_WIDE: f32 = 640.0;
 const GROUP_ROW: f32 = 150.0;
 const GROUP_GAP: f32 = 10.0;
 const GROUP_NAME: f32 = 22.0;
+/// The room round a group's pictures for the ring round one picked or under the pointer (see `paint_cell`): their
+/// first row as far down in the body, the body's clip as far past its sides.
+const RING_ROOM: f32 = 4.0;
 /// A folder's rows: how tall each is, the room between them, how far in its parts are, how large a file's icon (or
 /// picture) is, and how wide its columns of when it was written and how large it is; at the least as many rows tall.
 const LIST_ROW: f32 = 34.0;
@@ -1081,6 +1084,9 @@ struct Looker {
     /// The pointer on the window (DIPs), what a button went down on, and where each thing drawn is (DIPs on the sheet).
     pointer: Option<(f32, f32)>,
     pressed: Option<Hit>,
+    /// A file pressed on (one of those shown together, or the file shown), and where (on the window, px): dragged out
+    /// as the pointer goes far enough from there (see `drag_out`).
+    drag_from: Option<(PathBuf, (i32, i32))>,
     hits: Vec<(Rect, Hit)>,
     /// What a button said a moment, and since when.
     told: Option<(Hit, Instant)>,
@@ -1153,6 +1159,7 @@ impl Looker {
             scroll_most: 0.0,
             pointer: None,
             pressed: None,
+            drag_from: None,
             hits: Vec::new(),
             told: None,
             held: false,
@@ -2468,8 +2475,9 @@ impl Looker {
             return;
         }
         let resting = live && matches!(self.motion, Motion::Resting);
-        // (Room past the body's sides for the ring round a picture at its edge.)
-        frame.clip(body.x - 4.0, body.y, body.w + 8.0, body.h);
+        // (Room past the body's sides for the ring round a picture at its edge: above the first row, the room the rows
+        // are laid out with, see `group_cells`.)
+        frame.clip(body.x - RING_ROOM, body.y, body.w + 2.0 * RING_ROOM, body.h);
         for (place, (member, cell)) in listing.members.iter().zip(&cells).enumerate() {
             // (A row as wide as the body it is drawn in.)
             let at = Rect { x: body.x + cell.x, y: body.y + cell.y - scroll, w: if listing.rows { body.w } else { cell.w }, h: cell.h };
@@ -2965,6 +2973,9 @@ impl Looker {
     }
 
     fn moved(&mut self, at: (i32, i32)) {
+        if self.drag_out(at) {
+            return;
+        }
         let on = self.on_sheet(at);
         self.pointer = Some(on);
         self.moved_over_player(on);
@@ -2989,14 +3000,41 @@ impl Looker {
         if self.pressed == Some(Hit::Body) && self.pictured() && self.zoom > 1.0 {
             self.dragging = Some((on, self.pan));
         }
+        // A file pressed on, to be dragged out (a picture zoomed in is moved about instead).
+        let file = match self.pressed {
+            Some(Hit::Cell(member)) => self.members().and_then(|members| members.get(member)).filter(|member| !member.folder).map(|member| member.path.clone()),
+            Some(Hit::Body) if self.zoom <= 1.0 && matches!(self.motion, Motion::Resting) => self.shown_path().map(Path::to_path_buf),
+            _ => None,
+        };
+        self.drag_from = file.map(|file| (file, at));
         unsafe {
             SetCapture(self.hwnd);
         }
         self.draw();
     }
 
+    /// The file pressed on dragged out into another program, the pointer gone far enough from where it was pressed (as
+    /// a file is dragged off the station's lane, by the station: see `station::drag_off`); whether it was. The sheet
+    /// stays up, the file shown as it was.
+    fn drag_out(&mut self, at: (i32, i32)) -> bool {
+        let Some((_, from)) = &self.drag_from else { return false };
+        let point = |(x, y): (i32, i32)| windows::Win32::Foundation::POINT { x, y };
+        if !crate::station::run::drag_begins(point(*from), point(at)) {
+            return false;
+        }
+        let Some((file, _)) = self.drag_from.take() else { return false };
+        self.pressed = None;
+        super::window::let_go_of_capture(self.hwnd);
+        crate::station::drag::announce();
+        let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        crate::station::run::ask(Ask::DragOut(vec![crate::station::run::Given::Files(vec![file])], thread));
+        self.draw();
+        true
+    }
+
     fn release(&mut self, at: (i32, i32)) {
         let on = self.on_sheet(at);
+        self.drag_from = None;
         let pressed = self.pressed.take();
         self.dragging = None;
         super::window::let_go_of_capture(self.hwnd);
@@ -3491,7 +3529,7 @@ fn between(a: Rect, b: Rect, p: f32) -> Rect {
 /// last as tall as `GROUP_ROW`. Each one's place in the body, its name under it; and how tall they are together.
 fn group_cells(shapes: &[f32], inner: f32) -> (Vec<Rect>, f32) {
     let mut cells = Vec::with_capacity(shapes.len());
-    let (mut first, mut y) = (0, 0.0);
+    let (mut first, mut y) = (0, RING_ROOM);
     while first < shapes.len() {
         let (mut last, mut wide) = (first, shapes[first]);
         while last + 1 < shapes.len() && wide * GROUP_ROW + (last - first) as f32 * GROUP_GAP < inner {
@@ -3639,6 +3677,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 looker.dragging = None;
                 looker.pressed = None;
                 looker.holding = None;
+                looker.drag_from = None;
             });
             LRESULT(0)
         }
@@ -4093,6 +4132,8 @@ mod tests {
         }
         let last = cells.last().unwrap();
         assert!((tall - (last.y + last.h + GROUP_NAME)).abs() < 1e-4);
+        // (Room above the first row for the ring round a picture in it: not cut off at the body's top.)
+        assert!(cells.iter().all(|cell| cell.y >= RING_ROOM), "{cells:?}");
         // (One wider than the body: a row of its own, as wide.)
         let (cells, _) = group_cells(&[5.0, 1.0], 600.0);
         assert!((cells[0].w - 600.0).abs() < 1e-3 && cells[1].y > cells[0].y);
