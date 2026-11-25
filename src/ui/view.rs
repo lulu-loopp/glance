@@ -11,7 +11,7 @@ use super::seen::Seen;
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
 use crate::settings::ShelfView;
-use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
+use crate::reading::{DeviceKind, DeviceSample, DeviceVia, GpuLimit, ProcessSample, Sample, StaticInfo};
 
 pub mod ai;
 pub mod folders;
@@ -993,6 +993,9 @@ enum Block {
     /// A labelled bar; `opens`: a click on it opens that drive (its place among those seen: see `Hit::Drive`).
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<char> },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
+    /// The wireless devices connected now, each its charge's ring round its icon (see `Devices`): rings alone in a row
+    /// where `rings` (each told by its icon), else a row for each, named, its charge after it.
+    Devices { devices: Vec<DeviceSample>, rings: bool, full: bool },
     /// How loud the sound is, on a track it is dragged along, and what
     /// mutes it; named by the output it plays on, where that is known (pressed, the outputs and the programs' sound
     /// open beside: see `beside::Page::Sound`), and whether those are open.
@@ -2939,6 +2942,8 @@ impl Block {
             Block::Meter { gap, .. } => gap + LINE,
             Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
             Block::Facts { .. } => 0.0,
+            Block::Devices { devices, rings: true, .. } => DEVICE_RINGS_TOP + rings_tall(devices.len()),
+            Block::Devices { devices, rings: false, .. } => devices.len() as f32 * (DEVICE_ROW_GAP + DEVICE_ROW),
             Block::Sound { .. } => MEDIA_GAP + MEDIA_ROW,
             Block::Playing { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Progress { .. } => MEDIA_ROW,
@@ -2975,6 +2980,7 @@ impl Hash for Block {
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
+            Block::Devices { devices, rings, full } => (devices, rings, full).hash(state),
             Block::Sound { level, muted, output, open } => (level, muted, output, open).hash(state),
             Block::Playing { title, about, playing, players } => (title, about, playing, players).hash(state),
             Block::Progress { at, length, seekable } => (at, length, seekable).hash(state),
@@ -3243,6 +3249,168 @@ impl Lane {
 pub fn lanes_at(scene: &Scene, detail: impl Fn(&str) -> Detail) -> Vec<Lane> {
     lane_ids(scene.prefs).into_iter().filter_map(|id| Some(Lane { blocks: lane(scene, &id, detail(&id))?, ink: scene.theme.ink(&id), id })).collect()
 }
+
+/// How far below the head a row of the devices' rings starts.
+const DEVICE_RINGS_TOP: f32 = 10.0;
+/// The most of the devices' rings a row holds.
+const DEVICE_RINGS_ACROSS: usize = 4;
+/// A ring of the devices' alone: across, its line, its icon, then the gap to its charge under it, and the gap between
+/// one row of them and the next.
+const DEVICE_RING: (f32, f32, f32) = (46.0, 3.4, 19.0);
+const DEVICE_RING_UNDER: f32 = 6.0;
+const DEVICE_RINGS_GAP: f32 = 12.0;
+/// A device's row: how tall, the gap above it, and its ring's size (as `DEVICE_RING`).
+const DEVICE_ROW: f32 = 28.0;
+const DEVICE_ROW_GAP: f32 = 6.0;
+const DEVICE_ROW_RING: (f32, f32, f32) = (26.0, 2.5, 13.0);
+/// A device's row told more of (what it is reached by, under its name), where the lane has the room: as `DEVICE_ROW`.
+const DEVICE_NAMED: f32 = 42.0;
+const DEVICE_NAMED_GAP: f32 = 8.0;
+const DEVICE_NAMED_RING: (f32, f32, f32) = (38.0, 3.0, 16.0);
+
+/// How tall `count` of the devices' rings alone are, in rows of `DEVICE_RINGS_ACROSS`, each its charge under it.
+fn rings_tall(count: usize) -> f32 {
+    let rows = count.div_ceil(DEVICE_RINGS_ACROSS).max(1) as f32;
+    rows * (DEVICE_RING.0 + DEVICE_RING_UNDER + LINE) + (rows - 1.0) * DEVICE_RINGS_GAP
+}
+
+/// Whether `devices` are shown as their rings alone, in a lane with all of it: as many as a row holds, no two drawn
+/// alike (each told by its icon, without its name).
+fn rings_alone(devices: &[DeviceSample]) -> bool {
+    let mut icons: Vec<Icon> = devices.iter().map(|device| device_icon(device.kind)).collect();
+    icons.sort_by_key(|icon| *icon as u16);
+    icons.dedup();
+    devices.len() <= DEVICE_RINGS_ACROSS && icons.len() == devices.len()
+}
+
+/// What a wireless device is drawn as.
+pub(crate) fn device_icon(kind: DeviceKind) -> Icon {
+    match kind {
+        DeviceKind::Headphones => Icon::Headphones,
+        DeviceKind::Earbuds => Icon::Earbuds,
+        DeviceKind::Headset => Icon::Headset,
+        DeviceKind::Speaker => Icon::PortableSpeaker,
+        DeviceKind::Keyboard => Icon::Keyboard,
+        DeviceKind::Mouse => Icon::Mouse,
+        DeviceKind::Gamepad => Icon::Game,
+        DeviceKind::Phone => Icon::Smartphone,
+        DeviceKind::Watch => Icon::Watch,
+        DeviceKind::Other => Icon::Bluetooth,
+    }
+}
+
+/// How the devices' lane draws them: rings alone in rows, a row for each named, or a row for each named and told what
+/// it is reached by.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Devices {
+    Rings,
+    Rows,
+    Named,
+}
+
+impl Devices {
+    /// As a lane laid out for `rings` alone or not, with all of it (`full`) or not, `laid` tall, draws `count` devices
+    /// in `room` (as tall as it was laid out, or taller where its widget was made taller): a lane with all of it given
+    /// more room than it was laid out for tells more of each, as rows named, where they fit (a widget made larger never
+    /// shows less).
+    fn of(rings: bool, full: bool, count: usize, laid: f32, room: f32) -> Devices {
+        if full && room > laid + 0.5 && count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED) <= room + 0.5 {
+            Devices::Named
+        } else if rings {
+            Devices::Rings
+        } else {
+            Devices::Rows
+        }
+    }
+}
+
+/// What a wireless device is reached by, as its named row tells it.
+fn device_via(via: DeviceVia, lang: Lang) -> &'static str {
+    match via {
+        DeviceVia::Bluetooth => lang.pick("蓝牙", "Bluetooth"),
+        DeviceVia::Logitech => lang.pick("罗技接收器", "Logitech receiver"),
+        DeviceVia::Xbox => lang.pick("Xbox 无线", "Xbox Wireless"),
+    }
+}
+
+/// The wireless devices from (`left`, `top`), `width` across, as `how` draws them (see `Devices`).
+fn paint_devices(frame: &dyn Canvas, scene: &Scene, ink: Ink, devices: &[DeviceSample], how: Devices, (left, top, width): (f32, f32, f32), part: &dyn Fn(&str)) {
+    let theme = scene.theme;
+    let percent = |device: &DeviceSample| format!("{}%", device.level);
+    match how {
+        Devices::Rings => {
+            let (size, ..) = DEVICE_RING;
+            for (row, devices) in devices.chunks(DEVICE_RINGS_ACROSS).enumerate() {
+                let row_top = top + DEVICE_RINGS_TOP + row as f32 * (size + DEVICE_RING_UNDER + LINE + DEVICE_RINGS_GAP);
+                // (Spread across as evenly as they go, each in the middle of its share.)
+                let share = width / devices.len() as f32;
+                for (i, device) in devices.iter().enumerate() {
+                    part(&device.key);
+                    let cx = left + share * (i as f32 + 0.5);
+                    device_ring(frame, theme, ink, device, Point { x: cx, y: row_top + size / 2.0 }, DEVICE_RING);
+                    let (said, font) = (percent(device), Font { weight: 600.0, ..theme.value });
+                    let wide = frame.measure(&said, font).min(share);
+                    frame.text(&said, font, theme.text, cx - wide / 2.0, row_top + size + DEVICE_RING_UNDER, wide + 1.0, Align::Start);
+                }
+            }
+        }
+        Devices::Rows | Devices::Named => {
+            let named = how == Devices::Named;
+            let (tall, gap, ring) = if named { (DEVICE_NAMED, DEVICE_NAMED_GAP, DEVICE_NAMED_RING) } else { (DEVICE_ROW, DEVICE_ROW_GAP, DEVICE_ROW_RING) };
+            let figure = frame.measure("100%", theme.small);
+            for (i, device) in devices.iter().enumerate() {
+                part(&device.key);
+                let row_top = top + gap + i as f32 * (gap + tall);
+                device_ring(frame, theme, ink, device, Point { x: left + ring.0 / 2.0, y: row_top + tall / 2.0 }, ring);
+                let words = left + ring.0 + if named { 12.0 } else { 10.0 };
+                let room = (left + width - figure - 8.0 - words).max(0.0);
+                if named {
+                    let lines = row_top + (tall - 2.0 * LINE) / 2.0;
+                    frame.text(&device.name, theme.body, theme.text, words, lines, room, Align::Start);
+                    frame.text(device_via(device.via, scene.lang), theme.small, theme.text3, words, lines + LINE, room, Align::Start);
+                } else {
+                    frame.text(&device.name, theme.small, theme.text, words, row_top + (tall - LINE) / 2.0, room, Align::Start);
+                }
+                frame.text(&percent(device), theme.small, theme.text2, left + width - figure, row_top + (tall - LINE) / 2.0, figure, Align::End);
+            }
+        }
+    }
+}
+
+/// `device`'s charge as a ring about `centre` (`size`: across, its line, its icon inside it), as an iPhone's battery
+/// widget draws one: its track all round, its charge from the top clockwise as far as it goes, in the lane's ink (the
+/// signal colour as it runs low), and charging, a gap at the top with a bolt in it.
+fn device_ring(frame: &dyn Canvas, theme: &Theme, ink: Ink, device: &DeviceSample, centre: Point, (size, line, icon): (f32, f32, f32)) {
+    device_charge(frame, theme, ink, device, centre, (size, line));
+    frame.icon(device_icon(device.kind), centre, icon, theme.text);
+}
+
+/// `device`'s charge as a ring about `centre` (`size`, across and its line), as `device_ring` draws it, without what
+/// is inside it (round what else is drawn there: an output's mark, see `outputs`).
+pub(crate) fn device_charge(frame: &dyn Canvas, theme: &Theme, ink: Ink, device: &DeviceSample, centre: Point, (size, line): (f32, f32)) {
+    use std::f32::consts::TAU;
+    let radius = (size - line) / 2.0;
+    let round = TAU * radius;
+    // The bolt drawn this much larger than as it is designed (see `BOLT`).
+    let bolt = line / 2.5;
+    let gap = if device.charging { 4.6 * bolt + 1.8 * line } else { 0.0 };
+    let run = round - gap;
+    let lit = (device.level as f32 / 100.0).clamp(0.001, 1.0) * run;
+    let from = gap / 2.0 / radius;
+    if gap > 0.0 {
+        // (Its ends round, drawn as far in again as they reach past them: the gap as wide as it is meant.)
+        frame.arc(centre, radius, from + line / 2.0 / radius, (run - line) / radius, theme.track, line);
+        let points: Vec<Point> = BOLT.iter().map(|(x, y)| Point { x: centre.x + x * bolt, y: centre.y - radius + y * bolt }).collect();
+        frame.fill_shape(&points, Fill::Solid(ink.trace));
+    } else {
+        frame.arc(centre, radius, 0.0, TAU, theme.track, line);
+    }
+    let color = if device.low() { theme.signal } else { ink.trace };
+    frame.arc(centre, radius, from, lit / radius, color, line);
+}
+
+/// The bolt in a charging ring's gap, about its middle, 7.2 tall.
+const BOLT: [(f32, f32); 6] = [(0.7, -3.6), (-2.3, 0.7), (-0.1, 0.7), (-0.7, 3.6), (2.3, -0.7), (0.1, -0.7)];
 
 fn head(title: impl Into<String>, device: impl Into<String>, aside: impl Into<String>, aside_hot: bool) -> Block {
     Block::Head { title: title.into(), device: device.into(), aside: aside.into(), aside_hot }
@@ -3893,6 +4061,13 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 Block::Facts { rows: vec![(if context.is_empty() { "Docker".into() } else { context }, state, false)], gap: 6.0 },
             ]
         }
+        "devices" => {
+            // Only while one is connected (see `Seen::devices`).
+            if scene.seen.devices.is_empty() {
+                return None;
+            }
+            vec![head(lang.pick("设备", "Devices"), "", "", false), Block::Devices { devices: s.devices.clone(), rings: !full || rings_alone(&s.devices), full }]
+        }
         "wsl" => {
             use crate::reading::WslSample;
             // Only while its machine runs (see `Seen::wsl`); stopped while the panel is up, it keeps its rows,
@@ -4538,6 +4713,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Threads(_) => "threads",
             Block::Meter { .. } => "meter",
             Block::Facts { .. } => "facts",
+            Block::Devices { .. } => "devices",
             Block::Sound { .. } => "sound",
             Block::Playing { .. } => "playing",
             Block::Progress { .. } => "progress",
@@ -4881,6 +5057,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, bx, by, bw, bh, radius);
                     frame.unclip();
                 }
+            }
+            (Block::Devices { devices, rings, full }, Pass::Content) => {
+                // (No hover: nothing of it is pressed, and nothing more is told of a device than it shows.)
+                let room = height + (area.h - natural).max(0.0);
+                paint_devices(frame, scene, ink, devices, Devices::of(*rings, *full, devices.len(), height, room), (left, y, width), &part);
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
@@ -10148,6 +10329,7 @@ otepad.exe", "Notepad"),
             game: None,
             wsl: None,
             docker: None,
+            devices: Vec::new(),
         }
     }
 
@@ -10485,6 +10667,115 @@ seven".into()));
         assert_ne!(was, goes, "pinned: put elsewhere");
         let between = |a: f32, b: f32, m: f32| (a.min(b)..=a.max(b)).contains(&m);
         assert!(between(was.0, goes.0, on_its_way.0) && between(was.1, goes.1, on_its_way.1) && on_its_way != goes, "{was:?} {on_its_way:?} {goes:?}");
+    }
+
+    /// The devices' lane shows only while a device is connected: their rings alone while each is told by its icon (four
+    /// at most, no two alike), else a row for each. Compact, their rings alone whatever they are. Nothing of it is lit
+    /// under the pointer (no hit).
+    #[test]
+    fn devices_show_while_connected_as_rings_or_rows() {
+        let (info, theme) = (info(), Theme::new(Skin::Paper, false));
+        // (On unless switched off, as a module new to the settings is.)
+        let prefs = Prefs::resolve(&serde_json::json!({}), &["devices".to_string()]);
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
+        let with = |devices: Vec<DeviceSample>| {
+            let mut s = sample(None, None, None);
+            s.devices = devices;
+            s
+        };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let drawn = |devices: Vec<DeviceSample>, detail| lane(&scene(leak(vec![with(devices)])), "devices", detail).map(|blocks| blocks.into_iter().find_map(|block| if let Block::Devices { rings, full, .. } = block { Some((rings, full)) } else { None }).unwrap());
+        // None connected: no lane.
+        assert!(lanes(&scene(leak(vec![with(Vec::new())]))).iter().all(|lane| lane.id != "devices"));
+        assert_eq!(drawn(Vec::new(), Detail::Full), None);
+        // Headphones, a keyboard, a mouse, a controller: each told by its icon, rings alone.
+        let four = vec![device("a", DeviceKind::Headphones, 10, false), device("b", DeviceKind::Keyboard, 70, false), device("c", DeviceKind::Mouse, 26, false), device("d", DeviceKind::Gamepad, 55, true)];
+        assert!(lanes(&scene(leak(vec![with(four.clone())]))).iter().any(|lane| lane.id == "devices"));
+        assert_eq!(drawn(four.clone(), Detail::Full), Some((true, true)));
+        // A fifth, or two alike: a row for each.
+        let mut five = four.clone();
+        five.push(device("e", DeviceKind::Speaker, 90, false));
+        assert_eq!(drawn(five.clone(), Detail::Full), Some((false, true)));
+        assert_eq!(drawn(vec![device("a", DeviceKind::Mouse, 50, false), device("b", DeviceKind::Mouse, 60, false)], Detail::Full), Some((false, true)));
+        // Compact: rings alone, however many and whatever they are.
+        assert_eq!(drawn(five.clone(), Detail::Compact), Some((true, false)));
+        // As tall as it draws them: rings in rows of four, each its charge under it, or rows, each a ring and a name.
+        let block = |devices: &[DeviceSample], rings| Block::Devices { devices: devices.to_vec(), rings, full: true };
+        assert_eq!(block(&four, true).height(), 10.0 + 46.0 + 6.0 + LINE);
+        assert_eq!(block(&five, true).height(), 10.0 + 2.0 * (46.0 + 6.0 + LINE) + 12.0);
+        assert_eq!(block(&five, false).height(), 5.0 * (6.0 + 28.0));
+        // Nothing lit under the pointer: drawn, it is pressed nowhere.
+        let history = leak(vec![with(five.clone())]);
+        let scene = scene(history);
+        let lane = Lane { id: "devices".into(), blocks: lane(&scene, "devices", Detail::Full).unwrap(), ink: theme.ink("devices") };
+        let mut hits = Vec::new();
+        paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 }, 0.0, Pass::Content, &mut hits);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    /// A lane with all of it, given more room than it was laid out for, tells more of each device (what it is reached
+    /// by, under its name) where its room holds them so: a widget made taller never shows less. Given what it was laid
+    /// out for, it draws them as laid out (one device's ring alone, though its named row would fit there). Compact,
+    /// never.
+    #[test]
+    fn devices_are_told_more_of_given_more_room() {
+        let named = |count: usize| count as f32 * (DEVICE_NAMED_GAP + DEVICE_NAMED);
+        let rows = 3.0 * (DEVICE_ROW_GAP + DEVICE_ROW);
+        let rings = |count: usize| DEVICE_RINGS_TOP + rings_tall(count);
+        assert_eq!(Devices::of(false, true, 3, rows, rows), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3)), Devices::Rings);
+        assert_eq!(Devices::of(false, true, 3, rows, named(3)), Devices::Named);
+        assert_eq!(Devices::of(true, true, 3, rings(3), named(3)), Devices::Named);
+        // Given more, not enough for named rows: as laid out.
+        assert_eq!(Devices::of(false, true, 3, rows, named(3) - 10.0), Devices::Rows);
+        assert_eq!(Devices::of(true, true, 3, rings(3), rings(3) + 20.0), Devices::Rings);
+        // One device: its named row shorter than its ring alone, which it keeps unless given more.
+        assert!(named(1) < rings(1));
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1)), Devices::Rings);
+        assert_eq!(Devices::of(true, true, 1, rings(1), rings(1) + 1.0), Devices::Named);
+        assert_eq!(Devices::of(true, false, 3, rings(3), 1000.0), Devices::Rings);
+    }
+
+    /// A device's ring: its track all round and its charge from the top clockwise as far as it goes, in the lane's
+    /// ink, in the signal colour at a fifth or less (charging, not). Charging, a gap at the top with the bolt in it,
+    /// the track and the charge both starting past it.
+    #[test]
+    fn a_device_ring_is_drawn_as_its_charge() {
+        use std::f32::consts::TAU;
+        use super::super::morph::{Op, Recorder};
+        let theme = Theme::new(Skin::Glass, true);
+        let ink = theme.ink("devices");
+        let arcs = |level, charging| {
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            device_ring(&recorder, &theme, ink, &device("a", DeviceKind::Headphones, level, charging), Point { x: 50.0, y: 50.0 }, DEVICE_RING);
+            let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
+            let arcs: Vec<(f32, f32, Color)> = ops.iter().filter_map(|op| if let Op::Arc { from, sweep, color, .. } = op { Some((*from, *sweep, *color)) } else { None }).collect();
+            let bolt = ops.iter().any(|op| matches!(op, Op::Shape { .. }));
+            let icon = ops.iter().any(|op| matches!(op, Op::Icon { icon: Icon::Headphones, .. }));
+            (arcs, bolt, icon)
+        };
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Half charged: the track all round, the charge half of it from the top, in the lane's ink.
+        let (half, bolt, icon) = arcs(50, false);
+        assert!(icon && !bolt);
+        assert_eq!(half.len(), 2);
+        assert!(close(half[0].0, 0.0) && half[0].1 >= TAU && half[0].2 == theme.track);
+        assert!(close(half[1].0, 0.0) && close(half[1].1, TAU / 2.0) && half[1].2 == ink.trace);
+        // Full: all round. A fifth: in the signal colour, but not charging at a fifth.
+        assert!(arcs(100, false).0[1].1 >= TAU - 1e-4);
+        assert_eq!(arcs(20, false).0[1].2, theme.signal);
+        assert_eq!(arcs(21, false).0[1].2, ink.trace);
+        // Charging: a gap at the top (the track and the charge start past it, the track ends short of it), the bolt.
+        let (charging, bolt, _) = arcs(100, true);
+        assert!(bolt);
+        let (track, charge) = (charging[0], charging[1]);
+        assert!(charge.0 > 0.0 && track.0 > charge.0);
+        assert!(track.0 + track.1 < TAU - charge.0 && charge.0 + charge.1 < TAU);
+        assert_eq!(charge.2, ink.trace);
+    }
+
+    pub(crate) fn device(key: &str, kind: DeviceKind, level: u8, charging: bool) -> DeviceSample {
+        DeviceSample { key: key.into(), name: key.into(), kind, via: DeviceVia::Bluetooth, level, charging, container: None }
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.

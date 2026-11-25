@@ -29,6 +29,8 @@ const APP_ROW: f32 = MEDIA_GAP + MEDIA_ROW;
 const GROUP_GAP: f32 = 4.0;
 /// An output's round mark, and how far its row's plate reaches past the sides of what is listed.
 const MARK: f32 = 28.0;
+/// The ring of a wireless output's charge round its mark: across, and its line (clear of the mark).
+const CHARGE_RING: (f32, f32) = (34.0, 2.2);
 const ROW_OUT: f32 = 6.0;
 /// A program's picture, and the room after it.
 const FACE: f32 = 16.0;
@@ -54,7 +56,7 @@ pub struct Sound {
     pub dots: super::thumb::Dots<Hit>,
     /// What was drawn last (what is read, and how loud each program sounded, to the hundredth): drawn again only as
     /// that changes, or a knob eases.
-    drawn: Option<(Mixer, Vec<(String, u8)>)>,
+    drawn: Option<Drawn>,
 }
 
 /// How tall it is with `outputs` outputs and `apps` programs listed (DIPs): none listed, a line saying so in their room.
@@ -172,7 +174,7 @@ impl Sound {
     pub fn changed(&mut self, now: Instant, over: Option<Hit>) -> bool {
         let held = self.held.as_ref().and_then(|key| self.order.iter().position(|of| of == key)).map(|at| Hit::Level(at as u16));
         let easing = self.dots.step(now, over.filter(|hit| matches!(hit, Hit::Level(_))), held);
-        let now = (crate::audio::mixer(), sounded(&crate::audio::peaks()));
+        let now = (crate::audio::mixer(), sounded(&crate::audio::peaks()), crate::devices::latest());
         let changed = self.drawn.as_ref() != Some(&now);
         easing || changed
     }
@@ -183,6 +185,8 @@ impl Sound {
     pub fn paint(&mut self, frame: &dyn Canvas, theme: &Theme, lang: Lang, width: f32, pointer: Option<(f32, f32)>, accent: super::canvas::Color, hits: &mut Vec<(f32, f32, f32, f32, Hit)>) -> bool {
         let mixer = crate::audio::mixer();
         let peaks = crate::audio::peaks();
+        // (A wireless output's charge, where its device's is read: see `devices`.)
+        let devices = crate::devices::latest();
         let inner = width - 2.0 * SIDE;
         let over = |(x, y, w, h): (f32, f32, f32, f32)| pointer.is_some_and(|(px, py)| px >= x && px < x + w && py >= y && py < y + h);
         // (Its plates as the page beside draws its own: round-ended in glass.)
@@ -201,6 +205,10 @@ impl Sound {
             }
             let centre = Point { x: SIDE + MARK / 2.0, y: y + OUTPUT_ROW / 2.0 };
             frame.fill_circle(if current { accent } else { theme.hover }, centre, MARK / 2.0);
+            let charged = crate::devices::in_container(&devices, output.container.as_deref());
+            if let Some(device) = charged {
+                super::view::device_charge(frame, theme, theme.ink("devices"), device, centre, CHARGE_RING);
+            }
             let on_mark = if current { if theme.skin == Skin::Paper { theme.paper } else { super::canvas::Color::hex(0xFFFFFF, 1.0) } } else { theme.text2 };
             frame.icon(icon_of(output.form), centre, 15.0, on_mark);
             let words_x = SIDE + MARK + 10.0;
@@ -212,7 +220,13 @@ impl Sound {
                 Via::Usb => "USB".to_string(),
                 Via::Card(card) => card.clone(),
             };
-            frame.text(&via, theme.small, theme.text3, words_x, frame.line_in(theme.small, y + 20.0, 16.0), words_w, Align::Start);
+            let small_y = frame.line_in(theme.small, y + 20.0, 16.0);
+            frame.text(&via, theme.small, theme.text3, words_x, small_y, words_w, Align::Start);
+            // Its charge after it.
+            if let Some(device) = charged {
+                let after = words_x + frame.measure(&via, theme.small) + 8.0;
+                frame.text(&format!("{}%", device.level), theme.small, theme.text2, after, small_y, (words_x + words_w - after).max(0.0), Align::Start);
+            }
             if current {
                 frame.icon(Icon::Check, Point { x: SIDE + inner - tick / 2.0, y: centre.y }, tick, accent);
             }
@@ -276,7 +290,7 @@ impl Sound {
             hits.push((mute.0, mute.1, mute.2, mute.3, Hit::Mute(at as u16)));
             y += APP_ROW;
         }
-        self.drawn = Some((mixer, sounded(&peaks)));
+        self.drawn = Some((mixer, sounded(&peaks), devices));
         waiting
     }
 
@@ -346,6 +360,9 @@ fn sounded(peaks: &HashMap<String, f32>) -> Vec<(String, u8)> {
     sounded.sort();
     sounded
 }
+
+/// What the plate was last drawn from: what is read, how loud each program sounded, the wireless devices' charges.
+type Drawn = (Mixer, Vec<(String, u8)>, Vec<crate::reading::DeviceSample>);
 
 /// What an output is drawn as.
 pub fn icon_of(form: Form) -> Icon {

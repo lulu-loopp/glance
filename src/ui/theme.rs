@@ -211,7 +211,8 @@ fn paper(dark: bool) -> Theme {
         track: rgba(text, wash),
         signal: rgba(signal, 1.0),
         hover: rgba(text, if dark { 0.07 } else { 0.06 }),
-        inks: [("game", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.14, 0.14))).collect(),
+        // (The wireless devices' rings green as a game's: a charge left reads as green everywhere.)
+        inks: [("game", game), ("devices", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.14, 0.14))).collect(),
         ink,
         body: archivo(13.0, 500.0),
         small: archivo(12.0, 500.0),
@@ -282,7 +283,7 @@ fn fluent(dark: bool) -> Theme {
         track: rgba(on, a[4]),
         signal: if dark { rgba(0xFF99A4, 1.0) } else { rgba(0xC42B1C, 1.0) },
         hover: if dark { rgba(0xFFFFFF, 0.06) } else { rgba(0x000000, 0.04) },
-        inks: [("game", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.22, 0.0))).collect(),
+        inks: [("game", game), ("devices", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.22, 0.0))).collect(),
         ink,
         body: segoe(13.0, 500.0),
         small: segoe(12.0, 500.0),
@@ -362,6 +363,7 @@ fn glass(dark: bool) -> Theme {
         inks: vec![
             ("game", lane(mint)),
             ("gpu", lane(green)),
+            ("devices", lane(green)),
             ("memory", lane(orange)),
             ("network", lane(purple)),
             ("disk", lane(teal)),

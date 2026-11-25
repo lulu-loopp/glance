@@ -117,6 +117,8 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
+/// The wireless devices': a notification as one runs low (see `devices`), off till asked for.
+const DEVICES: [Item; 1] = [item("notice", false)];
 /// (The lunar date's as the language has it: see `lunar`.)
 const TIME: [Item; 4] = [item("lunar", false), item("sound", true), item("media", true), item("lyrics", false)];
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
@@ -173,6 +175,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "station" => &STATION,
         "lyrics" => &LYRICS,
         "wsl" => &WSL,
+        "devices" => &DEVICES,
         "game" => &GAME,
         "ai" => &AI_ITEMS,
         _ => &[],
@@ -408,6 +411,13 @@ pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
     module_on_in(stored, "modules", id)
 }
 
+/// Whether the readings' module `id` is shown by the stored preferences `stored`: as switched there, else (a module
+/// newer than they are) as modules are by default.
+pub fn module_shown(stored: &serde_json::Value, id: &str) -> bool {
+    let entry = stored["modules"].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id));
+    entry.map_or(!DEFAULT_OFF.contains(&id), |entry| entry["on"] == true)
+}
+
 /// As `module_on`, in the stored list `list` ("modules", the readings'; "workbench", the workbench's, and "ai", the
 /// AI component's, each of their modules on unless listed off).
 /// `prefs` as they are kept, over the preferences `held` they were resolved from: the modules of what is not on this
@@ -580,6 +590,19 @@ impl Prefs {
 
 #[cfg(test)]
 mod tests {
+    /// The wireless devices' lane is on in preferences kept before it was (its lane shows only while one is connected),
+    /// its notification off till asked for, each as switched once it is.
+    #[test]
+    fn devices_are_shown_and_not_told_of_till_switched() {
+        let before = serde_json::json!({"modules": [{"id": "cpu", "on": true}]});
+        assert!(module_shown(&before, "devices") && !item_on(&before, "devices", "notice"));
+        assert!(!module_shown(&before, "wsl"));
+        let switched = serde_json::json!({"modules": [{"id": "devices", "on": false, "items": {"notice": true}}]});
+        assert!(!module_shown(&switched, "devices") && item_on(&switched, "devices", "notice"));
+        let resolved = Prefs::resolve(&before, &["cpu".to_string(), "devices".to_string()]);
+        assert!(resolved.modules.iter().any(|module| module.id == "devices" && module.on));
+    }
+
     /// The latency is measured, unless chosen otherwise, to a resolver near those who read the language shown, and
     /// what is chosen is kept as it is named.
     #[test]

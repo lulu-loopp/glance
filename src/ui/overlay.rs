@@ -1377,6 +1377,7 @@ mod tests {
             }),
             wsl: None,
             docker: None,
+            devices: Vec::new(),
         }
     }
 

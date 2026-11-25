@@ -124,7 +124,64 @@ pub struct Sample {
     pub wsl: Option<WslSample>,
     /// Docker, while its module is on and once its engine was first asked.
     pub docker: Option<DockerSample>,
+    /// The wireless devices connected now whose charge is known, while their module is on: Bluetooth's, a Logitech
+    /// receiver's, Xbox controllers (see `wireless`), in a lasting order.
+    #[serde(default)]
+    pub devices: Vec<DeviceSample>,
 }
+
+/// A wireless device connected now, and how much charge it has left.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeviceSample {
+    /// What tells it from the others from one reading to the next.
+    pub key: String,
+    /// What the user knows it by: the name it has in Windows, or that its receiver tells.
+    pub name: String,
+    pub kind: DeviceKind,
+    pub via: DeviceVia,
+    /// Percent left.
+    pub level: u8,
+    pub charging: bool,
+    /// The container Windows groups a Bluetooth device's parts in (its sound's outputs among them), as a GUID's
+    /// words: what an output is matched to it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+}
+
+/// What a wireless device is, as far as it says: what it is drawn as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceKind {
+    Headphones,
+    Earbuds,
+    Headset,
+    Speaker,
+    Keyboard,
+    Mouse,
+    Gamepad,
+    Phone,
+    Watch,
+    Other,
+}
+
+/// How a wireless device is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceVia {
+    Bluetooth,
+    /// A Logitech receiver (Unifying, Bolt, Lightspeed).
+    Logitech,
+    /// Xbox Wireless (its adapter, or the controller's own Bluetooth as Windows' game controllers read it).
+    Xbox,
+}
+
+impl DeviceSample {
+    /// Whether it is running low: a fifth of its charge or less, while it is not charging.
+    pub fn low(&self) -> bool {
+        !self.charging && self.level <= LOW_CHARGE
+    }
+}
+
+/// The charge (percent) at and below which a device is running low: its ring drawn in the signal colour.
+pub const LOW_CHARGE: u8 = 20;
 
 /// Docker's engine, as the CLI's current context reaches it.
 #[derive(Clone, Serialize, Deserialize)]

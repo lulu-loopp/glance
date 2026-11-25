@@ -141,6 +141,9 @@ struct Shot {
     /// The AI component as a widget on the desktop, made each size in turn, instead of the panel.
     #[serde(default)]
     ai: Option<AiShot>,
+    /// The wireless devices connected, as each sample has them (see `Sample::devices`).
+    #[serde(default)]
+    devices: Vec<crate::reading::DeviceSample>,
 }
 
 /// The AI component as a widget on the desktop (see `film_ai`): what it shows, in order ("ai:today", what every source
@@ -921,7 +924,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "devices", "system", "time", "wsl", "docker"].map(String::from));
     if shot.workbench {
         known.extend(["station", "notes", "todo", "apps"].map(String::from));
         pretend_workbench(lang, &folder.join("props"))?;
@@ -974,7 +977,9 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let history: Vec<Arc<Sample>> = (0..=(backlog + shot.seconds as f64) as usize)
         .map(|i| {
             let t = (i as f64 - backlog) as f32;
-            Arc::new(made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)), shot.game.as_deref().filter(|_| t >= shot.game_from)))
+            let mut sample = made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)), shot.game.as_deref().filter(|_| t >= shot.game_from));
+            sample.devices = shot.devices.clone();
+            Arc::new(sample)
         })
         .collect();
 
@@ -1451,6 +1456,8 @@ pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: 
                 })
                 .collect(),
         }),
+        // (A shot's own, where it has them: see `Shot::devices`.)
+        devices: Vec::new(),
     }
 }
 
@@ -1496,7 +1503,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "devices", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Arc<Sample>> = (0..400).map(|i| Arc::new(made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None))).collect();
     let theme = Theme::new(Skin::Glass, true);
@@ -1798,7 +1805,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     let info = crate::metrics::Sampler::new().info.clone();
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "devices", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Arc<Sample>> = (0..400).map(|i| Arc::new(made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None))).collect();
     let theme = Theme::new(skin, true);

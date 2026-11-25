@@ -10,7 +10,8 @@
 //! "—" while it is missing. The volumes are the exception: they are the
 //! ones mounted now, as a drive plugged in or out really changes them; and
 //! so are a game (one in front now, or none), WSL and Docker (running now,
-//! or not: their lanes show only while they run).
+//! or not: their lanes show only while they run), and the wireless devices
+//! (those connected now).
 
 use crate::reading::{Sample, StaticInfo};
 
@@ -36,6 +37,8 @@ pub struct Seen {
     /// The drives that give their temperature: number, and name.
     pub drives: Vec<(u32, String)>,
     pub volumes: Vec<String>,
+    /// The wireless devices connected now (see `Sample::devices`): each by its key, its name and what it is.
+    pub devices: Vec<(String, String, crate::reading::DeviceKind)>,
     pub board: Option<BoardSeen>,
     pub battery: bool,
     /// The battery's power in and out, and its health.
@@ -123,6 +126,7 @@ impl Seen {
         }
         merge(&mut self.drives, s.drive_temps.iter().map(|d| (d.id, d.name.clone())), |a, b| a.0 == b.0);
         self.volumes = s.volumes.iter().map(|v| v.name.clone()).collect();
+        self.devices = s.devices.iter().map(|d| (d.key.clone(), d.name.clone(), d.kind)).collect();
         if let Some(board) = &s.board {
             let seen = self.board.get_or_insert_with(BoardSeen::default);
             merge(&mut seen.temps, board.temps.iter().map(|(name, _)| name.clone()), |a, b| a == b);
@@ -184,6 +188,7 @@ impl Seen {
             }
             "disk" => news.extend(other.drives.iter().filter(|(id, _)| !self.drives.iter().any(|(ours, _)| ours == id)).map(|(id, _)| Item::Drive(*id))),
             "storage" => news.extend(other.volumes.iter().filter(|name| !self.volumes.contains(name)).cloned().map(Item::Volume)),
+            "devices" => news.extend(other.devices.iter().filter(|(key, ..)| !self.devices.iter().any(|(ours, ..)| ours == key)).map(|(key, ..)| Item::Device(key.clone()))),
             "board" => {
                 let (ours, theirs) = (self.board.clone().unwrap_or_default(), other.board.clone().unwrap_or_default());
                 news.extend(theirs.temps.into_iter().filter(|name| !ours.temps.contains(name)).map(Item::BoardTemp));
@@ -233,7 +238,7 @@ impl Seen {
     /// This and `other` together: everything either holds.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
-        let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker", "wsl"].map(String::from).to_vec();
+        let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "devices", "docker", "wsl"].map(String::from).to_vec();
         lanes.extend(info.gpu_modules());
         for id in &lanes {
             for item in joined.news(other, id, info) {
@@ -267,6 +272,7 @@ impl Seen {
             Item::Link => seen.link = true,
             Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
             Item::Volume(name) => add(&mut seen.volumes, &other.volumes, |key| key == name, |a, b| a == b),
+            Item::Device(key) => add(&mut seen.devices, &other.devices, |device| &device.0 == key, |a, b| a.0 == b.0),
             Item::BoardTemp(name) | Item::BoardFan(name) | Item::FanTurning(name) => {
                 let theirs = other.board.clone().unwrap_or_default();
                 let ours = seen.board.get_or_insert_with(BoardSeen::default);
@@ -334,6 +340,8 @@ pub enum Item {
     Link,
     Drive(u32),
     Volume(String),
+    /// A wireless device come to be connected, by its key.
+    Device(String),
     BoardTemp(String),
     BoardFan(String),
     /// A board's fan seen turning.

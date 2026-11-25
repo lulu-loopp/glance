@@ -602,6 +602,8 @@ impl Sampler {
             wsl: self.wsl.as_mut().map(|wsl| wsl.read(self.gpu_by_pid.as_ref(), &self.processes.names)),
             docker: self.docker.as_ref().and_then(crate::docker::Docker::read),
             game: self.game(collected),
+            // (Read in Glance's own process, as each sample comes to it: see `lib`.)
+            devices: Vec::new(),
         })
     }
 

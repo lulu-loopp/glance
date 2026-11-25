@@ -21,7 +21,7 @@ use windows::Win32::Media::Audio::{
     IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
-use windows::Win32::System::Com::StructuredStorage::{PropVariantToStringAlloc, PropVariantToUInt32};
+use windows::Win32::System::Com::StructuredStorage::{PropVariantToGUID, PropVariantToStringAlloc, PropVariantToUInt32};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
 
 /// What an output is, as its driver says (Windows' form factor of the endpoint): what it is drawn as.
@@ -54,6 +54,9 @@ pub struct Output {
     pub name: String,
     pub via: Via,
     pub form: Form,
+    /// The container Windows groups the device it is on in (with that device's other parts), as a GUID's words (see
+    /// `reading::DeviceSample::container`): what a wireless device's charge is matched to it by.
+    pub container: Option<String>,
 }
 
 /// A program as it plays on the output played on now (several sounds of one program, as a browser's, together): what
@@ -336,6 +339,8 @@ const INTERFACE_NAME: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x026e5
 /// What bus lists the device it is on ("BTHENUM", "USB", "HDAUDIO").
 const ENUMERATOR: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 24 };
 const FORM_FACTOR: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x1da5d803_d492_4edd_8c23_e0c0ffee7f0e), pid: 0 };
+/// The container the device it is on is in (`DEVPKEY_Device_ContainerId`).
+const CONTAINER: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x8c7ed206_3f8a_4827_b3ab_ae9e1faefc6c), pid: 2 };
 
 /// `device` as an output: named as Windows' own sound settings name it. One on a device of its own (Bluetooth, USB) by
 /// that device's name, said to be on its bus; one on the PC's own sound by what its driver calls it, said to be on
@@ -357,7 +362,8 @@ fn described(device: &IMMDevice) -> Option<Output> {
             Some(via) => (interface.or(description)?, via),
             None => (description.or_else(|| interface.clone())?, Via::Card(interface.unwrap_or_default())),
         };
-        Some(Output { id: id_of(device)?, name, via, form })
+        let container = store.GetValue(&CONTAINER).ok().and_then(|value| PropVariantToGUID(&value).ok()).map(|id| format!("{:032x}", id.to_u128()));
+        Some(Output { id: id_of(device)?, name, via, form, container })
     }
 }
 

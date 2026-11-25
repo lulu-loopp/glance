@@ -103,6 +103,10 @@ mod sound;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
+mod wireless;
+#[cfg(windows)]
+mod devices;
+#[cfg(windows)]
 mod cover;
 #[cfg(windows)]
 mod fullscreen;
@@ -659,6 +663,9 @@ pub fn run() {
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();
+        // The wireless devices told of as they run low (see `devices`).
+        #[cfg(windows)]
+        let mut notices = devices::Notices::default();
         loop {
             let want = {
                 let settings = app().settings.lock().unwrap();
@@ -679,6 +686,16 @@ pub fn run() {
             if let Some(mut sample) = source.next(want, controller.edges()) {
                 sample.ping_ms = latency::latest();
                 sample.ping_loss = latency::loss();
+                // The wireless devices, read here (as the user's own: see `wireless`), while their module is on.
+                #[cfg(windows)]
+                {
+                    let (shown, notice, lang) = {
+                        let settings = app().settings.lock().unwrap();
+                        (ui::prefs::module_shown(&settings.view, "devices"), ui::prefs::item_on(&settings.view, "devices", "notice"), update::language_in(&settings.view))
+                    };
+                    sample.devices = devices::read(shown);
+                    notices.look(&sample.devices, notice, lang);
+                }
                 watch.sample(&sample, Instant::now());
                 if let Some(told) = &mut told {
                     told.tell(&sample, &app().info());

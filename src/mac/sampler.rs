@@ -217,6 +217,7 @@ impl Sampler {
             game: None,
             wsl: None,
             docker: None,
+            devices: Vec::new(),
         };
         self.previous = Previous {
             at: now,

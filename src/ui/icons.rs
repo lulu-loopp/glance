@@ -143,6 +143,14 @@ pub enum Icon {
     Headphones,
     Headset,
     AudioOut,
+    /// The wireless devices' (Fluent's forms in Lucide's line, as the outputs'): earbuds, a speaker carried about, a
+    /// keyboard, a mouse, a watch, and one of no known kind (Lucide's bluetooth).
+    Earbuds,
+    PortableSpeaker,
+    Keyboard,
+    Mouse,
+    Watch,
+    Bluetooth,
     /// The AI component's: Qiuqiu, a round face looking up and to the right, a spark beside it (drawn for Glance in
     /// Lucide's manner: its lines as wide, its spark filled, see `spots`).
     Ai,
@@ -270,6 +278,20 @@ impl Icon {
             Icon::Speaker => &["M8.4 3h7.2a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H8.4a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z", "M15 14.4a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M12 7.6h.01"],
             Icon::Headphones => &["M3 19.2V12a9 9 0 0 1 18 0v7.2a1.8 1.8 0 0 1-1.8 1.8h-3v-7.2H21", "M3 13.8h4.8V21H4.8A1.8 1.8 0 0 1 3 19.2"],
             Icon::Headset => &["M5.4 9.6a6.6 6.6 0 0 1 13.2 0V13.2a1.8 1.8 0 0 1-1.8 1.8H15V9.6h3.6", "M5.4 9.6H9V15H5.4", "M5.4 9.6v7.2a3 3 0 0 0 3 3h4.2"],
+            Icon::Earbuds => &[
+                "M18 3a4 4 0 0 0-4 4v12a2 2 0 0 0 4 0v-8a5 5 0 0 0 3.75-1.693a1 1 0 0 0 .25-.661V5.354a1 1 0 0 0-.25-.661A5 5 0 0 0 18 3",
+                "M6 3a4 4 0 0 1 4 4v12a2 2 0 0 1-4 0v-8a5 5 0 0 1-3.75-1.693A1 1 0 0 1 2 8.646V5.354a1 1 0 0 1 .25-.661A5 5 0 0 1 6 3",
+            ],
+            Icon::PortableSpeaker => &["M7.5 7h9a5 5 0 0 1 0 10h-9a5 5 0 0 1 0-10z", "M10 12a2 2 0 1 1-4 0a2 2 0 1 1 4 0z", "M18 12a2 2 0 1 1-4 0a2 2 0 1 1 4 0z"],
+            Icon::Keyboard => &["M5 5h14a2 2 0 0 1 2 2v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M6.6 9h.01", "M10.2 9h.01", "M13.8 9h.01", "M17.4 9h.01", "M8.4 12.5h.01", "M12 12.5h.01", "M15.6 12.5h.01", "M7.5 16h9"],
+            Icon::Mouse => &["M12 2a7 7 0 0 1 7 7v6a7 7 0 0 1-14 0V9a7 7 0 0 1 7-7z", "M12 6v4"],
+            Icon::Watch => &[
+                "M9 6.6h6a2.4 2.4 0 0 1 2.4 2.4v6a2.4 2.4 0 0 1-2.4 2.4H9a2.4 2.4 0 0 1-2.4-2.4V9A2.4 2.4 0 0 1 9 6.6z",
+                "M7.8 6.6V4.8A1.8 1.8 0 0 1 9.6 3h4.8a1.8 1.8 0 0 1 1.8 1.8v1.8",
+                "M7.8 17.4v1.8A1.8 1.8 0 0 0 9.6 21h4.8a1.8 1.8 0 0 0 1.8-1.8v-1.8",
+                "M19.2 10.2v3.6",
+            ],
+            Icon::Bluetooth => &["M7 7l10 10-5 5V2l5 5L7 17"],
             Icon::AudioOut => &["M6 6.5h12a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3z", "M18 12a2.5 2.5 0 1 1-5 0a2.5 2.5 0 1 1 5 0z", "M7.5 9.75h.01", "M7.5 14.25h.01"],
             Icon::Laptop => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
             Icon::Calendar => &["M8 2v4", "M16 2v4", "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M3 10h18"],
@@ -699,7 +721,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Tag, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop, Icon::Speaker, Icon::Headphones, Icon::Headset, Icon::AudioOut, Icon::Ai, Icon::Calculator, Icon::Globe] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Tag, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop, Icon::Speaker, Icon::Headphones, Icon::Headset, Icon::AudioOut, Icon::Earbuds, Icon::PortableSpeaker, Icon::Keyboard, Icon::Mouse, Icon::Watch, Icon::Bluetooth, Icon::Ai, Icon::Calculator, Icon::Globe] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid, what is filled too.

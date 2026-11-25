@@ -610,7 +610,7 @@ impl Controller {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
         known.extend(self.info().gpu_modules());
-        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
+        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "devices", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
         known
     }
 
