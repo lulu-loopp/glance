@@ -216,10 +216,22 @@ pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(150
 /// The address copied last, and when (see `Address::copied`).
 static COPIED: std::sync::Mutex<Option<(Address, std::time::Instant)>> = std::sync::Mutex::new(None);
 
-/// When the row saying an address was copied goes back to its name (none while none says so): every panel and widget
-/// telling it drawn again then.
-pub fn copied_until(now: std::time::Instant) -> Option<std::time::Instant> {
-    COPIED.lock().unwrap().map(|(_, at)| at + COPIED_FOR).filter(|until| *until > now)
+/// How long a row's name gives way to its saying it was copied, and gives it back.
+pub const COPIED_FADE: std::time::Duration = std::time::Duration::from_millis(240);
+/// How often a row is drawn while it does.
+const COPIED_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// How far (DIPs) a row's name and the word saying it was copied rise as one gives way to the other.
+const COPIED_RISE: f32 = 5.0;
+
+/// When a row saying an address was copied is next drawn again, by every panel and widget telling it (none while none
+/// says so): each frame while its name gives way or comes back, else as it begins to come back.
+pub fn copied_due(now: std::time::Instant) -> Option<std::time::Instant> {
+    let (_, at) = (*COPIED.lock().unwrap())?;
+    let (end, back) = (at + COPIED_FOR, at + COPIED_FOR - COPIED_FADE);
+    if now >= end {
+        return None;
+    }
+    Some(if now < at + COPIED_FADE || now >= back { (now + COPIED_FRAME).min(end) } else { back })
 }
 
 impl Address {
@@ -228,9 +240,17 @@ impl Address {
         *COPIED.lock().unwrap() = Some((self, now));
     }
 
-    /// Whether its rows say it was copied, at `now`.
-    pub fn copied(self, now: std::time::Instant) -> bool {
-        COPIED.lock().unwrap().is_some_and(|(copied, at)| copied == self && now < at + COPIED_FOR)
+    /// How far its rows say it was copied at `now`, over their name (0 none, 255 whole): coming over it for
+    /// `COPIED_FADE`, then held, then giving it back as `COPIED_FOR` ends (eased as it is drawn, see `Block::Facts`).
+    pub fn said(self, now: std::time::Instant) -> u8 {
+        let Some((copied, at)) = *COPIED.lock().unwrap() else { return 0 };
+        let since = now.saturating_duration_since(at);
+        if copied != self || since >= COPIED_FOR {
+            return 0;
+        }
+        let fade = COPIED_FADE.as_secs_f32();
+        let shown = (since.as_secs_f32() / fade).min((COPIED_FOR - since).as_secs_f32() / fade).min(1.0);
+        (shown * 255.0).round() as u8
     }
 
     /// It, of the interface `network` (none where it has none).
@@ -1096,8 +1116,9 @@ enum Block {
     Threads(Vec<(Option<f32>, bool, String)>),
     /// A labelled bar; `opens`: a click on it opens that drive (its place among those seen: see `Hit::Drive`).
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<char> },
-    /// Rows of a label and its value (hot or not); `presses`: the rows a press on does something, each by its hit.
-    Facts { rows: Vec<(String, String, bool)>, gap: f32, presses: Vec<(usize, Hit)> },
+    /// Rows of a label and its value (hot or not); `presses`: the rows a press on does something, each by its hit and
+    /// how far what was done is said over its label (0 to 255: an address copied, see `Address::said`).
+    Facts { rows: Vec<(String, String, bool)>, gap: f32, presses: Vec<(usize, Hit, u8)> },
     /// Rows of a label and readings set in columns (see `columns`), so the same reading lines up down the rows; a
     /// row's `None` leaves its column empty.
     Columns { rows: Vec<(String, Vec<Option<Cell>>)>, gap: f32 },
@@ -3916,10 +3937,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let mut address = |facts: &mut Vec<(String, String, bool)>, address: Address, name: &str| {
                 let value = adapter.and_then(|a| address.of(a));
                 if value.is_some() {
-                    presses.push((facts.len(), Hit::Address(address)));
+                    presses.push((facts.len(), Hit::Address(address), address.said(now)));
                 }
-                let name = if address.copied(now) { lang.pick("已复制", "Copied").to_string() } else { name.to_string() };
-                facts.push((name, shown(value, str::to_string), false));
+                facts.push((name.to_string(), shown(value, str::to_string), false));
             };
             if on("address") && scene.seen.address {
                 address(&mut facts, Address::V4, "IPv4");
@@ -5334,7 +5354,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                     part(&i.to_string());
                     // A row a press on does something (copies its value): its hit across it, and under the pointer its
                     // label in full ink, marked as its skin marks what is pressed, with what a press does after it.
-                    let pressed = presses.iter().find(|(row, _)| *row == i).map(|(_, hit)| *hit);
+                    let pressed = presses.iter().find(|(row, ..)| *row == i).map(|(_, hit, _)| *hit);
+                    let said = presses.iter().find(|(row, ..)| *row == i).map_or(0.0, |(.., said)| *said as f32 / 255.0);
                     if let Some(hit) = pressed {
                         hits.push((left, row_y, width, LINE, hit));
                     }
@@ -5344,7 +5365,20 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                     if hovered {
                         pressed_marked(frame, theme, label, left, row_y, Icon::Copy);
                     }
-                    frame.text(label, theme.small, name, left, row_y, LABEL, Align::Start);
+                    // (Copied: its name rises and fades over the first half, the word saying so rises into its place
+                    // over the second, each eased in and out, neither over the other; back the same way as it goes.)
+                    let smooth = |t: f32| {
+                        let t = t.clamp(0.0, 1.0);
+                        t * t * (3.0 - 2.0 * t)
+                    };
+                    let (gone, come) = (smooth(said * 2.0), smooth(said * 2.0 - 1.0));
+                    if gone < 1.0 {
+                        frame.text(label, theme.small, name.alpha(name.a * (1.0 - gone)), left, row_y - COPIED_RISE * gone, LABEL, Align::Start);
+                    }
+                    if come > 0.0 {
+                        let word = scene.lang.pick("已复制", "Copied");
+                        frame.text(word, theme.small, name.alpha(name.a * come), left, row_y + COPIED_RISE * (1.0 - come), LABEL, Align::Start);
+                    }
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
                 }
@@ -9772,6 +9806,48 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The network lane's gateway row as its name gives way to the word saying it was copied, frame by frame (Glass,
+    /// dark): `cargo test --features studio --lib -- --ignored copied_row` writes `target/copied/<ms>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn copied_row() {
+        use crate::reading::NetworkInfo;
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/copied", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let info = info();
+        let network = NetworkInfo { name: "Ethernet".into(), model: "Realtek".into(), ipv4: Some("10.0.0.19".into()), ipv6: None, gateway: Some("10.0.0.1".into()), link_bps: 0, wifi: None };
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample { network: Some(network), ..sample(None, None, None) })]));
+        let seen = Seen::of(history);
+        let mut prefs = Prefs::resolve(&serde_json::Value::Null, &["network".to_string()]);
+        prefs.set_item("network", "address", true);
+        prefs.set_item("network", "gateway", true);
+        let theme = Theme::new(Skin::Glass, true);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let start = std::time::Instant::now();
+        Address::Gateway.noted_copied(start);
+        for ms in [0u64, 40, 80, 120, 160, 200, 240, 1000, 1300, 1380, 1440, 1500] {
+            let now = start + std::time::Duration::from_millis(ms);
+            let mut blocks = lane(&scene, "network", Detail::Full).unwrap();
+            // (As drawn at `ms` after the copy: the lane is built at the time it is drawn.)
+            if let Some(Block::Facts { presses, .. }) = blocks.last_mut() {
+                presses.iter_mut().for_each(|press| press.2 = if let Hit::Address(address) = press.1 { address.said(now) } else { 0 });
+            }
+            let lane = Lane { id: "network".into(), blocks, ink: theme.ink("network") };
+            let (w, h) = (COLUMN_WIDTH, lane.height(&theme) + 8.0);
+            let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                frame.fill(Color::hex(0x202124, 1.0), 0.0, 0.0, w, h);
+                paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, (0.0, 0.0), Pass::Content, &mut Vec::new());
+            }).expect("drawn");
+            crate::studio::save_png(&out.join(format!("{ms:04}.png")), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+        }
+    }
+
     /// The notes' lane as a deck, cards and a list (the columns) in each skin, light and dark (the rows):
     /// `cargo test --features studio --lib -- --ignored notes_lanes` writes `target/notes/<row>-<column>.png`.
     #[test]
@@ -10075,22 +10151,27 @@ otepad.exe", "Notepad"),
         let (rows, presses) = facts(both, &seen);
         let at = |name: &str| rows.iter().position(|row| row.starts_with(name)).unwrap();
         assert_eq!(rows[at("IPv4")..=at("网关")], ["IPv4: 10.0.0.19", "IPv6: 2603:6010::19", "网关: 10.0.0.1"]);
-        assert_eq!(presses, [(at("IPv4"), Hit::Address(Address::V4)), (at("IPv6"), Hit::Address(Address::V6)), (at("网关"), Hit::Address(Address::Gateway))]);
+        assert_eq!(presses.iter().map(|(row, hit, _)| (*row, *hit)).collect::<Vec<_>>(), [(at("IPv4"), Hit::Address(Address::V4)), (at("IPv6"), Hit::Address(Address::V6)), (at("网关"), Hit::Address(Address::Gateway))]);
         // (The IPv6 address gone, as seen before: its line stays, unread, and a press on it does nothing.)
         let (rows, presses) = facts(leak(Sample { network: Some(network(None)), ..sample(None, None, None) }), &seen);
         assert!(rows.contains(&"IPv6: —".to_string()));
-        assert!(!presses.iter().any(|(_, hit)| *hit == Hit::Address(Address::V6)));
+        assert!(!presses.iter().any(|(_, hit, _)| *hit == Hit::Address(Address::V6)));
         // (Never seen: no line.)
         let none = leak(Sample { network: Some(network(None)), ..sample(None, None, None) });
         assert!(!facts(none, &Seen::of(none)).0.iter().any(|row| row.starts_with("IPv6")));
-        // Copied: said so, until `COPIED_FOR` has gone by.
+        // Copied: said so over its name, coming over it and giving it back eased (drawn each frame meanwhile), held
+        // between, till `COPIED_FOR` has gone by.
         let now = std::time::Instant::now();
         Address::Gateway.noted_copied(now);
-        assert!(facts(both, &seen).0.contains(&"已复制: 10.0.0.1".to_string()));
-        assert!(Address::Gateway.copied(now + COPIED_FOR / 2) && !Address::V4.copied(now));
-        assert!(!Address::Gateway.copied(now + COPIED_FOR));
-        assert_eq!(copied_until(now), Some(now + COPIED_FOR));
-        assert_eq!(copied_until(now + COPIED_FOR), None);
+        let said = |at: std::time::Duration| Address::Gateway.said(now + at);
+        assert_eq!((said(std::time::Duration::ZERO), said(COPIED_FADE), said(COPIED_FOR / 2), said(COPIED_FOR)), (0, 255, 255, 0));
+        assert!((1..255).contains(&said(COPIED_FADE / 2)) && (1..255).contains(&said(COPIED_FOR - COPIED_FADE / 2)));
+        assert!(said(COPIED_FADE / 4) < said(COPIED_FADE / 2) && said(COPIED_FOR - COPIED_FADE / 4) < said(COPIED_FOR - COPIED_FADE / 2));
+        assert_eq!(Address::V4.said(now + COPIED_FADE), 0);
+        assert_eq!(copied_due(now), Some(now + COPIED_FRAME));
+        assert_eq!(copied_due(now + COPIED_FADE), Some(now + COPIED_FOR - COPIED_FADE));
+        assert_eq!(copied_due(now + COPIED_FOR - COPIED_FADE), Some(now + COPIED_FOR - COPIED_FADE + COPIED_FRAME));
+        assert_eq!(copied_due(now + COPIED_FOR), None);
     }
 
     /// With more than one drive, each drive's line tells its reading and writing (by the drive's number: one not read

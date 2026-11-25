@@ -4819,7 +4819,7 @@ impl<'a> Panel<'a> {
             self.next_frame = self.next_frame.min(due);
         }
         // (Or an address's row due to stop saying it was copied.)
-        if let Some(due) = crate::ui::view::copied_until(now) {
+        if let Some(due) = crate::ui::view::copied_due(now) {
             self.next_frame = self.next_frame.min(due);
         }
         // The sound's page due to open or close as the pointer rests on the output's name or has left it (see

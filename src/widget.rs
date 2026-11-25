@@ -2993,7 +2993,7 @@ impl Widgets {
                     // (And the preview's shortcut due to be said, or coming in.)
                     let rest = widget.preview_hint.due(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     // (And an address's row due to stop saying it was copied.)
-                    let rest = view::copied_until(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
+                    let rest = view::copied_due(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
