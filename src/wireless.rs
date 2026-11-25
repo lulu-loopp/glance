@@ -439,6 +439,13 @@ mod logitech {
     const ERROR_20: u8 = 0xFF;
     /// The receiver's connection register (its devices' state): read only to know it is a receiver.
     const CONNECTION_STATE: u8 = 0x02;
+    /// HID++ 1.0's long register read, and the receiver's register of what is paired in its slots: a slot's pairing
+    /// asked by its sub-register, a Bolt receiver's from 0x50 and the slot's number, a Unifying or Lightspeed one's from
+    /// 0x20 and the slot's number less one (refused for a slot that holds none).
+    const GET_LONG_REGISTER: u8 = 0x83;
+    const RECEIVER_INFO: u8 = 0xB5;
+    const BOLT_PAIRING: u8 = 0x50;
+    const UNIFYING_PAIRING: u8 = 0x20;
     /// HID++ 2.0's root feature (always at index 0): its functions finding a feature's index, and pinging.
     const ROOT: u8 = 0x00;
     const GET_FEATURE: u8 = 0;
@@ -475,10 +482,12 @@ mod logitech {
         battery: Option<Battery>,
     }
 
-    /// Reads the receivers' devices, keeping what is asked once of each (by its receiver and slot).
+    /// Reads the receivers' devices, keeping what is asked once of each (by its receiver and slot), and each as it was
+    /// last read (see `asleep`).
     #[derive(Default)]
     pub(super) struct Reader {
         known: HashMap<(String, u8), Known>,
+        last: HashMap<(String, u8), Device>,
         /// The software id the next question carries (2 to 15, in turn: 0 is the devices' own notifications', 1 is
         /// left to others), and the byte the next ping carries, which its answer gives back.
         software: u8,
@@ -497,7 +506,13 @@ mod logitech {
                 for slot in SLOTS {
                     let key = (receiver.id.clone(), slot);
                     if !self.ping(&mut receiver, slot) {
-                        self.known.remove(&key);
+                        match asleep(self.last.get(&key), || paired(&mut receiver, slot)) {
+                            Some(device) => devices.push(device),
+                            None => {
+                                self.known.remove(&key);
+                                self.last.remove(&key);
+                            }
+                        }
                         continue;
                     }
                     if !self.known.contains_key(&key) {
@@ -509,16 +524,20 @@ mod logitech {
                     let (name, kind) = (known.name.clone(), known.kind);
                     match self.battery(&mut receiver, slot, battery) {
                         Some((level, charging)) => {
-                            devices.push(Device { key: format!("hidpp:{}:{slot}", receiver.id), name, kind, via: Via::Logitech, level, charging, container: None })
+                            let device = Device { key: format!("hidpp:{}:{slot}", receiver.id), name, kind, via: Via::Logitech, level, charging, container: None };
+                            self.last.insert(key, device.clone());
+                            devices.push(device);
                         }
                         // (Not answered as before: another device in its slot since, perhaps. Asked anew next time.)
                         None => {
                             self.known.remove(&key);
+                            self.last.remove(&key);
                         }
                     }
                 }
             }
             self.known.retain(|(receiver, _), _| present.contains(receiver));
+            self.last.retain(|(receiver, _), _| present.contains(receiver));
             devices
         }
 
@@ -592,6 +611,26 @@ mod logitech {
                 Battery::Voltage(index) => battery_voltage(&self.feature(receiver, slot, index, 0, [0; 3])?),
             }
         }
+    }
+
+    /// A device that does not answer, as it was `last` read (none where it never was): asleep (a keyboard, a mouse left
+    /// alone) or switched off, it is listed as it was while its receiver is plugged in and still holds it paired (asked
+    /// of it only then), as the receiver has it joined still. Not paired any more, it is not.
+    pub(super) fn asleep(last: Option<&Device>, paired: impl FnOnce() -> bool) -> Option<Device> {
+        let last = last?;
+        paired().then(|| Device { charging: false, ..last.clone() })
+    }
+
+    /// Whether `receiver` holds a device paired in `slot`, as its pairing register says (asked as a Bolt receiver, and
+    /// as a Unifying or Lightspeed one).
+    fn paired(receiver: &mut Receiver, slot: u8) -> bool {
+        [BOLT_PAIRING + slot, UNIFYING_PAIRING + slot - 1].into_iter().any(|sub| pairing(&receiver.ask(RECEIVER, GET_LONG_REGISTER, RECEIVER_INFO, [sub, 0, 0]), sub))
+    }
+
+    /// Whether `answer` to the pairing register's sub-register `sub` tells of a device paired there: its reply, which
+    /// begins with that sub-register.
+    pub(super) fn pairing(answer: &Answer, sub: u8) -> bool {
+        matches!(answer, Answer::Reply(reply) if reply.first() == Some(&sub))
     }
 
     /// What a device's type (feature 0x0005's function 2) says it is.
@@ -938,7 +977,7 @@ mod xbox {
 #[cfg(test)]
 mod tests {
     use super::bluetooth::{appearance_kind, class_kind, joined, Record};
-    use super::logitech::{answer, battery_status, battery_voltage, device_kind, unified_battery, voltage_percent, Answer};
+    use super::logitech::{answer, asleep, battery_status, battery_voltage, device_kind, pairing, unified_battery, voltage_percent, Answer};
     use super::*;
 
     fn record(address: u64, container: u128, connected: bool) -> Record {
@@ -1088,6 +1127,24 @@ mod tests {
 
     fn device(key: &str, name: &str, kind: Kind) -> Device {
         Device { key: key.into(), name: name.into(), kind, via: Via::Bluetooth, level: 50, charging: false, container: None }
+    }
+
+    /// A receiver's device that does not answer (asleep, or switched off) is listed as last read while the receiver
+    /// still holds it paired, not charging, and not where it never was read or is paired no more.
+    #[test]
+    fn a_device_asleep_on_its_receiver_stays_listed() {
+        let mut keys = Device { via: Via::Logitech, level: 64, charging: true, ..device("hidpp:r:1", "MX Keys", Kind::Keyboard) };
+        assert_eq!(asleep(Some(&keys), || true), Some(Device { charging: false, ..keys.clone() }));
+        assert_eq!(asleep(Some(&keys), || false), None);
+        assert_eq!(asleep(None, || panic!("not asked of a device never read")), None);
+        keys.charging = false;
+        assert_eq!(asleep(Some(&keys), || true), Some(keys));
+        // The pairing register: a slot's reply begins with its sub-register (the owner's Bolt receiver, its mouse in
+        // slot 2), an empty slot's is refused.
+        assert!(pairing(&Answer::Reply(vec![0x52, 0x02, 0x42, 0xB0, 0xA7, 0x55, 0x03, 0x0D, 0x02, 0x01, 0x80, 0x14, 0x01, 0, 0, 0]), 0x52));
+        assert!(!pairing(&Answer::Refused(0x08), 0x51));
+        assert!(!pairing(&Answer::Reply(vec![0x53, 0x02]), 0x52));
+        assert!(!pairing(&Answer::Silent, 0x52));
     }
 
     #[test]
