@@ -818,13 +818,14 @@ mod pmo {
 
         /// Takes in what each receiver or cable plugged in answered (its path, its product, and the board it named and
         /// that board's charge, as `battery` gives them): the boards shown. A board joined is shown whether or not it
-        /// answered: as read now; else as last read (through there); else unread, as the board its receiver names, or
-        /// a keyboard where it names none.
+        /// answered: as read now; else as last read (through there), where its receiver names no other board than the
+        /// one read; else unread, as the board its receiver names, or a keyboard where it names none. (Another board
+        /// paired to it since, the one read before is forgotten there: it was shown with that one's charge.)
         pub(super) fn took(&mut self, answers: Vec<Answered>) -> Vec<Device> {
             let (mut read, mut kept) = (Vec::new(), Vec::new());
             self.unanswered.clear();
-            for (path, product, (board, level)) in &answers {
-                let board = board.unwrap_or(*product);
+            for (path, product, (named, level)) in &answers {
+                let board = named.unwrap_or(*product);
                 let name = BOARDS.iter().find(|(id, _)| *id == board).map_or("", |(_, name)| name).to_string();
                 let via = if *product == RECEIVER { Via::Receiver } else { Via::Cable };
                 // (On its cable, it is charged by it.)
@@ -840,6 +841,9 @@ mod pmo {
                 }
                 if *product == RECEIVER {
                     self.unanswered.extend(hardware(path));
+                }
+                if named.is_some() && self.last.get(path).is_some_and(|last| last.key != device.key) {
+                    self.last.remove(path);
                 }
                 kept.push(self.last.get(path).map_or(Device { charging: false, ..device }, |last| Device { charging: false, ..last.clone() }));
             }
@@ -1675,6 +1679,12 @@ mod tests {
         assert_eq!((shown[0].via, shown[0].level, shown[0].charging), (Via::Cable, Some(80), true));
         let shown = later.took(vec![(receiver.clone(), 0x3002, (None, None))]);
         assert_eq!((shown[0].via, shown[0].level, shown[0].charging), (Via::Receiver, Some(80), false));
+        // Another board paired to its receiver since, not answering: that board, unread (not the one read before,
+        // with its charge), and still so as the receiver names none.
+        let shown = later.took(vec![(receiver.clone(), 0x3002, (Some(0x3004), None))]);
+        assert_eq!((shown[0].key.as_str(), shown[0].name.as_str(), shown[0].level), ("pmo:3004", "Aurora 80", None));
+        let shown = later.took(vec![(receiver.clone(), 0x3002, (None, None))]);
+        assert_eq!(shown[0].level, None);
         // Its receiver out: gone.
         assert!(later.took(Vec::new()).is_empty());
         assert!(later.kept().is_empty());
