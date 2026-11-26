@@ -3270,8 +3270,8 @@ impl Ui {
                 rows.extend(elements.into_iter().map(Row::Element));
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
-                    "To find lyrics online, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Synced lyrics need the player to report its position.",
+                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。",
+                    "To find lyrics online, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB.",
                 )));
             }
             (Page::Devices, _) => self.device_rows(&mut rows),
@@ -5143,8 +5143,8 @@ impl Ui {
             // (With what the devices nearby see this PC as: its name is changed on the devices' page.)
             Switch::Nearby => {
                 let hint = match (self.remote_there, lang) {
-                    (true, Lang::Zh) => Cow::Owned(format!("兼容 LocalSend 的设备可将文件发到这台电脑，在附近设备上显示为 {}", self.pc_called())),
-                    (true, Lang::En) => Cow::Owned(format!("Devices with LocalSend can send files to this PC, which appears to them as {}", self.pc_called())),
+                    (true, Lang::Zh) => Cow::Owned(format!("显示为 {}，兼容 LocalSend 的设备均可发送", self.pc_called())),
+                    (true, Lang::En) => Cow::Owned(format!("Shown as {}. Any device with LocalSend can send", self.pc_called())),
                     (false, _) => Cow::Borrowed(p("此版本的 Glance 未包含附近传输程序", "This version of Glance doesn't include Nearby sharing")),
                 };
                 return (p("接收附近设备的文件", "Receive files from nearby devices"), Some(hint), self.nearby_on);
@@ -5572,35 +5572,35 @@ You can disconnect here at any time, and the original status line command will b
             _ if id.starts_with("gpu:") => ("GPU".into(), info.gpu_of(id).map(|i| info.gpus[i].name.clone())),
             "memory" => (p("内存", "Memory"), info.memory_modules.clone()),
             "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上传与下载速度", "Upload and download across all physical adapters")))),
-            "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
-            "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上单击表头即可排序", "The busiest programs. Click a column heading on the panel to sort them"))),
-            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间，以及所选文件夹的大小", "Free space on each drive, and the size of folders you choose"))),
+            "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(pick(lang, "、", ", ")))),
+            "processes" => (p("进程", "Processes"), Some(p("在面板上单击表头可排序", "Click a column heading on the panel to sort"))),
+            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间与所选文件夹的大小", "Free space on each drive and the size of chosen folders"))),
             "board" => (p("主板", "Motherboard"), board_said(crate::app().controller.seen.lock().unwrap().board.is_some(), crate::laptop::this_machine(), &info.board, lang)),
-            "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
-            "devices" => (p("设备", "Devices"), Some(p("已连接的蓝牙设备、罗技键鼠、2.4G 接收器键盘与 Xbox 手柄的剩余电量，仅在有设备连接时显示", "Battery levels of connected Bluetooth devices, Logitech keyboards and mice, keyboards on a 2.4 GHz receiver, and Xbox controllers. Shown only while one is connected"))),
-            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "Frame rate, frame times and resource use of a fullscreen game"))),
-            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "CPU, memory, network and disk use of each running container. Shown only while Docker runs"))),
-            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，仅在其运行时显示，不会启动或唤醒发行版", "WSL 2 CPU and memory use. Shown only while it runs, without starting or waking a distribution"))),
-            "time" => (p("时间与媒体", "Time and media"), Some(p("时间、日期、音量与正在播放的内容", "Time, date, volume and what is playing"))),
-            "station" => (p("中转站", "Station"), Some(p("临时存放拖入的文件、图片、文字，以及最近复制的内容", "Dropped files, pictures and text kept for a while, plus recently copied items"))),
+            "battery" => (p("电池", "Battery"), None),
+            "devices" => (p("设备", "Devices"), Some(p("蓝牙、罗技、2.4G 接收器与 Xbox 设备的电量，有设备连接时显示", "Battery of Bluetooth, Logitech, 2.4 GHz receiver and Xbox devices, shown while one is connected"))),
+            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率与资源占用", "A fullscreen game's frame rate and resource use"))),
+            "docker" => ("Docker".into(), Some(p("仅在 Docker 运行时显示", "Shown only while Docker runs"))),
+            "wsl" => ("WSL".into(), Some(p("仅在 WSL 运行时显示，不会启动或唤醒发行版", "Shown only while WSL runs, without starting or waking a distribution"))),
+            "time" => (p("时间与媒体", "Time and media"), None),
+            "station" => (p("中转站", "Station"), Some(p("临时存放拖入的内容与最近复制的内容", "Holds what you drop in for a while, and what you copied lately"))),
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲与滚动歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要安装歌词插件）",
-                    "What is playing, with scrolling lyrics. To find lyrics, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Lyrics need the player to report its position (NetEase Cloud Music needs the lyrics plugin)",
+                    "正在播放的歌曲与滚动歌词。在线查找歌词时会发送歌名",
+                    "What is playing, with scrolling lyrics. The track title is sent to find lyrics online",
                 )),
             ),
-            "notes" => (p("便签", "Notes"), Some(p("想法与备忘，每条保存为一个 Markdown 文件，可放在桌面上", "Ideas and reminders, each saved as a Markdown file, which can be pinned to the desktop"))),
+            "notes" => (p("便签", "Notes"), Some(p("每条保存为一个 Markdown 文件", "Each saved as a Markdown file"))),
             "todo" => (
                 p("待办", "To-do"),
                 Some(p(
-                    "可设定日期与时间，保存在便签文件夹的“待办.md”中",
-                    "With optional dates and times, saved in “To-do.md” in the notes folder",
+                    "保存在便签文件夹的“待办.md”中",
+                    "Saved in “To-do.md” in the notes folder",
                 )),
             ),
-            "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Frequently used programs, files, folders and websites"))),
-            "search" => (p("搜索", "Search"), Some(p("搜索应用、设置、文件和便签", "Search apps, settings, files and notes"))),
-            _ => (p("系统", "System"), Some(p("开机时长、进程数、线程数与句柄数", "Uptime, processes, threads and handles"))),
+            "apps" => (p("快捷启动", "Quick launch"), None),
+            "search" => (p("搜索", "Search"), None),
+            _ => (p("系统", "System"), None),
         }
     }
 
