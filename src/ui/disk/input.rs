@@ -10,8 +10,8 @@ use super::*;
 /// How far a press moves before it is a drag (DIPs).
 const DRAG_FROM: f32 = 5.0;
 
-impl Ui {
-    pub(super) fn moved(&mut self, x: f32, y: f32) {
+impl Organizer {
+    pub fn moved(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.next_frame = Instant::now();
         if let Some(drag) = &mut self.drag {
@@ -28,14 +28,14 @@ impl Ui {
         self.hover = if self.menu.is_none() && self.plate.is_none() { self.block_at(x, y) } else { None };
     }
 
-    pub(super) fn left(&mut self) {
+    pub fn left(&mut self) {
         self.pointer = None;
         self.hover = None;
         self.row_hover = None;
         self.next_frame = Instant::now();
     }
 
-    pub(super) fn pressed(&mut self, x: f32, y: f32, double: bool) {
+    pub fn pressed(&mut self, x: f32, y: f32, double: bool) {
         self.pointer = Some((x, y));
         // (The block under the press itself: a press may come with no move to it before.)
         if self.menu.is_none() && self.plate.is_none() {
@@ -44,7 +44,7 @@ impl Ui {
         self.next_frame = Instant::now();
         let target = self.hot();
         // A press off a menu or a card closes it (and does nothing else).
-        if (self.menu.is_some() || self.plate.is_some()) && !matches!(target, Some(Target::Over | Target::MenuSize(_) | Target::MenuCrumb(_) | Target::MenuUngather(_) | Target::PlateAct(_))) {
+        if (self.menu.is_some() || self.plate.is_some()) && !matches!(target, Some(Target::Over | Target::MenuSize(_) | Target::MenuCrumb(_) | Target::MenuDrive(_) | Target::MenuUngather(_) | Target::PlateAct(_))) {
             self.menu = None;
             self.plate = None;
             return;
@@ -84,7 +84,7 @@ impl Ui {
         }
     }
 
-    pub(super) fn released(&mut self, x: f32, y: f32) {
+    pub fn released(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.next_frame = Instant::now();
         if let Some(drag) = self.drag.take() {
@@ -112,7 +112,7 @@ impl Ui {
         }
     }
 
-    pub(super) fn wheel(&mut self, delta: i16) {
+    pub fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
         let (width, height) = self.client();
         let area = list_area(super::paint::geo(width, height).side);
@@ -263,7 +263,12 @@ impl Ui {
     fn act(&mut self, target: Target) {
         self.next_frame = Instant::now();
         match target {
-            Target::Drive(at) => {
+            Target::DriveMore(hidden) => {
+                let under = self.target_rect(&Target::DriveMore(hidden.clone()));
+                self.menu = Some(Menu { of: MenuOf::Drives(hidden), under, above: false });
+            }
+            Target::Drive(at) | Target::MenuDrive(at) => {
+                self.menu = None;
                 if let Some(root) = self.drives.get(at).map(|drive| drive.root.clone()) {
                     if !root.eq_ignore_ascii_case(&self.root) {
                         self.to_drive(&root);
@@ -385,7 +390,7 @@ impl Ui {
     }
 
     /// Where a spot was last drawn.
-    fn target_rect(&self, target: &Target) -> Rect {
+    pub(super) fn target_rect(&self, target: &Target) -> Rect {
         self.targets.iter().rev().find(|(_, spot)| spot == target).map_or(Rect::default(), |(at, _)| *at)
     }
 

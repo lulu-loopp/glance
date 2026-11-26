@@ -45,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS};
@@ -331,6 +331,8 @@ const TO_REPORTS: u32 = WM_APP + 44;
 const TO_GUIDE: u32 = WM_APP + 46;
 /// Asked to turn to the updates (the general page's): from a notification of a release found or of a notice.
 const TO_UPDATES: u32 = WM_APP + 48;
+/// Asked to turn to the disk organizer's page (what it is to show kept by it: see `disk::take_asked`).
+const TO_DISK: u32 = WM_APP + 54;
 const GUIDE_TOLD: u32 = WM_APP + 47;
 /// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there,
 /// closed the report or opened it again, or closed the window. Kept as told (`THREAD_SEND`, `THREAD_TURN`,
@@ -413,6 +415,12 @@ pub fn open_at_updates(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Updates), place });
 }
 
+/// Opens the window (as `open`) at the disk organizer's page, to show what it was asked to (see `disk::open`): from a
+/// drive in the panel or a widget, from search.
+pub fn open_at_disk(place: Option<RECT>) {
+    open_at(Asked { to: Some(To::Disk), place });
+}
+
 /// What was given to send to devices nearby (from Explorer's Send to), till the window takes it (see `To::Send`).
 static TO_SEND: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
@@ -439,6 +447,8 @@ enum To {
     Updates,
     /// Nearby transfer's page, what was given to send chosen there (see `open_to_send`).
     Send,
+    /// The disk organizer's page, showing what it was asked to (see `open_at_disk`).
+    Disk,
 }
 
 impl Asked {
@@ -459,6 +469,7 @@ impl To {
             Some(To::Guide) => 4,
             Some(To::Updates) => 5,
             Some(To::Send) => 6,
+            Some(To::Disk) => 7,
         }
     }
 
@@ -470,6 +481,7 @@ impl To {
             4 => Some(To::Guide),
             5 => Some(To::Updates),
             6 => Some(To::Send),
+            7 => Some(To::Disk),
             _ => None,
         }
     }
@@ -486,6 +498,7 @@ fn open_at(asked: Asked) {
             Some(To::Guide) => Some(TO_GUIDE),
             Some(To::Updates) => Some(TO_UPDATES),
             Some(To::Send) => Some(send::TO_SEND_PAGE),
+            Some(To::Disk) => Some(TO_DISK),
             None => None,
         };
         if let Some(message) = message {
@@ -848,6 +861,13 @@ fn tick(now: Instant) -> Option<Duration> {
         if ui.send_tick(now) {
             ui.next_frame = now;
         }
+        // The organizer's timers (what waits to go goes as its time is up), and its frames on its page.
+        if let Some(disk) = ui.disk.as_mut() {
+            disk.timers(now);
+            if ui.page == Page::Disk {
+                ui.next_frame = ui.next_frame.min(disk.next_frame());
+            }
+        }
         let held = ui.guide_holds_window();
         if now >= ui.next_frame && !held {
             ui.draw(now);
@@ -1111,6 +1131,8 @@ enum Page {
     Phone,
     /// Nearby transfer (see `nearby`): files to and from devices on the local network with LocalSend.
     Nearby,
+    /// The disk organizer (see `ui::disk`): what a drive holds, as a map, and what is to go from it.
+    Disk,
     General,
     /// The reports this PC sent, as threads: a page of General's, opened from it (see `Row::MyReports`).
     Reports,
@@ -1143,7 +1165,7 @@ enum NavItem {
     Components,
 }
 
-const NAV_ITEMS: [NavItem; 11] = [
+const NAV_ITEMS: [NavItem; 12] = [
     NavItem::Page(Page::Layout),
     NavItem::Page(Page::Look),
     NavItem::Components,
@@ -1154,6 +1176,7 @@ const NAV_ITEMS: [NavItem; 11] = [
     NavItem::Page(Page::Devices),
     NavItem::Page(Page::Phone),
     NavItem::Page(Page::Nearby),
+    NavItem::Page(Page::Disk),
     NavItem::Page(Page::General),
 ];
 
@@ -1170,6 +1193,7 @@ impl NavItem {
             NavItem::Page(Page::Devices) => pick(lang, "设备", "Devices"),
             NavItem::Page(Page::Phone) => pick(lang, "手机遥控", "Phone remote"),
             NavItem::Page(Page::Nearby) => pick(lang, "附近传输", "Nearby sharing"),
+            NavItem::Page(Page::Disk) => pick(lang, "磁盘整理", "Disk Organizer"),
             NavItem::Page(Page::General | Page::Reports) => pick(lang, "通用", "General"),
         }
     }
@@ -1188,6 +1212,7 @@ impl Page {
             Page::Devices => Icon::MonitorSmartphone,
             Page::Phone => Icon::Smartphone,
             Page::Nearby => Icon::Share,
+            Page::Disk => Icon::Disk,
             Page::General | Page::Reports => Icon::Settings,
         }
     }
@@ -2092,6 +2117,9 @@ struct Ui {
     /// The page shown, and the monitor's tab (shown on its page).
     page: Page,
     tab: Tab,
+    /// The disk organizer, made as its page is first shown, kept while the window is; whether a press on it is held.
+    disk: Option<crate::ui::disk::Organizer>,
+    disk_pressed: bool,
     /// The players music can be followed from, as the music page offers them (as Windows identifies each, and its
     /// name): those playing music now, and the one chosen, playing or not; taken anew each frame.
     sources: Vec<(String, String)>,
@@ -2400,6 +2428,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(procedure),
             hInstance: instance.into(),
+            // (Double-clicks told as such: the disk organizer's map shows what is double-clicked in Explorer.)
+            style: windows::Win32::UI::WindowsAndMessaging::CS_DBLCLKS,
             lpszClassName: w!("GlanceSettings"),
             hCursor: LoadCursorW(None, IDC_ARROW).ok()?,
             hIcon: icon(GetSystemMetrics(SM_CXICON)).unwrap_or_default(),
@@ -2469,6 +2499,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             settings,
             prefs,
             page: Page::Layout,
+            disk: None,
+            disk_pressed: false,
             tab: Tab::Shown,
             sources: Vec::new(),
             music: super::music::Music::default(),
@@ -2747,6 +2779,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.turn_as_asked(To::Send));
             LRESULT(0)
         }
+        TO_DISK => {
+            with_ui(|ui| ui.turn_as_asked(To::Disk));
+            LRESULT(0)
+        }
+        // What the disk organizer's threads read and did.
+        crate::ui::disk::SHOWN => {
+            with_ui(|ui| ui.disk.as_mut().map(crate::ui::disk::Organizer::take_shown));
+            LRESULT(0)
+        }
+        crate::ui::disk::ACTED => {
+            with_ui(|ui| ui.disk.as_mut().map(crate::ui::disk::Organizer::took_acts));
+            LRESULT(0)
+        }
         GUIDE_TOLD => {
             with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
@@ -2873,12 +2918,21 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     ui.next_frame = Instant::now();
                 }
                 ui.pointer = None;
+                if let Some(disk) = ui.disk.as_mut().filter(|_| ui.page == Page::Disk) {
+                    disk.left();
+                }
             });
             LRESULT(0)
         }
-        WM_LBUTTONDOWN => {
+        // (A press's second, quick enough, is a double-click: the organizer's own, a press like any other elsewhere.)
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let (x, y) = point(lparam);
-            with_ui(|ui| ui.press(x as f32 / ui.scale, y as f32 / ui.scale));
+            with_ui(|ui| {
+                let (x, y) = (x as f32 / ui.scale, y as f32 / ui.scale);
+                if !ui.press_disk(x, y, message == WM_LBUTTONDBLCLK) {
+                    ui.press(x, y);
+                }
+            });
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -2889,7 +2943,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // The pointer taken away mid-drag (Alt+Tab, another program): let go
         // where it is. (Let go by the window itself, it is already.)
         WM_CAPTURECHANGED => {
-            with_ui(|ui| ui.let_go());
+            with_ui(|ui| {
+                ui.let_go();
+                if std::mem::take(&mut ui.disk_pressed) {
+                    if let Some(disk) = ui.disk.as_mut() {
+                        disk.pointer_lost();
+                    }
+                }
+            });
             LRESULT(0)
         }
         // A key the input method takes while a sensor is being named is its own (it puts words together with it).
@@ -3071,6 +3132,9 @@ impl Ui {
             ThemePref::System | ThemePref::Backdrop => crate::os::apps_dark(),
         };
         self.palette = Palette::new(self.dark);
+        if let Some(disk) = self.disk.as_mut() {
+            disk.restyle(self.dark, self.lang);
+        }
         unsafe {
             let dark = BOOL::from(self.dark);
             let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
@@ -3189,6 +3253,8 @@ impl Ui {
             (Page::Devices, _) => self.device_rows(&mut rows),
             (Page::Phone, _) => self.remote_rows(&mut rows),
             (Page::Nearby, _) => self.nearby_rows(&mut rows),
+            // (The organizer draws its page itself: see `paint`.)
+            (Page::Disk, _) => {}
             (Page::Reports, _) => {
                 rows.extend(self.followed.iter().map(|report| Row::Report(report.id.clone())));
                 rows.push(Row::Note(pick(
@@ -3494,6 +3560,7 @@ impl Ui {
                 self.send.add_paths(paths);
                 self.turn_to(Page::Nearby);
             }
+            To::Disk => self.turn_to(Page::Disk),
         }
     }
 
@@ -3511,6 +3578,13 @@ impl Ui {
             self.scroll_target = 0.0;
             self.drag = None;
             self.raise_more();
+        }
+        // The organizer made as its page is first shown (kept while the window is: what is gathered stays), and turned
+        // to what it was asked to show, else as it was left.
+        if page == Page::Disk {
+            let asked = crate::ui::disk::take_asked().unwrap_or_default();
+            let (hwnd, dark, lang) = (self.hwnd, self.dark, self.lang);
+            self.disk.get_or_insert_with(|| crate::ui::disk::Organizer::new(hwnd, dark, lang)).turn(&asked);
         }
         self.next_frame = Instant::now();
     }
@@ -5871,6 +5945,9 @@ It can be disconnected here at any time, and the status line command put back.",
     fn moved(&mut self, x: f32, y: f32) {
         let was = (self.hovered(), self.over_followed());
         self.pointer = Some((x, y));
+        if let Some(disk) = self.disk.as_mut().filter(|_| self.page == Page::Disk) {
+            disk.moved(x, y);
+        }
         // Drawn again only where the pointer changes what shows: what it is over (lit), what it has in hand (a
         // slider, a row, a component carried: they follow it), or where what is drawn follows it. Moved over the
         // same, nothing changes: a frame drawn at every move had the window drawn whole as often as the mouse
@@ -5890,6 +5967,17 @@ It can be disconnected here at any time, and the status line command put back.",
         if held || was != (self.hovered(), self.over_followed()) || was.1 {
             self.next_frame = Instant::now();
         }
+    }
+
+    /// A press at (`x`, `y`) on the organizer's page, the second of a double-click where `double`, taken by it (held
+    /// till it is let go of, wherever): whether it was (the pages' list is the window's own).
+    fn press_disk(&mut self, x: f32, y: f32, double: bool) -> bool {
+        let Some(disk) = self.disk.as_mut().filter(|_| self.page == Page::Disk && x >= NAV) else { return false };
+        self.pointer = Some((x, y));
+        unsafe { SetCapture(self.hwnd) };
+        disk.pressed(x, y, double);
+        self.disk_pressed = true;
+        true
     }
 
     /// Whether the pointer is where what is drawn follows it (see `follows_pointer`).
@@ -6010,6 +6098,14 @@ It can be disconnected here at any time, and the status line command put back.",
 
     fn release(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        // A press on the organizer's page let go: its own, wherever the pointer is now.
+        if std::mem::take(&mut self.disk_pressed) {
+            if let Some(disk) = self.disk.as_mut() {
+                disk.released(x, y);
+            }
+            super::window::let_go_of_capture(self.hwnd);
+            return;
+        }
         if self.release_phone(x, y) {
             return;
         }
@@ -6380,6 +6476,18 @@ It can be disconnected here at any time, and the status line command put back.",
         if self.renaming.is_some() && !alt && self.rename_key(key, shift) {
             return true;
         }
+        // On the organizer's page: Esc closes a menu or a card it has up, else shows the folder above, and at a drive's
+        // root closes the window as anywhere; Backspace shows the folder above.
+        if let Some(disk) = self.disk.as_mut().filter(|_| self.page == Page::Disk && !alt) {
+            match key {
+                VK_ESCAPE if !disk.escape() => return true,
+                VK_BACK => {
+                    disk.up_a_folder();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_) | Target::Expand(_)));
         if alt && !moves_module {
             return false;
@@ -6533,6 +6641,10 @@ It can be disconnected here at any time, and the status line command put back.",
 
     fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
+        if let Some(disk) = self.disk.as_mut().filter(|_| self.page == Page::Disk && x >= NAV) {
+            disk.wheel(delta);
+            return;
+        }
         // Over the phone's screen, its page is what moves.
         if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Phone && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
             self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
@@ -6766,6 +6878,9 @@ It can be disconnected here at any time, and the status line command put back.",
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
+        } else if self.page == Page::Disk {
+            // (The organizer's page: when it asks, see `tick`, or now and then for the pages' list.)
+            now + Duration::from_secs(1)
         } else {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
@@ -7044,6 +7159,13 @@ It can be disconnected here at any time, and the status line command put back.",
         self.targets.clear();
         self.follows_pointer.clear();
         self.paint_nav(frame, &palette, now);
+        if self.page == Page::Disk {
+            if let Some(disk) = self.disk.as_mut() {
+                disk.draw(frame, now);
+            }
+            self.paint_played_pointer(frame);
+            return None;
+        }
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
@@ -9159,6 +9281,7 @@ mod pictures {
             (Page::Devices, Tab::Shown, "devices"),
             (Page::Phone, Tab::Shown, "phone"),
             (Page::Nearby, Tab::Shown, "nearby"),
+            (Page::Disk, Tab::Shown, "disk"),
             (Page::General, Tab::Shown, "general"),
             (Page::Reports, Tab::Shown, "reports"),
         ];

@@ -564,13 +564,7 @@ impl Controller {
         self.in_front(front, 1);
     }
 
-    /// The disk organizer came to the front (`Some`: it), or left it: as the settings (see `settings_front`).
-    pub fn disk_front(&self, front: Option<HWND>) {
-        self.in_front(front, 2);
-    }
-
-    /// The window `front` in front, or none (`which`: 0 the settings, 1 the page beside, 2 the disk organizer), told to
-    /// the panel's thread.
+    /// The window `front` in front, or none (`which`: 0 the settings, 1 the page beside), told to the panel's thread.
     fn in_front(&self, front: Option<HWND>, which: isize) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
@@ -741,8 +735,8 @@ impl Controller {
         // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
         let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
         let mut closing_press = ClosingPress::default();
-        // The windows in front the panel and the widgets give way to: the settings, the page beside, the disk organizer.
-        let mut in_front: (Option<HWND>, Option<HWND>, Option<HWND>) = (None, None, None);
+        // The windows in front the panel and the widgets give way to: the settings, the page beside.
+        let mut in_front: (Option<HWND>, Option<HWND>) = (None, None);
         let mut msg = MSG::default();
         // In motion: when the next frame is due, with the screen's. Messages
         // that come before are taken as they come, not each followed by a
@@ -797,7 +791,7 @@ impl Controller {
                 // they are drawn, a panel came over it and went under it by turns).
                 let menu_up = menu.as_ref().map(|(open, _)| open.hwnd());
                 for panel in panels.iter_mut() {
-                    let give_way = menu_up.or(in_front.0.or(in_front.2).filter(|_| !panel.forward));
+                    let give_way = menu_up.or(in_front.0.filter(|_| !panel.forward));
                     if panel.window.gives_way_to() != give_way {
                         panel.window.yield_to(give_way);
                     }
@@ -1316,18 +1310,14 @@ impl Controller {
                 // widgets to the page while it is up, else to the settings.
                 SETTINGS_FRONT => {
                     let front = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
-                    if msg.lParam.0 == 0 || msg.lParam.0 == 2 {
-                        if msg.lParam.0 == 0 {
-                            in_front.0 = front;
-                        } else {
-                            in_front.2 = front;
-                        }
+                    if msg.lParam.0 == 0 {
+                        in_front.0 = front;
                         for panel in panels.iter_mut() {
                             // (Come in front again: given way to again, as it was pressed before.)
                             if front.is_some() {
                                 panel.forward = false;
                             }
-                            panel.settings_front(front.or(in_front.0).or(in_front.2));
+                            panel.settings_front(front);
                         }
                     } else {
                         in_front.1 = front;
@@ -1338,7 +1328,7 @@ impl Controller {
                             }
                         }
                     }
-                    widgets.settings_front(in_front.1.or(in_front.0).or(in_front.2));
+                    widgets.settings_front(in_front.1.or(in_front.0));
                 }
                 RESTYLE => {
                     for panel in panels.iter_mut() {

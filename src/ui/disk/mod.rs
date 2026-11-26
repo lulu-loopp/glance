@@ -1,52 +1,34 @@
-//! The disk organizer: a window of its own (as the settings window is drawn: Mica, Windows 11's cards) showing what a
-//! drive holds as a map of blocks, each file its kind's colour, each folder what it holds, two levels at a time (see
-//! `disk::map`); beside it the largest files, the files by type and by time; under them a place to gather what is to
-//! go, moved to the Recycle Bin together. Opened from a drive's row in the panel's Storage, from a folder found in
-//! search, or by its name in search. Everything it shows is read from the drive's search index (see `worker`): no
-//! drive is scanned.
+//! The disk organizer: a page of the settings window (see `settings_window`, `Page::Disk`) showing what a drive holds
+//! as a map of blocks, each file its kind's colour, each folder what it holds, two levels at a time (see `disk::map`);
+//! beside it the largest files, the files by type and by time; under them a place to gather what is to go, moved to
+//! the Recycle Bin together. The drives are its tabs. Opened from a drive's row in the panel's Storage, from a folder
+//! found in search, or by its name in search. Everything it shows is read from the drive's search index (see
+//! `worker`): no drive is scanned.
 
 mod input;
 mod paint;
 mod worker;
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, BOOL, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS};
-use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_ESCAPE};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetSystemMetrics, IsWindowVisible, LoadCursorW, LoadImageW, MsgWaitForMultipleObjects, PeekMessageW, PostMessageW, RegisterClassExW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CS_DBLCLKS, HICON, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IMAGE_ICON, LR_SHARED, MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT,
-    SM_CXICON, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
-    WS_OVERLAPPEDWINDOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW, WM_APP};
 
 use crate::disk::map::{Block, Item, Rect};
 use crate::disk::{Filter, Kind, Light, What};
-use crate::ui::gfx::{self, Gfx, Surface};
+use crate::ui::gfx::Frame;
 use crate::ui::text::Lang;
 use worker::{Ask, Info, Shown, Told, Worker};
 
-/// The window's size as it opens, and the least it may be sized to (DIPs).
-const SIZE: (f32, f32) = (1100.0, 720.0);
-const LEAST: (f32, f32) = (980.0, 600.0);
-
-/// The window's own messages: asked for again (see `open`), a reading come (see `worker`), an act done (see `Acted`).
-const AGAIN: u32 = WM_APP + 1;
-const SHOWN: u32 = WM_APP + 2;
-const ACTED: u32 = WM_APP + 3;
+/// What the window the organizer is in is told: a reading come (see `worker`), an act done (see `Acted`). Taken there
+/// by `took_shown` and `took_acts`.
+pub const SHOWN: u32 = WM_APP + 52;
+pub const ACTED: u32 = WM_APP + 53;
 
 /// How long what is gathered waits, once it is to go, for its going to be undone (see `Pending`); how long the word
 /// that it went stays; how long a word said stays (see `Said`).
@@ -59,14 +41,13 @@ const ZOOM: Duration = Duration::from_millis(380);
 const FOLD: Duration = Duration::from_millis(420);
 const FADE: Duration = Duration::from_millis(260);
 
-static WINDOW: AtomicIsize = AtomicIsize::new(0);
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// What the organizer was last asked to show, till the settings window takes it (see `take_asked`).
 static ASKED: Mutex<Option<Asked>> = Mutex::new(None);
-/// What a shell thread did (see `act`), for the window to take in as it is told (`ACTED`).
+/// What a shell thread did (see `act`), for the organizer to take in as its window is told (`ACTED`).
 static ACTS: Mutex<Vec<Acted>> = Mutex::new(Vec::new());
 
-/// What the window is asked to show: a drive (none: the one shown last, or the system's), a folder on it, and where it
-/// was asked from (physical px: it pours out of there, see `genie`).
+/// What the organizer is asked to show: a drive (none: the one shown last, or the system's), a folder on it, and where
+/// it was asked from (physical px: the settings pour out of there, see `genie`).
 #[derive(Clone, Debug, Default)]
 pub struct Asked {
     pub root: Option<String>,
@@ -95,133 +76,23 @@ pub fn shows(root: &str) -> bool {
     crate::search::standing().iter().any(|standing| standing.root.eq_ignore_ascii_case(root))
 }
 
+/// The settings window opened (or raised) at the organizer's page, to show what `asked` says.
 fn open(asked: Asked) {
+    let place = asked.place;
     *ASKED.lock().unwrap() = Some(asked);
-    let window = WINDOW.load(Ordering::Acquire);
-    if window != 0 {
-        let _ = unsafe { PostMessageW(Some(HWND(window as *mut _)), AGAIN, WPARAM(0), LPARAM(0)) };
-        return;
-    }
-    if RUNNING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    if std::thread::Builder::new().name("disk organizer".into()).spawn(run).is_err() {
-        RUNNING.store(false, Ordering::Release);
-    }
+    crate::ui::settings_window::open_at_disk(place);
 }
 
-/// The window's thread: the window made as it is asked for, up till it is closed; again where it was asked for as it
-/// closed.
-fn run() {
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-    }
-    loop {
-        let asked = ASKED.lock().unwrap().take();
-        if let Some(asked) = asked {
-            up(asked);
-        }
-        RUNNING.store(false, Ordering::Release);
-        if ASKED.lock().unwrap().is_some() && !RUNNING.swap(true, Ordering::AcqRel) {
-            continue;
-        }
-        break;
-    }
-    UI.with(|ui| drop(ui.borrow_mut().take()));
-    gfx::let_go();
+/// What the organizer was asked to show and has not yet: none, asked for by its page alone.
+pub fn take_asked() -> Option<Asked> {
+    ASKED.lock().unwrap().take()
 }
 
-thread_local! {
-    static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
-    /// The window destroyed: its state let go of once the message that told it is done.
-    static GONE: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Runs `act` on the window's state, unless it is in use further up this thread's stack.
-fn with_ui<R>(act: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-    UI.with(|cell| cell.try_borrow_mut().ok().and_then(|mut ui| ui.as_mut().map(act)))
-}
-
-/// The window made as `asked`, and up till it is gone.
-fn up(asked: Asked) {
-    GONE.set(false);
-    let Some(hwnd) = make(&asked) else { return };
-    WINDOW.store(hwnd.0 as isize, Ordering::Release);
-    let mut msg = MSG::default();
-    let timer = unsafe {
-        CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0).or_else(|_| CreateWaitableTimerExW(None, None, 0, TIMER_ALL_ACCESS.0)).ok().map(|timer| windows_core::Owned::new(timer))
-    };
-    loop {
-        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-            if msg.message == WM_QUIT {
-                break;
-            }
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-        if GONE.get() {
-            WINDOW.store(0, Ordering::Release);
-            UI.with(|ui| drop(ui.borrow_mut().take()));
-            return;
-        }
-        let due = tick(Instant::now()).unwrap_or(Duration::from_secs(1));
-        if !due.is_zero() {
-            let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
-            match timer.as_deref().copied().filter(|_| due < Duration::from_secs(1)) {
-                Some(timer) => unsafe {
-                    let _ = SetWaitableTimer(timer, &-((due.as_nanos() / 100) as i64).max(1), 0, None, None, false);
-                    MsgWaitForMultipleObjects(Some(&[timer]), false, ms, QS_ALLINPUT);
-                },
-                None => unsafe {
-                    MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
-                },
-            }
-        }
-    }
-}
-
-/// The next frame drawn if it is due (the genie's, pouring, or the window's), and how long till the next.
-fn tick(now: Instant) -> Option<Duration> {
-    let poured = with_ui(|ui| {
-        let genie = ui.genie.as_mut()?;
-        if genie.draw(now) {
-            return Some(false);
-        }
-        let opened = genie.opening();
-        ui.genie = None;
-        if opened {
-            super::genie::reveal(ui.hwnd);
-        }
-        Some(!opened)
-    })
-    .flatten();
-    match poured {
-        Some(false) => return Some(Duration::ZERO),
-        // Poured into its place: closed.
-        Some(true) => {
-            let hwnd = with_ui(|ui| ui.hwnd)?;
-            let _ = unsafe { DestroyWindow(hwnd) };
-            return Some(Duration::ZERO);
-        }
-        None => {}
-    }
-    with_ui(|ui| {
-        ui.timers(now);
-        if now >= ui.next_frame {
-            ui.draw(now);
-        }
-        ui.next_frame.saturating_duration_since(Instant::now())
-    })
-}
-
-/// How the window draws: Windows 11's colours, as the settings window takes them (see `settings_window::Palette`),
+/// How the organizer draws: Windows 11's colours, as the settings window takes them (see `settings_window::Palette`),
 /// and the map's own (each kind's, after Explorer's icons and Fluent's).
 #[derive(Clone)]
 struct Palette {
     dark: bool,
-    window: crate::ui::canvas::Color,
     text: crate::ui::canvas::Color,
     text2: crate::ui::canvas::Color,
     text3: crate::ui::canvas::Color,
@@ -277,7 +148,6 @@ impl Palette {
         if dark {
             Palette {
                 dark,
-                window: Color::hex(0x202020, 1.0),
                 text: white(1.0),
                 text2: white(0.76),
                 text3: white(0.5),
@@ -307,7 +177,6 @@ impl Palette {
         } else {
             Palette {
                 dark,
-                window: Color::hex(0xF3F3F3, 1.0),
                 text: black(0.9),
                 text2: black(0.6),
                 text3: black(0.44),
@@ -448,6 +317,8 @@ enum MenuOf {
     Sizes,
     /// The folders on the way to the one shown not shown in the path: each's name and path, the nearest first.
     Crumbs(Vec<(String, PathBuf)>),
+    /// The drives whose tabs do not fit (by their place among the drives).
+    Drives(Vec<usize>),
     /// What is gathered and not shown in the foot.
     Gathered(Vec<usize>),
 }
@@ -491,7 +362,10 @@ enum Draggable {
 /// What a press on the window's spots does (see `input`).
 #[derive(Clone, Debug, PartialEq)]
 enum Target {
+    /// A drive's tab, the menu of those that do not fit, a drive in it.
     Drive(usize),
+    DriveMore(Vec<usize>),
+    MenuDrive(usize),
     Back,
     Crumb(PathBuf),
     CrumbMore(Vec<(String, PathBuf)>),
@@ -549,21 +423,15 @@ enum Acted {
     Emptied { bytes: u64, done: bool },
 }
 
-/// The window's state, on its thread.
-struct Ui {
+/// The organizer's state, on the settings window's thread: kept while that window is open, whichever of its pages is
+/// shown (what is gathered stays gathered, what waits to go goes as its time is up).
+pub struct Organizer {
+    /// The window it is drawn in, told what its threads read and did.
     hwnd: HWND,
-    gfx: Rc<Gfx>,
-    surface: Option<Surface>,
-    mica: bool,
-    scale: f32,
     lang: Lang,
     palette: Palette,
-    genie: Option<super::genie::Genie>,
-    place: Option<RECT>,
     next_frame: Instant,
     last_frame: Instant,
-    by_hand: bool,
-    drawn_size: Option<(u32, u32)>,
     worker: Worker,
     serial: u64,
     /// The drives offered, the one shown, the folder shown (as asked: shown as soon as it is read).
@@ -588,6 +456,8 @@ struct Ui {
     peek: Option<Light>,
     tab: Tab,
     tab_mark: (f32, f32),
+    /// Where the mark under the drive shown's tab is (its left, eased toward it).
+    drive_mark: Option<f32>,
     scroll: f32,
     scroll_to: f32,
     gathered: Vec<Gathered>,
@@ -613,54 +483,37 @@ struct Ui {
     clouds: Vec<PathBuf>,
 }
 
-/// The window made, as `asked`, drawn and shown.
-fn make(asked: &Asked) -> Option<HWND> {
-    let (work, scale) = crate::panel::work_area_at_cursor()?;
-    let scale = scale as f32;
-    let gfx = gfx::for_area(work).ok()?;
-    unsafe {
-        let instance = GetModuleHandleW(None).ok()?;
-        let icon = |size| LoadImageW(Some(instance.into()), PCWSTR(1 as _), IMAGE_ICON, size, size, LR_SHARED).ok().map(|h| HICON(h.0));
-        let class = WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            style: CS_DBLCLKS,
-            lpfnWndProc: Some(procedure),
-            hInstance: instance.into(),
-            lpszClassName: w!("GlanceDisk"),
-            hCursor: LoadCursorW(None, IDC_ARROW).ok()?,
-            hIcon: icon(GetSystemMetrics(SM_CXICON)).unwrap_or_default(),
-            hIconSm: icon(GetSystemMetrics(SM_CXSMICON)).unwrap_or_default(),
-            ..Default::default()
-        };
-        RegisterClassExW(&class);
-        let (wide, high) = ((work.right - work.left) as f32, (work.bottom - work.top) as f32);
-        let width = (SIZE.0 * scale).min(wide).round() as i32;
-        let height = (SIZE.1 * scale).min(high).round() as i32;
-        let (x, y) = (work.left + (wide as i32 - width) / 2, work.top + (high as i32 - height) / 2);
-        let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, w!("GlanceDisk"), w!("Glance"), WS_OVERLAPPEDWINDOW, x, y, width, height, None, None, Some(instance.into()), None).ok()?;
-        let mica = crate::ui::settings_window::windows_build() >= crate::ui::settings_window::FIRST_MICA_BUILD;
-        if mica {
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_MAINWINDOW as *const _ as *const _, 4);
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
-        }
-        let surface = Surface::new(&gfx, hwnd).ok()?;
-        let lang = crate::update::language();
-        let worker = Worker::start(hwnd, SHOWN);
-        let mut ui = Ui {
+impl Drop for Organizer {
+    /// Its window closed: what waits to go goes now.
+    fn drop(&mut self) {
+        self.commit_now();
+    }
+}
+
+/// The date a file time (100 ns since 1601) falls on by this PC's clock: its year, month and day.
+fn local_date(written: i64) -> (u16, u16, u16) {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let file = FILETIME { dwLowDateTime: written as u32, dwHighDateTime: (written >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    let read = unsafe { FileTimeToSystemTime(&file, &mut utc).ok().and_then(|_| SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()) };
+    match read {
+        Some(()) => (local.wYear, local.wMonth, local.wDay),
+        None => (utc.wYear, utc.wMonth, utc.wDay),
+    }
+}
+
+impl Organizer {
+    /// The organizer, drawn in the window `hwnd` (told there what its threads read and did: `SHOWN`, `ACTED`), light or
+    /// `dark`, in `lang`. Nothing shown till it is turned to a drive (see `turn`).
+    pub fn new(hwnd: HWND, dark: bool, lang: Lang) -> Organizer {
+        Organizer {
             hwnd,
-            gfx,
-            surface: Some(surface),
-            mica,
-            scale: GetDpiForWindow(hwnd) as f32 / 96.0,
             lang,
-            palette: Palette::new(false),
-            genie: None,
-            place: asked.place,
+            palette: Palette::new(dark),
             next_frame: Instant::now(),
             last_frame: Instant::now(),
-            by_hand: false,
-            drawn_size: None,
-            worker,
+            worker: Worker::start(hwnd, SHOWN),
             serial: 0,
             drives: crate::disk::act::drives(),
             root: String::new(),
@@ -680,6 +533,7 @@ fn make(asked: &Asked) -> Option<HWND> {
             peek: None,
             tab: Tab::Largest,
             tab_mark: (0.0, 0.0),
+            drive_mark: None,
             scroll: 0.0,
             scroll_to: 0.0,
             gathered: Vec::new(),
@@ -698,219 +552,33 @@ fn make(asked: &Asked) -> Option<HWND> {
             map_at: Rect::default(),
             foot_at: Rect::default(),
             clouds: crate::disk::Places::of_this_pc().onedrive,
-        };
-        ui.restyle();
-        ui.turn(asked);
-        ui.draw(Instant::now());
-        UI.with(|cell| *cell.borrow_mut() = Some(ui));
-        let pours = super::genie::wanted(asked.place);
-        if pours.is_some() {
-            super::genie::hide_to_open(hwnd);
         }
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        if !IsWindowVisible(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-        }
-        let _ = SetForegroundWindow(hwnd);
-        if let Some(place) = pours {
-            match super::genie::opening(hwnd, place) {
-                Some(genie) => {
-                    with_ui(|ui| ui.genie = Some(genie));
-                }
-                None => super::genie::reveal(hwnd),
-            }
-        }
-        Some(hwnd)
     }
-}
 
-fn point(lparam: LPARAM) -> (i32, i32) {
-    ((lparam.0 & 0xFFFF) as u16 as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32)
-}
-
-unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match message {
-        AGAIN => {
-            let asked = ASKED.lock().unwrap().take();
-            if let Some(asked) = asked {
-                with_ui(|ui| ui.turn(&asked));
-                let _ = unsafe { SetForegroundWindow(hwnd) };
-            }
-            LRESULT(0)
+    /// Light or `dark`, in `lang`, as its window is now.
+    pub fn restyle(&mut self, dark: bool, lang: Lang) {
+        if self.palette.dark != dark {
+            self.palette = Palette::new(dark);
         }
-        SHOWN => {
-            with_ui(Ui::take_shown);
-            LRESULT(0)
-        }
-        ACTED => {
-            let acts = std::mem::take(&mut *ACTS.lock().unwrap());
-            with_ui(|ui| acts.into_iter().for_each(|acted| ui.acted(acted)));
-            LRESULT(0)
-        }
-        WM_GETMINMAXINFO => {
-            let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
-            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-            info.ptMinTrackSize = POINT { x: (LEAST.0 * scale).round() as i32, y: (LEAST.1 * scale).round() as i32 };
-            LRESULT(0)
-        }
-        WM_DPICHANGED => {
-            let suggested = unsafe { &*(lparam.0 as *const RECT) };
-            with_ui(|ui| ui.scale = ((wparam.0 & 0xFFFF) as f32) / 96.0);
-            let _ = unsafe { SetWindowPos(hwnd, None, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE) };
-            LRESULT(0)
-        }
-        WM_ENTERSIZEMOVE => {
-            with_ui(|ui| ui.by_hand = true);
-            LRESULT(0)
-        }
-        WM_EXITSIZEMOVE => {
-            with_ui(|ui| {
-                ui.by_hand = false;
-                ui.draw(Instant::now());
-            });
-            LRESULT(0)
-        }
-        WM_SIZE => {
-            let size = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
-            if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
-                with_ui(|ui| {
-                    if ui.drawn_size != Some(size) {
-                        ui.draw(Instant::now());
-                    }
-                });
-            }
-            LRESULT(0)
-        }
-        WM_SETTINGCHANGE => {
-            with_ui(Ui::restyle);
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
-        WM_MOUSEMOVE => {
-            let (x, y) = point(lparam);
-            with_ui(|ui| {
-                if ui.pointer.is_none() {
-                    let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
-                    let _ = unsafe { TrackMouseEvent(&mut track) };
-                }
-                ui.moved(x as f32 / ui.scale, y as f32 / ui.scale);
-            });
-            LRESULT(0)
-        }
-        WM_MOUSELEAVE => {
-            with_ui(Ui::left);
-            LRESULT(0)
-        }
-        WM_LBUTTONDOWN => {
-            let (x, y) = point(lparam);
-            unsafe { SetCapture(hwnd) };
-            with_ui(|ui| ui.pressed(x as f32 / ui.scale, y as f32 / ui.scale, false));
-            LRESULT(0)
-        }
-        WM_LBUTTONDBLCLK => {
-            let (x, y) = point(lparam);
-            unsafe { SetCapture(hwnd) };
-            with_ui(|ui| ui.pressed(x as f32 / ui.scale, y as f32 / ui.scale, true));
-            LRESULT(0)
-        }
-        // (Let go of before the capture is: letting go of it tells the window at once, which ends the press.)
-        WM_LBUTTONUP => {
-            let (x, y) = point(lparam);
-            with_ui(|ui| ui.released(x as f32 / ui.scale, y as f32 / ui.scale));
-            let _ = unsafe { ReleaseCapture() };
-            LRESULT(0)
-        }
-        // The capture taken by another window: what was pressed or dragged is let go of.
-        WM_CAPTURECHANGED if lparam.0 != hwnd.0 as isize => {
-            with_ui(|ui| {
-                ui.press = None;
-                ui.drag = None;
-                ui.next_frame = Instant::now();
-            });
-            LRESULT(0)
-        }
-        WM_MOUSEWHEEL => {
-            let delta = (wparam.0 >> 16) as u16 as i16;
-            with_ui(|ui| ui.wheel(delta));
-            LRESULT(0)
-        }
-        WM_KEYDOWN => match VIRTUAL_KEY(wparam.0 as u16) {
-            VK_ESCAPE => {
-                if with_ui(Ui::escape).unwrap_or(false) {
-                    let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
-                }
-                LRESULT(0)
-            }
-            VK_BACK => {
-                with_ui(Ui::up_a_folder);
-                LRESULT(0)
-            }
-            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
-        },
-        WM_ACTIVATE => {
-            let front = wparam.0 & 0xFFFF != WA_INACTIVE as usize;
-            unsafe {
-                let _ = SetWindowPos(hwnd, Some(if front { HWND_TOPMOST } else { HWND_NOTOPMOST }), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-            }
-            crate::app().controller.disk_front(front.then_some(hwnd));
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
-        // Closed: what waits to go goes now, and the window pours into the place it was asked from, if it can.
-        WM_CLOSE => {
-            if with_ui(Ui::pour_away).unwrap_or(false) {
-                return LRESULT(0);
-            }
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
-        WM_DESTROY => {
-            crate::app().controller.disk_front(None);
-            GONE.set(true);
-            LRESULT(0)
-        }
-        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
-    }
-}
-
-/// The date a file time (100 ns since 1601) falls on by this PC's clock: its year, month and day.
-fn local_date(written: i64) -> (u16, u16, u16) {
-    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-    let file = FILETIME { dwLowDateTime: written as u32, dwHighDateTime: (written >> 32) as u32 };
-    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
-    let read = unsafe { FileTimeToSystemTime(&file, &mut utc).ok().and_then(|_| SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()) };
-    match read {
-        Some(()) => (local.wYear, local.wMonth, local.wDay),
-        None => (utc.wYear, utc.wMonth, utc.wDay),
-    }
-}
-
-impl Ui {
-    /// Follows the system's light or dark, and its language.
-    fn restyle(&mut self) {
-        let app = crate::app();
-        let theme = crate::ui::prefs::Prefs::resolve(&app.settings.lock().unwrap().view, &app.controller.known_modules()).theme;
-        let dark = match theme {
-            crate::ui::prefs::ThemePref::Light => false,
-            crate::ui::prefs::ThemePref::Dark => true,
-            _ => crate::os::apps_dark(),
-        };
-        self.palette = Palette::new(dark);
-        self.lang = crate::update::language();
-        unsafe {
-            let dark = BOOL::from(dark);
-            let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
-            let _ = SetWindowTextW(self.hwnd, &HSTRING::from(self.lang.pick("磁盘整理", "Disk Organizer")));
-        }
+        self.lang = lang;
         self.next_frame = Instant::now();
     }
 
-    /// Turned to what `asked` says: a drive (its root, a folder on it), as it is now.
-    fn turn(&mut self, asked: &Asked) {
+    /// When it is to be drawn next: at once while something moves or the pointer did, else as a timer is due.
+    pub fn next_frame(&self) -> Instant {
+        self.next_frame
+    }
+
+    /// Turned to what `asked` says: a drive (its root, a folder on it), as it is now; with nothing asked, to the drive
+    /// shown last (as it was left, if it is shown still).
+    pub fn turn(&mut self, asked: &Asked) {
         self.drives = crate::disk::act::drives();
         let last = crate::app().settings.lock().unwrap().disk_drive.clone();
         let system = std::env::var("SystemDrive").map(|drive| format!("{}\\", drive.to_ascii_uppercase())).unwrap_or_else(|_| "C:\\".into());
         let root = asked
             .root
             .clone()
+            .or((!self.root.is_empty()).then(|| self.root.clone()))
             .or(last)
             .filter(|root| self.drives.iter().any(|drive| drive.root.eq_ignore_ascii_case(root)))
             .or_else(|| self.drives.iter().find(|drive| drive.root.eq_ignore_ascii_case(&system)).map(|drive| drive.root.clone()))
@@ -920,14 +588,15 @@ impl Ui {
             self.next_frame = Instant::now();
             return;
         };
-        let folder = asked.folder.clone().unwrap_or_else(|| PathBuf::from(&root));
-        if asked.place.is_some() {
-            self.place = asked.place;
-        }
         if !root.eq_ignore_ascii_case(&self.root) {
             self.to_drive(&root);
         }
-        self.go_to(folder);
+        match (asked.folder.clone(), &asked.root) {
+            (Some(folder), _) => self.go_to(folder),
+            // (Turned to with no drive asked: as it was left, what it showed read anew.)
+            (None, None) if self.shown.is_some() => self.ask(),
+            (None, _) => self.go_to(PathBuf::from(&root)),
+        }
     }
 
     /// The drive at `root` shown, from its root: what was gathered on the one before goes (what waits to go, now).
@@ -975,7 +644,7 @@ impl Ui {
     }
 
     /// The folder above the one shown, shown.
-    fn up_a_folder(&mut self) {
+    pub fn up_a_folder(&mut self) {
         if let Some(parent) = self.focus.parent().filter(|_| !self.at_root()) {
             self.go_to(parent.to_path_buf());
         }
@@ -986,7 +655,7 @@ impl Ui {
     }
 
     /// Esc: a menu or a card closed, else the folder above shown; at the drive's root, whether the window is to close.
-    fn escape(&mut self) -> bool {
+    pub fn escape(&mut self) -> bool {
         self.next_frame = Instant::now();
         if self.menu.take().is_some() || self.plate.take().is_some() {
             return false;
@@ -1012,16 +681,20 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
+    /// Its window's size (DIPs).
     fn client(&self) -> (f32, f32) {
         let mut rect = RECT::default();
-        unsafe {
+        let scale = unsafe {
             let _ = GetClientRect(self.hwnd, &mut rect);
-        }
-        ((rect.right - rect.left) as f32 / self.scale, (rect.bottom - rect.top) as f32 / self.scale)
+            GetDpiForWindow(self.hwnd)
+        } as f32
+            / 96.0;
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        ((rect.right - rect.left) as f32 / scale, (rect.bottom - rect.top) as f32 / scale)
     }
 
     /// What the reading thread read, taken in: the map laid out anew from it, moving from the last.
-    fn take_shown(&mut self) {
+    pub fn take_shown(&mut self) {
         let Some(told) = self.worker.take() else { return };
         match told {
             // (Of what was asked before: what is asked now comes after.)
@@ -1149,7 +822,7 @@ impl Ui {
     }
 
     /// Timers: what waits to go, going once its time to be undone is past; what was said, and that it went, unsaid.
-    fn timers(&mut self, now: Instant) {
+    pub fn timers(&mut self, now: Instant) {
         if self.pending.as_ref().is_some_and(|pending| now >= pending.since + UNDO_FOR) {
             self.commit_now();
         }
@@ -1243,78 +916,31 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
-    /// Asked to close: what waits to go goes now; poured into the place it was asked from, if it can be. Whether it is
-    /// (else it closes at once).
-    fn pour_away(&mut self) -> bool {
-        self.commit_now();
-        if self.genie.as_ref().is_some_and(|genie| !genie.opening()) {
-            return true;
-        }
-        if self.genie.take().is_some() {
-            super::genie::reveal(self.hwnd);
-        }
-        let Some(place) = super::genie::wanted(self.place).and_then(|place| super::genie::back_into(self.hwnd, place)) else { return false };
-        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(self.hwnd) }.as_bool() {
-            return false;
-        }
-        let Some(genie) = super::genie::closing(self.hwnd, place, |_| {}) else { return false };
-        self.genie = Some(genie);
-        WINDOW.store(0, Ordering::Release);
-        true
-    }
-
-    /// The window drawn as it is now.
-    fn draw(&mut self, now: Instant) {
+    /// Drawn on `frame` (the window's, from its corner, the settings' pages' list left of it) as it is now: whether
+    /// anything moves still. When it is to be drawn next is kept (see `next_frame`).
+    pub fn draw(&mut self, frame: &Frame, now: Instant) -> bool {
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.064);
         self.last_frame = now;
-        if !self.follow_device() {
-            self.next_frame = now + Duration::from_millis(250);
-            return;
-        }
-        let mut rect = RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rect);
-        }
-        let size = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
-        let gfx = self.gfx.clone();
-        let mut surface = self.surface.take().unwrap();
-        let sizing = gfx::sizing(self.by_hand);
-        let mut moving = false;
-        let drawn = surface.draw(&gfx, size, self.scale, |frame| {
-            frame.origin(0.0, 0.0);
-            moving = self.paint(frame, now, dt);
-        });
-        drop(sizing);
-        self.surface = Some(surface);
-        self.drawn_size = drawn.is_ok().then_some(size);
-        if let Err(error) = &drawn {
-            gfx::failed("disk organizer", &self.gfx, Some(error));
-            self.next_frame = now + Duration::from_millis(250);
-            return;
-        }
-        self.gfx.sweep();
+        let moving = self.paint(frame, now, dt);
         // Moving: the next frame at once (the screen's next); else when a timer is due, or a while.
         let due = [self.pending.as_ref().map(|pending| pending.since + UNDO_FOR), self.said.as_ref().map(|said| said.since + SAID_FOR), self.went.as_ref().map(|went| went.until)].into_iter().flatten().min();
         self.next_frame = if moving || self.pending.is_some() { now + Duration::from_millis(8) } else { due.unwrap_or(now + Duration::from_secs(3600)).max(now + Duration::from_millis(8)) };
+        moving
     }
 
-    fn follow_device(&mut self) -> bool {
-        let Ok(current) = gfx::for_window(self.hwnd) else { return false };
-        if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
-            return true;
+    /// What shell threads did, taken in, as its window is told (`ACTED`).
+    pub fn took_acts(&mut self) {
+        let acts = std::mem::take(&mut *ACTS.lock().unwrap());
+        for acted in acts {
+            self.acted(acted);
         }
-        self.surface = None;
-        match Surface::new(&current, self.hwnd) {
-            Ok(surface) => {
-                self.surface = Some(surface);
-                self.gfx = current;
-                true
-            }
-            Err(error) => {
-                gfx::failed("disk organizer", &current, Some(&error));
-                false
-            }
-        }
+    }
+
+    /// What was pressed or dragged let go of where it is: the pointer taken by another window.
+    pub fn pointer_lost(&mut self) {
+        self.press = None;
+        self.drag = None;
+        self.next_frame = Instant::now();
     }
 }
 
@@ -1489,5 +1115,15 @@ mod tests {
         let to = Rect { x: 10.0, y: 20.0, w: 50.0, h: 100.0 };
         assert_eq!(mapped(from, to, from), to);
         assert_eq!(mapped(from, to, Rect { x: 50.0, y: 25.0, w: 10.0, h: 5.0 }), Rect { x: 35.0, y: 70.0, w: 5.0, h: 10.0 });
+    }
+
+    #[test]
+    fn what_is_under_a_folder_is_told_by_whole_names() {
+        let under = |path: &str, top: &str| paint::under(Path::new(path), Path::new(top));
+        assert!(under(r"D:\Research\why-drift\experiments\a.bin", r"D:\Research\why-drift\experiments"));
+        assert!(under(r"D:\Research\why-drift\experiments", r"D:\Research\why-drift\experiments"));
+        assert!(under(r"D:\Research", r"D:\"));
+        assert!(!under(r"D:\Research\why-drift\experiments-old", r"D:\Research\why-drift\experiments"));
+        assert!(!under(r"D:\Research", r"D:\Research\why-drift"));
     }
 }

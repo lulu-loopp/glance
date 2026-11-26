@@ -1,6 +1,6 @@
-//! The disk organizer drawn: its drives at the left, the drive's use above, the map and its legend, the lists beside
-//! it, the place what is to go is gathered in under them, and what is over them (a block's tag, a card, a menu, a word
-//! said), as the mockup (v9) draws them.
+//! The disk organizer drawn, as a page of the settings window (right of its pages' list): its title with the drive's
+//! use, the drives as its tabs, the map and its legend, the lists beside it, the place what is to go is gathered in
+//! under them, and what is over them (a block's tag, a card, a menu, a word said), as the mockup draws them.
 
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
@@ -15,9 +15,15 @@ use crate::ui::canvas::{Align, Canvas, Color, Family, Font, Point};
 use crate::ui::gfx::{rect, Frame};
 use crate::ui::icons::Icon;
 
-pub(super) const NAV_X: f32 = 16.0;
-pub(super) const NAV_W: f32 = 176.0;
+/// Where the page begins, as the settings' pages do (their list's width and the page's margin), and its rows from the
+/// top: the title (the drive's use at its right), the drives' tabs, the way to the folder shown with the filters, the
+/// cards.
 pub(super) const PAGE_X: f32 = 236.0;
+const TITLE_Y: f32 = 28.0;
+const TABS_Y: f32 = 80.0;
+const TABS_ROW: f32 = 48.0;
+const TOOLS_Y: f32 = 136.0;
+const CARDS_Y: f32 = 180.0;
 pub(super) const SIDE_W: f32 = 272.0;
 pub(super) const ROW_H: f32 = 44.0;
 const TABS_H: f32 = 44.0;
@@ -26,6 +32,8 @@ const CARD_RADIUS: f32 = 8.0;
 const CHIP_H: f32 = 24.0;
 const BUTTON_H: f32 = 32.0;
 const PLATE_W: f32 = 320.0;
+/// The mark under the tab shown (its width), as the settings' own tabs' is.
+const TAB_MARK: f32 = 16.0;
 const TAG_W: f32 = 280.0;
 /// How dim what is not lit is drawn, and a ground then.
 const DIM: f32 = 0.28;
@@ -52,13 +60,13 @@ pub(super) struct Geo {
 
 pub(super) fn geo(width: f32, height: f32) -> Geo {
     let page_w = (width - PAGE_X - 36.0).max(480.0);
-    let card_h = (height - 224.0).max(220.0);
+    let card_h = (height - CARDS_Y - 96.0).max(220.0);
     Geo {
         width,
         height,
         page_w,
-        card: Rect { x: PAGE_X, y: 128.0, w: page_w - SIDE_W - 16.0, h: card_h },
-        side: Rect { x: PAGE_X + page_w - SIDE_W, y: 128.0, w: SIDE_W, h: card_h },
+        card: Rect { x: PAGE_X, y: CARDS_Y, w: page_w - SIDE_W - 16.0, h: card_h },
+        side: Rect { x: PAGE_X + page_w - SIDE_W, y: CARDS_Y, w: SIDE_W, h: card_h },
         foot: Rect { x: PAGE_X, y: height - 84.0, w: page_w, h: 56.0 },
     }
 }
@@ -125,7 +133,7 @@ pub(super) struct About {
     pub why_not: Option<String>,
 }
 
-impl Ui {
+impl Organizer {
     /// What a block of `shown` (its item `item`) is.
     pub(super) fn about(&self, shown: &Shown, item: &Item) -> About {
         let lang = self.lang;
@@ -226,7 +234,7 @@ impl Ui {
     /// Whether the file or folder at `path` is gathered to go, or in a folder that is (or is about to go).
     fn gathered_at(&self, path: &Path) -> bool {
         let pending = self.pending.iter().flat_map(|pending| pending.items.iter());
-        self.gathered.iter().chain(pending).chain(&self.going).any(|gathered| path == gathered.path || (gathered.folder && path.starts_with(&gathered.path)))
+        self.gathered.iter().chain(pending).chain(&self.going).any(|gathered| path == gathered.path || (gathered.folder && under(path, &gathered.path)))
     }
 
     /// The spot under the pointer as last drawn.
@@ -244,9 +252,6 @@ impl Ui {
         let palette = self.palette.clone();
         let (width, height) = self.client();
         let g = geo(width, height);
-        if !self.mica {
-            fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
-        }
         let hot = self.hot();
         // The legend's kind under the pointer lights the map while it is there.
         self.peek = match &hot {
@@ -255,12 +260,12 @@ impl Ui {
         };
         self.targets.clear();
         let mut moving = false;
-        self.paint_nav(frame, &palette, &hot);
+        self.paint_head(frame, &palette, g, dt, &mut moving);
         if self.root.is_empty() {
             self.paint_no_drive(frame, &palette, g);
-            return false;
+            return moving;
         }
-        self.paint_head(frame, &palette, g, dt, &mut moving);
+        moving |= self.paint_drives(frame, &palette, g, dt, &hot);
         self.paint_tools(frame, &palette, g, &hot);
         moving |= self.paint_map_card(frame, &palette, g, now, dt, &hot);
         moving |= self.paint_side(frame, &palette, g, dt, &hot);
@@ -274,41 +279,15 @@ impl Ui {
         let top = g.height / 2.0 - 30.0;
         frame.icon(Icon::Disk, Point { x: PAGE_X + g.page_w / 2.0, y: top }, 28.0, p.text3);
         centred(frame, lang.pick("没有可以显示的磁盘", "No drive to show"), body(16.0, 600.0), p.text, PAGE_X, top + 28.0, g.page_w);
-        centred(frame, lang.pick("磁盘整理读取搜索的索引，请先在设置中为磁盘开启搜索。", "The organizer reads search's index: turn search on for a drive in Settings first."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
+        centred(frame, lang.pick("磁盘整理读取搜索的索引，开启搜索后即可在这里查看磁盘。", "The organizer reads search's index: drives are shown here once search is on."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
     }
 
-    fn paint_nav(&mut self, frame: &Frame, p: &Palette, hot: &Option<Target>) {
-        let lang = self.lang;
-        frame.text(lang.pick("磁盘整理", "Disk Organizer"), display(20.0, 600.0), p.text, NAV_X + 12.0, 33.0, NAV_W, Align::Start);
-        frame.text(lang.pick("此电脑", "This PC"), body(12.0, 600.0), p.text3, NAV_X + 12.0, 92.0 - 4.0, NAV_W, Align::Start);
-        let drives = self.drives.clone();
-        for (at, drive) in drives.iter().enumerate() {
-            let r = Rect { x: NAV_X, y: 112.0 + at as f32 * 44.0, w: NAV_W, h: 40.0 };
-            let chosen = drive.root.eq_ignore_ascii_case(&self.root);
-            if chosen {
-                fill(frame, p.control, r.x, r.y, r.w, r.h, 6.0);
-                fill(frame, p.accent, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
-            } else if *hot == Some(Target::Drive(at)) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
-            }
-            frame.icon(Icon::Disk, Point { x: r.x + 14.0 + 8.0, y: r.y + r.h / 2.0 }, 16.0, p.text2);
-            let name = format!("{} ({}:)", drive.label, drive.letter());
-            let font = body(14.0, if chosen { 600.0 } else { 400.0 });
-            frame.text(&name, font, p.text, r.x + 46.0, frame.line_in(font, r.y, r.h), r.w - 46.0 - 22.0, Align::Start);
-            if drive.low() {
-                frame.fill_circle(p.signal, Point { x: r.x + r.w - 14.0, y: r.y + r.h / 2.0 }, 3.5);
-            }
-            self.spot(r, Target::Drive(at));
-        }
-    }
-
-    /// The drive's name and its use, above.
+    /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown.
     fn paint_head(&mut self, frame: &Frame, p: &Palette, g: Geo, dt: f32, moving: &mut bool) {
         let lang = self.lang;
-        let Some(drive) = self.drives.iter().find(|drive| drive.root.eq_ignore_ascii_case(&self.root)).cloned() else { return };
-        let title = format!("{} ({}:)", drive.label, drive.letter());
         let title_font = display(28.0, 600.0);
-        frame.text(&title, title_font, p.text, PAGE_X, frame.line_in(title_font, 28.0, 44.0), g.page_w - 300.0, Align::Start);
+        frame.text(lang.pick("磁盘整理", "Disk Organizer"), title_font, p.text, PAGE_X, frame.line_in(title_font, TITLE_Y, 44.0), g.page_w - 300.0, Align::Start);
+        let Some(drive) = self.drives.iter().find(|drive| drive.root.eq_ignore_ascii_case(&self.root)).cloned() else { return };
         let used = drive.total.saturating_sub(drive.free);
         // The meter eased toward what is used (what went shows going).
         if self.used_shown.0 != drive.root {
@@ -364,10 +343,82 @@ impl Ui {
         }
     }
 
+    /// The drives, a tab each, as the settings' own tabs are: the one shown marked under its middle by a short bar in
+    /// the accent, a drive nearly out of space by a dot after its name (told of under the pointer). Those that do not
+    /// fit in a menu, the one shown never among them. Whether the mark moves still.
+    fn paint_drives(&mut self, frame: &Frame, p: &Palette, g: Geo, dt: f32, hot: &Option<Target>) -> bool {
+        const BETWEEN: f32 = 28.0;
+        const DOT: f32 = 12.0;
+        const MORE: f32 = 32.0;
+        let font = |shown: bool| body(14.0, if shown { 600.0 } else { 400.0 });
+        let drives = self.drives.clone();
+        let chosen = drives.iter().position(|drive| drive.root.eq_ignore_ascii_case(&self.root));
+        let names: Vec<String> = drives.iter().map(|drive| format!("{} ({}:)", drive.label, drive.letter())).collect();
+        // (Each as wide as it is shown, bold: none moves as another is chosen.)
+        let widths: Vec<f32> = names.iter().zip(&drives).map(|(name, drive)| frame.measure(name, font(true)) + if drive.low() { DOT } else { 0.0 }).collect();
+        let room = g.page_w;
+        let mut shown: Vec<usize> = (0..drives.len()).collect();
+        let taken = |shown: &[usize], more: bool| shown.iter().map(|&at| widths[at] + BETWEEN).sum::<f32>() + if more { MORE } else { 0.0 };
+        while shown.len() > 1 && taken(&shown, shown.len() < drives.len()) > room {
+            // (The last that is not the one shown goes into the menu.)
+            let Some(last) = shown.iter().rposition(|&at| Some(at) != chosen) else { break };
+            shown.remove(last);
+        }
+        let hidden: Vec<usize> = (0..drives.len()).filter(|at| !shown.contains(at)).collect();
+        let h = TABS_ROW - 8.0;
+        let cy = TABS_Y + h / 2.0;
+        let mut x = PAGE_X;
+        let mut middle = None;
+        for &at in &shown {
+            let is_shown = Some(at) == chosen;
+            let target = Target::Drive(at);
+            let r = Rect { x: x - 12.0, y: TABS_Y, w: widths[at] + 24.0, h };
+            if *hot == Some(target.clone()) && !is_shown {
+                fill(frame, p.hover, r.x, r.y + 4.0, r.w, r.h - 8.0, 6.0);
+            }
+            let f = font(is_shown);
+            let name_w = frame.measure(&names[at], f);
+            frame.text(&names[at], f, if is_shown { p.text } else { p.text2 }, x, frame.line_in(f, TABS_Y, h), name_w + 4.0, Align::Start);
+            if drives[at].low() {
+                frame.fill_circle(p.signal, Point { x: x + name_w + DOT / 2.0 + 2.0, y: cy }, 3.0);
+            }
+            if is_shown {
+                middle = Some(x + name_w / 2.0);
+            }
+            self.spot(r, target);
+            x += widths[at] + BETWEEN;
+        }
+        if !hidden.is_empty() {
+            let r = Rect { x: x - 12.0, y: TABS_Y + 4.0, w: MORE, h: h - 8.0 };
+            let target = Target::DriveMore(hidden.clone());
+            if *hot == Some(target.clone()) {
+                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
+            }
+            frame.icon(Icon::Ellipsis, Point { x: r.x + r.w / 2.0, y: cy }, 16.0, p.text2);
+            // (A drive among them nearly out of space: its dot on the button too.)
+            if hidden.iter().any(|&at| drives[at].low()) {
+                frame.fill_circle(p.signal, Point { x: r.x + r.w - 6.0, y: r.y + 6.0 }, 3.0);
+            }
+            self.spot(r, target);
+        }
+        // The mark goes to the drive chosen, as the list's tabs' does.
+        let Some(middle) = middle else { return false };
+        let to = middle - TAB_MARK / 2.0;
+        let at = self.drive_mark.get_or_insert(to);
+        let k = 1.0 - (-dt * 1000.0 / 60.0).exp();
+        *at += (to - *at) * k;
+        let moving = (to - *at).abs() > 0.3;
+        if !moving {
+            *at = to;
+        }
+        fill(frame, p.accent, *at, TABS_Y + h - 2.0 - 3.0, TAB_MARK, 3.0, 1.5);
+        moving
+    }
+
     /// Back, the path to the folder shown, and the filters.
     fn paint_tools(&mut self, frame: &Frame, p: &Palette, g: Geo, hot: &Option<Target>) {
         let lang = self.lang;
-        let top = 84.0;
+        let top = TOOLS_Y;
         let right = PAGE_X + g.page_w;
         // The filters from the right.
         let preset = self.filter.old && self.filter.least == 1 << 30;
@@ -556,6 +607,9 @@ impl Ui {
         frame.clip(map.x - 2.0, map.y - 2.0, map.w + 4.0, map.h + 4.0);
         let hover_key = self.hover.and_then(|at| self.laid.get(at)).map(|placed| placed.key);
         let chosen = self.chosen.clone();
+        let any_gathered = !self.gathered.is_empty() || !self.going.is_empty() || self.pending.is_some();
+        // A ground's outline (under the pointer, or gathered), over what it holds: drawn once the blocks are.
+        let mut grounds_over: Vec<(Rect, Color, bool)> = Vec::new();
         for (placed, at, alpha, group) in blocks {
             let r = Rect { x: map.x + at.x, y: map.y + at.y, w: at.w, h: at.h };
             if r.w < 0.5 || r.h < 0.5 || alpha <= 0.01 {
@@ -589,7 +643,7 @@ impl Ui {
                 // A ground: its name above what it holds, its size at the right where there is room.
                 fill(frame, p.ground.alpha(p.ground.a * alpha * dim), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS);
                 if hovered {
-                    stroke_inside(frame, r, crate::disk::map::RADIUS, p.edge.alpha(p.edge.a * alpha));
+                    grounds_over.push((r, p.edge.alpha(p.edge.a * alpha), false));
                 }
                 let font = body(12.0, 600.0);
                 let size = size_text(about.bytes, lang);
@@ -605,19 +659,44 @@ impl Ui {
                 }
                 if gathered {
                     within(frame, r, crate::disk::map::RADIUS, alpha, || stripes(frame, r, p.stripe));
-                    frame.stroke_rounded_dashed(p.text2.alpha(p.text2.a * alpha), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
+                    grounds_over.push((r, p.text2.alpha(p.text2.a * alpha), true));
                 }
                 continue;
             }
             let fills = if hovered { &p.fill_hot } else { &p.fill };
             let pieces = &placed.block.pieces;
+            let piece_rect = |at: &Rect| Rect { x: r.x + at.x * r.w, y: r.y + at.y * r.h, w: at.w * r.w, h: at.h * r.h };
+            // What is gathered among its pieces (the block not gathered whole): striped as the block would be, each
+            // folder split into pieces outlined with all it holds, as deep as it is.
+            let (mut marked, mut outlined): (Vec<Rect>, Vec<Rect>) = (Vec::new(), Vec::new());
+            if any_gathered && !gathered {
+                let mut taken: Vec<&Path> = Vec::new();
+                let mut mark = |item: &Item, at: &Rect, fold: bool| {
+                    let Item::Node(node) = item else { return };
+                    let path = shown.paths[*node].as_path();
+                    if taken.iter().any(|top| under(path, top)) || !self.gathered_at(path) {
+                        return;
+                    }
+                    taken.push(path);
+                    marked.push(piece_rect(at));
+                    if fold {
+                        outlined.push(piece_rect(at));
+                    }
+                };
+                for fold in &placed.block.folds {
+                    mark(&fold.item, &fold.at, true);
+                }
+                for piece in pieces {
+                    mark(&piece.item, &piece.at, false);
+                }
+            }
             within(frame, r, crate::disk::map::RADIUS, alpha * dim, || {
                 if pieces.is_empty() {
                     fill(frame, fills[kind.at()], r.x, r.y, r.w, r.h, 0.0);
                 } else {
                     fill(frame, p.ring, r.x, r.y, r.w, r.h, 0.0);
                     for piece in pieces {
-                        let pr = Rect { x: r.x + piece.at.x * r.w, y: r.y + piece.at.y * r.h, w: piece.at.w * r.w, h: piece.at.h * r.h };
+                        let pr = piece_rect(&piece.at);
                         let piece_kind = piece.item.kind(tree);
                         let piece_lit = !lights || self.lit(shown, &piece.item, lighting);
                         let fill_color = fills[piece_kind.at()];
@@ -626,6 +705,10 @@ impl Ui {
                 }
                 if gathered {
                     stripes(frame, r, p.stripe);
+                }
+                for at in &marked {
+                    let _clip = frame.clipped(at.x, at.y, at.w, at.h);
+                    stripes(frame, *at, p.stripe);
                 }
                 // Its name and size, where there is room.
                 if r.w >= 36.0 && r.h >= 18.0 {
@@ -642,12 +725,22 @@ impl Ui {
             if gathered {
                 frame.stroke_rounded_dashed(p.text.alpha(p.text.a * alpha * 0.7), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
             }
+            for at in &outlined {
+                frame.stroke_rounded_dashed(p.text.alpha(p.text.a * alpha * dim * 0.7), at.x, at.y, at.w, at.h, 0.0, 1.0);
+            }
             if chosen.as_ref().is_some_and(|chosen| *chosen == about.path) && about.many_in.is_none() && !matches!(about.what, Some(What::Rest | What::Unlisted)) {
                 stroke_inside(frame, r, crate::disk::map::RADIUS, p.accent.alpha(alpha));
                 stroke_inside(frame, Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, crate::disk::map::RADIUS - 1.0, p.accent.alpha(alpha));
                 stroke_inside(frame, Rect { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 4.0 }, (crate::disk::map::RADIUS - 2.0).max(0.0), p.ring.alpha(alpha));
             } else if hovered {
                 Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(p.edge), r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5, crate::disk::map::RADIUS, 1.5);
+            }
+        }
+        for (r, color, dashed) in grounds_over {
+            if dashed {
+                frame.stroke_rounded_dashed(color, r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
+            } else {
+                stroke_inside(frame, r, crate::disk::map::RADIUS, color);
             }
         }
         frame.unclip();
@@ -1089,7 +1182,8 @@ impl Ui {
                         Lang::Zh => (format!("{}: 可用空间不足", drive.letter()), format!("仅余 {}，约为总容量的 {:.0}%", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
                         Lang::En => (format!("{}: is running out of space", drive.letter()), format!("Only {} free, about {:.0}% of it", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
                     };
-                    let r = Rect { x: NAV_X + NAV_W - 20.0, y: 112.0 + *at as f32 * 44.0 + 36.0, w: 240.0, h: 52.0 };
+                    let under = self.target_rect(&Target::Drive(*at));
+                    let r = Rect { x: under.x, y: under.y + under.h, w: 240.0, h: 52.0 };
                     flyout(frame, p, r);
                     frame.text(&title, body(13.0, 600.0), p.text, r.x + 12.0, r.y + 8.0, r.w - 24.0, Align::Start);
                     frame.text(&sub, body(12.0, 400.0), p.text2, r.x + 12.0, r.y + 28.0, r.w - 24.0, Align::Start);
@@ -1359,6 +1453,10 @@ impl Ui {
                 })
                 .collect(),
             MenuOf::Crumbs(crumbs) => crumbs.iter().map(|(name, path)| (Some(Icon::Folder), name.clone(), None, Target::MenuCrumb(path.clone()), false)).collect(),
+            MenuOf::Drives(hidden) => hidden
+                .iter()
+                .filter_map(|&at| self.drives.get(at).map(|drive| (Some(Icon::Disk), format!("{} ({}:)", drive.label, drive.letter()), drive.low().then(|| lang.pick("空间不足", "Low on space").to_string()), Target::MenuDrive(at), false)))
+                .collect(),
             MenuOf::Gathered(hidden) => hidden
                 .iter()
                 .filter_map(|&at| self.gathered.get(at).map(|item| (Some(if item.folder { Icon::Folder } else { kind_icon(item.kind) }), item.name.clone(), Some(size_text(item.bytes, lang)), Target::MenuUngather(at), false)))
@@ -1461,13 +1559,23 @@ fn button(frame: &Frame, p: &Palette, r: Rect, on: bool, hovered: bool) {
     within(frame, r, 6.0, 1.0, || fill(frame, p.button_edge, r.x, r.y + r.h - 1.0, r.w, 1.0, 0.0));
 }
 
-/// Stripes across `r`, at 45°, every 6 DIPs (cut to what they are drawn within).
+/// Stripes across `r`, at 45°, every 6 DIPs (cut to what they are drawn within): on the same lines wherever they are
+/// drawn, so stripes over pieces side by side run on from one into the next.
 fn stripes(frame: &Frame, r: Rect, color: Color) {
-    let mut k = -r.h;
-    while k < r.w {
-        frame.stroke(&[Point { x: r.x + k, y: r.y + r.h }, Point { x: r.x + k + r.h, y: r.y }], color, 1.5);
-        k += 6.0;
+    const EVERY: f32 = 6.0;
+    // (Each line where x + y is a whole number of strides, from the corner at the top left to the one at the foot.)
+    let mut k = ((r.x + r.y) / EVERY).floor() * EVERY;
+    while k <= r.x + r.w + r.y + r.h {
+        frame.stroke(&[Point { x: k - (r.y + r.h), y: r.y + r.h }, Point { x: k - r.y, y: r.y }], color, 1.5);
+        k += EVERY;
     }
+}
+
+/// Whether `path` is `top` or in it (as written: both read from the same index, alike in case), by its text: as
+/// quick as a comparison, for every piece of the map, each frame.
+pub(super) fn under(path: &Path, top: &Path) -> bool {
+    let (path, top) = (path.as_os_str().as_encoded_bytes(), top.as_os_str().as_encoded_bytes());
+    path.starts_with(top) && (path.len() == top.len() || top.ends_with(b"\\") || path[top.len()] == b'\\')
 }
 
 /// `draw` drawn only within `r`, its corners rounded by `radius`, `opacity` of it.
