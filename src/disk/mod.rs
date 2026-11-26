@@ -622,7 +622,8 @@ pub struct Extension {
 /// What the lists beside the map show of the folder shown, filtered and lit: its largest files that pass and are lit
 /// (as many as `ROWS`, the system's never), how many those are and what they come to, the extensions and the ages of
 /// the files that pass, and the folders (by their places) holding a file lit by an extension or an age, and the
-/// folders whose rest holds one.
+/// folders whose rest holds one. And for each extension listed and each age, the folders drawn on the map that hold a
+/// file of it that passes (and the rests that do): the map lit by a row of those lists while the pointer is on it.
 #[derive(Clone, Debug, Default)]
 pub struct Detail {
     pub rows: Vec<Row>,
@@ -631,6 +632,39 @@ pub struct Detail {
     pub ages: [(u64, u64); AGES],
     pub lit_folders: HashSet<u32>,
     pub lit_rests: HashSet<u32>,
+    pub by_extension: HashMap<String, Lit>,
+    pub by_age: [Lit; AGES],
+}
+
+/// The folders drawn on the map holding a file lit, and the folders whose rest holds one (by their places).
+#[derive(Clone, Debug, Default)]
+pub struct Lit {
+    pub folders: HashSet<u32>,
+    pub rests: HashSet<u32>,
+}
+
+impl Lit {
+    /// A file lit in `folder` (`drawn` telling how that is drawn, `drawn_up` the nearest folder drawn it is in or is,
+    /// `up` each drawn folder's own), the file itself drawn or not: the folders drawn from `drawn_up` up told as
+    /// holding one (those above one told already are), and the rest it is drawn in.
+    fn mark(&mut self, up: &HashMap<u32, u32>, folder: u32, drawn: Drawn, drawn_up: u32, file_drawn: bool) {
+        let mut at = drawn_up;
+        while self.folders.insert(at) {
+            match up.get(&at) {
+                Some(&above) => at = above,
+                None => break,
+            }
+        }
+        match drawn {
+            Drawn::Opened if !file_drawn => {
+                self.rests.insert(folder);
+            }
+            Drawn::InRestOf(owner) => {
+                self.rests.insert(owner);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// How many of the largest files the list holds.
@@ -650,8 +684,18 @@ impl Detail {
         let mut largest: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32)>> = std::collections::BinaryHeap::new();
         let mut kinds: HashMap<u32, Kind> = HashMap::new();
         let mut extensions: HashMap<&str, (u64, u64, [u64; 9])> = HashMap::new();
-        let mut stack = vec![(focus, Drawn::of(tree, focus, None))];
-        while let Some((folder, drawn)) = stack.pop() {
+        let mut by_extension: HashMap<&str, Lit> = HashMap::new();
+        // Each folder drawn's own (by their places): a file lit told of in each folder drawn it is in.
+        let mut up: HashMap<u32, u32> = HashMap::new();
+        for node in &tree.nodes {
+            for &child in &node.children {
+                if matches!(tree.nodes[child].what, What::Folder(_)) {
+                    up.insert(tree.nodes[child].place, node.place);
+                }
+            }
+        }
+        let mut stack = vec![(focus, Drawn::of(tree, focus, None), focus)];
+        while let Some((folder, drawn, drawn_up)) = stack.pop() {
             if !in_bin && Some(folder) == survey.bin {
                 continue;
             }
@@ -659,7 +703,8 @@ impl Detail {
             index.each_in(folder, |place, entry| {
                 if entry.folder() {
                     if entry.flags & flag::LINK == 0 {
-                        stack.push((place, Drawn::of(tree, place, Some((folder, drawn)))));
+                        let drawn_up = if tree.by_place.contains_key(&place) { place } else { drawn_up };
+                        stack.push((place, Drawn::of(tree, place, Some((folder, drawn))), drawn_up));
                     }
                     return;
                 }
@@ -676,9 +721,13 @@ impl Detail {
                 extension.0 += stat.size;
                 extension.1 += 1;
                 extension.2[is.kind.at()] += stat.size;
-                let age = &mut detail.ages[age_of(stat.written, survey.at)];
+                let age_at = age_of(stat.written, survey.at);
+                let age = &mut detail.ages[age_at];
                 age.0 += 1;
                 age.1 += stat.size;
+                let file_drawn = tree.by_place.contains_key(&place);
+                by_extension.entry(extension_of(name)).or_default().mark(&up, folder, drawn, drawn_up, file_drawn);
+                detail.by_age[age_at].mark(&up, folder, drawn, drawn_up, file_drawn);
                 if !light.is_none_or(|light| light.lights(name, is.kind, stat.written, survey.at)) {
                     return;
                 }
@@ -708,6 +757,7 @@ impl Detail {
         let mut extensions: Vec<Extension> = extensions.into_iter().map(|(extension, (bytes, files, kinds))| Extension { extension: extension.to_string(), bytes, files, kind: Held { kinds, ..Held::default() }.kind() }).collect();
         extensions.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.extension.cmp(&b.extension)));
         extensions.truncate(EXTENSIONS_LISTED);
+        detail.by_extension = extensions.iter().filter_map(|listed| by_extension.remove(listed.extension.as_str()).map(|lit| (listed.extension.clone(), lit))).collect();
         detail.extensions = extensions;
         detail
     }

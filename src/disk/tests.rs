@@ -235,6 +235,18 @@ fn the_lists_hold_what_passes_and_is_lit_never_the_system_s_nor_the_bin_s() {
     assert!(zips.lit_rests.is_empty());
     let pdfs = Detail::take(&index, &survey, ROOT, Filter::default(), Some(&Light::Extension("pdf".into())), &tree);
     assert_eq!(pdfs.lit_rests, HashSet::from([at(&index, "Users\\me")]));
+    // A row of the lists by type and by time lights the map as being lit by it would, among the folders drawn: read
+    // with no light at all.
+    let drawn = |lit: &HashSet<u32>| lit.iter().copied().filter(|place| tree.by_place.contains_key(place)).collect::<HashSet<u32>>();
+    assert_eq!(all.by_extension["zip"].folders, drawn(&zips.lit_folders));
+    assert_eq!(all.by_extension["zip"].rests, zips.lit_rests);
+    assert_eq!(all.by_extension["pdf"].rests, pdfs.lit_rests);
+    for age in 0..AGES {
+        let aged = Detail::take(&index, &survey, ROOT, Filter::default(), Some(&Light::Age(age)), &tree);
+        assert_eq!(all.by_age[age].folders, drawn(&aged.lit_folders), "{age}");
+        assert_eq!(all.by_age[age].rests, aged.lit_rests, "{age}");
+    }
+    assert!(all.by_extension.keys().all(|extension| all.extensions.iter().any(|listed| listed.extension == *extension)));
 
     // Shown in the bin, what is in it is listed.
     let bin = at(&index, "$Recycle.Bin");
