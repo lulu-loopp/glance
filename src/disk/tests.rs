@@ -101,6 +101,16 @@ fn survey(index: &Index) -> Survey {
 }
 
 #[test]
+fn a_path_on_no_drive_is_not_on_the_drive_whatever_its_characters() {
+    assert_eq!(on_drive(Path::new("C:\\Users\\me"), "C:\\"), Some(Path::new("Users\\me")));
+    assert_eq!(on_drive(Path::new("c:\\"), "C:\\"), Some(Path::new("")));
+    // (Where the root would end, in the middle of a character.)
+    assert_eq!(on_drive(Path::new("\\\\服务器\\share\\Documents"), "C:\\"), None);
+    assert_eq!(on_drive(Path::new("D:\\x"), "C:\\"), None);
+    assert_eq!(on_drive(Path::new("C"), "C:\\"), None);
+}
+
+#[test]
 fn kinds_are_told_by_extension() {
     assert_eq!(kind_of("a.mp4"), Kind::Video);
     assert_eq!(kind_of("x.tar.gz"), Kind::Archive);
@@ -177,6 +187,10 @@ fn a_tree_is_drawn_down_as_far_as_its_map_can_draw_it() {
     let tree = Tree::take(&index, &survey, ROOT, None, 1000.0);
     let root = tree.root().unwrap();
     assert_eq!(root.held.bytes, LISTED + 3 * GB);
+    // (What is in no file listed is the system's, in the root's kinds as in its block's.)
+    let unlisted = root.children.iter().find(|&&kid| tree.nodes[kid].what == What::Unlisted).map(|&kid| tree.nodes[kid].held.kinds[Kind::System.at()]).unwrap();
+    assert_eq!(unlisted, 3 * GB);
+    assert_eq!(root.held.kinds.iter().sum::<u64>(), root.held.bytes);
     let names: Vec<(&str, What)> = root.children.iter().map(|&kid| (tree.nodes[kid].name.as_str(), tree.nodes[kid].what)).collect();
     assert_eq!(
         names,

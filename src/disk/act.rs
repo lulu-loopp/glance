@@ -73,11 +73,12 @@ pub fn by_the_shell(act: impl FnOnce() + Send + 'static) {
 /// The file or folder at `path` moved to the Recycle Bin, as this user may: whether it was. (Where it would be deleted
 /// for good, its drive having no Recycle Bin, Windows asks first: never deleted for good unasked.)
 pub fn recycle(path: &Path) -> bool {
-    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
-    // (Its path ended by two nulls, as the call reads a list of them.)
+    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_NO_CONNECTED_ELEMENTS, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
+    // (Its path ended by two nulls, as the call reads a list of them. It alone: a page's folder of files, "x_files",
+    // stays where the page goes, as only the page was chosen.)
     let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
     from.extend([0, 0]);
-    let mut operation = SHFILEOPSTRUCTW { wFunc: FO_DELETE, pFrom: PCWSTR(from.as_ptr()), fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_NOERRORUI | FOF_SILENT).0 as u16, ..Default::default() };
+    let mut operation = SHFILEOPSTRUCTW { wFunc: FO_DELETE, pFrom: PCWSTR(from.as_ptr()), fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_NOERRORUI | FOF_SILENT | FOF_NO_CONNECTED_ELEMENTS).0 as u16, ..Default::default() };
     unsafe { SHFileOperationW(&mut operation) == 0 && !operation.fAnyOperationsAborted.as_bool() && !path.exists() }
 }
 

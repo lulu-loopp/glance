@@ -179,7 +179,7 @@ impl Organizer {
         let info = if many { None } else { shown.infos[node] };
         let (count, only_files) = item.count(tree);
         let name = if many {
-            if item.bound(tree).is_some() {
+            if item.bound().is_some() {
                 within_name(count, only_files, lang)
             } else if only_files {
                 format!("{} {}", count_text(count), lang.pick("个小文件", "small files"))
@@ -199,7 +199,7 @@ impl Organizer {
         };
         let folder = matches!(what, Some(What::Folder(_)));
         let onedrive = !many && shown.onedrive[node];
-        let many_in = many.then(|| (path.clone(), node == 0 && item.bound(tree).is_none()));
+        let many_in = many.then(|| (path.clone(), node == 0 && item.bound().is_none()));
         let why_not = self.why_not(shown, node, many, what, info, &path, held.guarded);
         About { name, path, bytes: held.bytes, files: held.files, cloud: held.cloud, written: held.written, kind: held.kind(), folder, what, info, onedrive, many_in, why_not }
     }
@@ -1140,7 +1140,17 @@ impl Organizer {
         let mut sum_right = side.x + side.w - 16.0;
         let addable = detail.rows.iter().any(|row| !self.gathered_at(&row.path));
         if self.tab == Tab::Largest && (self.filter.on() || self.light.is_some()) && addable {
-            let label = lang.pick("全部加入", "Gather all");
+            // (All that passes, where all of it is listed: else those listed, the largest, as many as they are.)
+            let listed = detail.rows.len();
+            let label = if detail.passing.0 > listed as u64 {
+                match lang {
+                    Lang::Zh => format!("加入前 {listed} 个"),
+                    Lang::En => format!("Gather top {listed}"),
+                }
+            } else {
+                lang.pick("全部加入", "Gather all").to_string()
+            };
+            let label = label.as_str();
             let link_font = body(13.0, 400.0);
             let content = 12.0 + 4.0 + frame.measure(label, link_font);
             let r = Rect { x: side.x + side.w - 16.0 - content - 4.0, y: side.y + TABS_H + 3.0, w: content + 8.0, h: SUM_H - 6.0 };
@@ -1520,10 +1530,7 @@ impl Organizer {
 
     /// What is dragged, as its ghost tells it.
     fn ghost_of(&self, drag: &Drag) -> Option<Ghost> {
-        let about = match drag.what {
-            Draggable::Block(at) => self.laid.get(at).map(|placed| self.about(&placed.shown, &placed.block.item)),
-            Draggable::Row(at) => self.row_about(at),
-        }?;
+        let about = drag.about.clone();
         let icon = if drag.why_not.is_some() {
             Icon::Lock
         } else if about.folder {
@@ -1874,16 +1881,34 @@ impl Organizer {
         let gathered = matches!(menu.of, MenuOf::Gathered(_));
         let widest = items.iter().map(|(_, label, size, _, _)| frame.measure(label, font).min(260.0) + size.as_ref().map_or(0.0, |size| frame.measure(size, body(12.0, 400.0)) + 12.0)).fold(0.0, f32::max);
         let w = (widest + 12.0 + 28.0 + 12.0 + if gathered { 24.0 } else { 0.0 }).max(menu.under.w).max(160.0);
-        let tall = items.len() as f32 * 32.0 + 8.0;
+        // (No taller than the window, nor than the room on its side of what it opens from, but a few rows: more than
+        // that are scrolled to.)
+        let all = items.len() as f32 * 32.0;
+        let room = if menu.above { menu.under.y - 4.0 - 8.0 } else { g.height - 8.0 - (menu.under.y + menu.under.h + 4.0) };
+        let tall = (all + 8.0).min(room.max(5.0 * 32.0 + 8.0)).min(g.height - 16.0);
+        let most = (all - (tall - 8.0)).max(0.0);
+        self.menu_scroll = self.menu_scroll.min(most);
+        let scroll = self.menu_scroll;
         let mut r = Rect { x: menu.under.x, y: if menu.above { menu.under.y - 4.0 - tall } else { menu.under.y + menu.under.h + 4.0 }, w, h: tall };
         r.x = r.x.clamp(8.0, g.width - 8.0 - r.w);
         r.y = r.y.clamp(8.0, (g.height - 8.0 - r.h).max(8.0));
         flyout(frame, p, r);
         if live {
             self.spot(r, Target::Over);
+            self.menu_at = r;
         }
+        let inside = Rect { x: r.x, y: r.y + 4.0, w: r.w, h: r.h - 8.0 };
+        if most > 0.0 {
+            let h = (inside.h * inside.h / all).max(24.0);
+            let y = inside.y + (inside.h - h) * scroll / most;
+            fill(frame, mix(p.rule, p.text3, 0.5), r.x + r.w - 5.0, y, 2.0, h, 1.0);
+        }
+        let _clip = frame.clipped(inside.x, inside.y, inside.w, inside.h);
         for (n, (icon, label, size, target, on)) in items.into_iter().enumerate() {
-            let ir = Rect { x: r.x + 4.0, y: r.y + 4.0 + n as f32 * 32.0, w: r.w - 8.0, h: 32.0 };
+            let ir = Rect { x: r.x + 4.0, y: inside.y + n as f32 * 32.0 - scroll, w: r.w - 8.0, h: 32.0 };
+            if ir.y + ir.h <= inside.y || ir.y >= inside.y + inside.h {
+                continue;
+            }
             if *hot == Some(target.clone()) {
                 fill(frame, p.hover, ir.x, ir.y, ir.w, ir.h, 4.0);
             }
@@ -1907,7 +1932,10 @@ impl Organizer {
                 frame.icon(Icon::Close, Point { x: ir.x + ir.w - 16.0, y: ir.y + 16.0 }, 12.0, p.text2);
             }
             if live {
-                self.spot(ir, target);
+                // (Its spot as much of it as is seen.)
+                let top = ir.y.max(inside.y);
+                let bottom = (ir.y + ir.h).min(inside.y + inside.h);
+                self.spot(Rect { y: top, h: bottom - top, ..ir }, target);
             }
         }
     }

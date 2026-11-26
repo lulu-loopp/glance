@@ -1028,16 +1028,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_MOUSEWHEEL => {
             let turns = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
+            // (Where the wheel turned, as it tells it on the screen: the pointer's move there may be told after it.)
+            let mut at = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut at) };
             with(|beside| {
+                let (x, y) = beside.on_page(at.x as f32, at.y as f32);
                 // (Over a program's track on the sound's page: its level moved.)
-                let over = beside.pointer.and_then(|(x, y)| beside.hit_at(x, y));
+                let over = beside.hit_at(x, y);
                 if let Some(Hit::Sound(hit)) = over {
                     beside.sound.wheel(hit, turns);
                     beside.redraw();
                     return;
                 }
                 // (Over what is kept: along it; else down the list.)
-                if beside.pointer.is_some_and(|(_, y)| beside.page == Page::Picker && (STRIP_TOP..STRIP_TOP + STRIP_CELL).contains(&y)) {
+                if beside.page == Page::Picker && (STRIP_TOP..STRIP_TOP + STRIP_CELL).contains(&y) {
                     beside.strip_scroll = (beside.strip_scroll - turns * STRIP_CELL).clamp(0.0, beside.strip_most);
                 } else {
                     beside.scroll = (beside.scroll - turns * 3.0 * ROW).clamp(0.0, beside.scroll_most);

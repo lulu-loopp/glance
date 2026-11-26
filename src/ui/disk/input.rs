@@ -108,13 +108,7 @@ impl Organizer {
         self.next_frame = Instant::now();
         if let Some(drag) = self.drag.take() {
             if self.over_foot(x, y) && drag.why_not.is_none() && self.pending.is_none() {
-                let about = match drag.what {
-                    Draggable::Block(at) => self.laid.get(at).map(|placed| self.about(&placed.shown, &placed.block.item)),
-                    Draggable::Row(at) => self.row_about(at),
-                };
-                if let Some(about) = about {
-                    self.gather(&about);
-                }
+                self.gather(&drag.about);
             }
             self.press = None;
             return;
@@ -135,7 +129,11 @@ impl Organizer {
     pub fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
         let area = self.list_area();
-        if area.contains(x, y) {
+        // (A menu open over the pointer scrolled, as far as it goes: see `paint_menu`.)
+        if self.menu.is_some() && self.menu_at.contains(x, y) {
+            self.menu_scroll = (self.menu_scroll - delta as f32 / 120.0 * 32.0 * 2.0).max(0.0);
+            self.next_frame = Instant::now();
+        } else if area.contains(x, y) {
             self.scroll_to = (self.scroll_to - delta as f32 / 120.0 * row_height(self.tab) * 2.0).max(0.0);
             self.next_frame = Instant::now();
         }
@@ -151,13 +149,13 @@ impl Organizer {
         // (Nothing is dragged while what was gathered waits to go.)
         let about = match press.on {
             _ if self.pending.is_some() => None,
-            Pressed::Block(block) => self.laid.get(block).map(|placed| (Draggable::Block(block), self.about(&placed.shown, &placed.block.item))),
-            Pressed::Row(row) => self.row_about(row).map(|about| (Draggable::Row(row), about)),
+            Pressed::Block(block) => self.laid.get(block).map(|placed| self.about(&placed.shown, &placed.block.item)),
+            Pressed::Row(row) => self.row_about(row),
             Pressed::Spot(_) | Pressed::Thumb(_) => None,
         };
         self.press = None;
-        if let Some((what, about)) = about {
-            self.drag = Some(Drag { what, why_not: about.why_not, at });
+        if let Some(about) = about {
+            self.drag = Some(Drag { why_not: about.why_not.clone(), about, at });
             self.hover = None;
         }
     }
@@ -197,10 +195,7 @@ impl Organizer {
         if about.why_not.is_some() {
             return;
         }
-        if about.folder {
-            self.gathered.retain(|gathered| !gathered.path.starts_with(&about.path));
-        }
-        self.gathered.push(Gathered { path: about.path.clone(), name: about.name.clone(), bytes: about.bytes, folder: about.folder, kind: about.kind });
+        self.put_gathered(Gathered { path: about.path.clone(), name: about.name.clone(), bytes: about.bytes, folder: about.folder, kind: about.kind });
         self.went = None;
         self.next_frame = Instant::now();
     }
@@ -222,7 +217,7 @@ impl Organizer {
                 return;
             }
             let Item::Many { folder: node, .. } = &placed.block.item else { return };
-            let after = match placed.block.item.bound(&placed.shown.tree) {
+            let after = match placed.block.item.bound() {
                 Some(bound) if *node == 0 => [placed.shown.after.as_slice(), &[bound]].concat(),
                 Some(bound) => vec![bound],
                 None => Vec::new(),
@@ -312,6 +307,7 @@ impl Organizer {
             Target::DriveMore(hidden) => {
                 let under = self.target_rect(&Target::DriveMore(hidden.clone()));
                 self.menu = Some(Menu { of: MenuOf::Drives(hidden), under, above: false });
+                self.menu_scroll = 0.0;
             }
             Target::Drive(at) | Target::MenuDrive(at) => {
                 self.menu = None;
@@ -332,6 +328,7 @@ impl Organizer {
             Target::CrumbMore(hidden) => {
                 let under = self.target_rect(&Target::CrumbMore(hidden.clone()));
                 self.menu = Some(Menu { of: MenuOf::Crumbs(hidden), under, above: false });
+                self.menu_scroll = 0.0;
             }
             Target::FilterOld => {
                 self.filter.old = !self.filter.old;
@@ -340,6 +337,7 @@ impl Organizer {
             Target::FilterSize => {
                 let under = self.target_rect(&Target::FilterSize);
                 self.menu = Some(Menu { of: MenuOf::Sizes, under, above: false });
+                self.menu_scroll = 0.0;
             }
             Target::FilterPreset => {
                 let preset = self.filter.old && self.filter.least == 1 << 30;
@@ -421,6 +419,7 @@ impl Organizer {
             Target::GatheredMore(hidden) => {
                 let under = self.target_rect(&Target::GatheredMore(hidden.clone()));
                 self.menu = Some(Menu { of: MenuOf::Gathered(hidden), under, above: true });
+                self.menu_scroll = 0.0;
             }
             Target::UngatherAll => self.gathered.clear(),
             Target::Commit => self.start_commit(),

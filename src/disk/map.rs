@@ -38,11 +38,12 @@ impl Rect {
 }
 
 /// What a block or a piece is: a node of the tree (see `Tree`), or several of a folder's (by its node) too small to
-/// draw where they land, together.
+/// draw where they land, together, with where they start in its order (see `Rank`): past the smallest of those beside
+/// them drawn on their own, none where none is (they are all the folder holds).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Item {
     Node(usize),
-    Many { folder: usize, members: Vec<usize> },
+    Many { folder: usize, members: Vec<usize>, bound: Option<Rank> },
 }
 
 impl Item {
@@ -78,12 +79,12 @@ impl Item {
         self.held(tree).kind()
     }
 
-    /// Several together's: where they start in their folder's order (see `Rank`), past the smallest of those beside
-    /// them drawn on their own; none where none is (they are all the folder holds).
-    pub fn bound(&self, tree: &Tree) -> Option<Rank> {
-        let Item::Many { folder, members } = self else { return None };
-        let node = |at: usize| &tree.nodes[at];
-        node(*folder).children.iter().copied().filter(|&child| node(child).what != What::Rest && !members.contains(&child)).last().map(|kept| (node(kept).held.bytes, node(kept).place))
+    /// Several together's: where they start in their folder's order (see `Item::Many`).
+    pub fn bound(&self) -> Option<Rank> {
+        match self {
+            Item::Many { bound, .. } => *bound,
+            Item::Node(_) => None,
+        }
     }
 
     /// Several together's: how many things they are, and whether each is a file (a rest among them counted as what
@@ -186,11 +187,11 @@ pub fn squarify(weights: &[f64], rect: Rect, total: f64) -> Vec<Rect> {
 /// none is skipped, leaving a hole beside its neighbours. (What the tree already holds together as too small to draw,
 /// its rest, is in that one from the start.)
 pub fn gather(tree: &Tree, folder: usize, area: Rect, gap: f32, side: f32) -> Vec<Item> {
-    gather_of(tree, folder, &tree.nodes[folder].children, area, gap, side)
+    gather_of(tree, folder, &tree.nodes[folder].children, None, area, gap, side)
 }
 
-/// As `gather`, of `children`, some of what `folder` holds (in its order).
-fn gather_of(tree: &Tree, folder: usize, children: &[usize], area: Rect, gap: f32, side: f32) -> Vec<Item> {
+/// As `gather`, of `children`, some of what `folder` holds (in its order), past `before` in it.
+fn gather_of(tree: &Tree, folder: usize, children: &[usize], before: Option<Rank>, area: Rect, gap: f32, side: f32) -> Vec<Item> {
     let mut kept: Vec<usize> = children.iter().copied().filter(|&child| tree.nodes[child].what != What::Rest).collect();
     let mut small: Vec<usize> = children.iter().copied().filter(|&child| tree.nodes[child].what == What::Rest).collect();
     let mut drop = false;
@@ -198,7 +199,8 @@ fn gather_of(tree: &Tree, folder: usize, children: &[usize], area: Rect, gap: f3
         let together = (small.len() > 1 || small.iter().any(|&member| tree.nodes[member].what == What::Rest)) && !drop;
         let mut list: Vec<Item> = kept.iter().map(|&node| Item::Node(node)).collect();
         if together {
-            let many = Item::Many { folder, members: small.clone() };
+            let bound = kept.last().map(|&last| (tree.nodes[last].held.bytes, tree.nodes[last].place)).or(before);
+            let many = Item::Many { folder, members: small.clone(), bound };
             let weight = many.weight(tree);
             let at = list.partition_point(|item| item.weight(tree) >= weight);
             list.insert(at, many);
@@ -209,15 +211,25 @@ fn gather_of(tree: &Tree, folder: usize, children: &[usize], area: Rect, gap: f3
             return list;
         }
         let placed = squarify(&weights, area, total);
-        let narrow: Vec<&Item> = placed.iter().zip(&list).filter(|(at, _)| at.w - gap < side || at.h - gap < side).map(|(_, item)| item).collect();
-        if narrow.is_empty() {
+        // The first of those kept that lands too narrow (where it is among them: they are in the list in their order),
+        // and whether the one together does.
+        let (mut first_narrow, mut many_narrow, mut nodes) = (None, false, 0);
+        for (at, item) in placed.iter().zip(&list) {
+            let narrow = at.w - gap < side || at.h - gap < side;
+            match item {
+                Item::Node(_) => {
+                    if narrow && first_narrow.is_none() {
+                        first_narrow = Some(nodes);
+                    }
+                    nodes += 1;
+                }
+                Item::Many { .. } => many_narrow |= narrow,
+            }
+        }
+        if first_narrow.is_none() && !many_narrow {
             return list;
         }
-        let first_narrow = narrow.iter().filter_map(|item| match item {
-            Item::Node(node) => kept.iter().position(|kept| kept == node),
-            Item::Many { .. } => None,
-        });
-        match first_narrow.min() {
+        match first_narrow {
             Some(at) => {
                 let mut moved = kept.split_off(at);
                 moved.append(&mut small);
@@ -239,14 +251,14 @@ pub fn pieces(tree: &Tree, item: &Item, at: Rect) -> (Vec<Piece>, Vec<Piece>) {
     let relative = |r: Rect| Rect { x: (r.x - at.x) / at.w, y: (r.y - at.y) / at.h, w: r.w / at.w, h: r.h / at.h };
     let (node, members) = match item {
         Item::Node(node) => (*node, None),
-        Item::Many { folder, members } => (*folder, Some(members.as_slice())),
+        Item::Many { folder, members, .. } => (*folder, Some(members.as_slice())),
     };
     let mut open = vec![(node, at, 0)];
     while let Some((folder, r, depth)) = open.pop() {
         let area = Rect { x: r.x - 0.5, y: r.y - 0.5, w: r.w + 1.0, h: r.h + 1.0 };
         // (Several together: their own map, the first.)
         let items = match members.filter(|_| depth == 0) {
-            Some(members) => gather_of(tree, folder, members, area, 1.0, 1.5),
+            Some(members) => gather_of(tree, folder, members, item.bound(), area, 1.0, 1.5),
             None => gather(tree, folder, area, 1.0, 1.5),
         };
         if items.is_empty() || depth >= PIECES_DEEPEST {
@@ -403,12 +415,12 @@ mod tests {
         let items = gather(&tree, 0, Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, GAP_FIRST, SIDE_LEAST);
         assert_eq!(items.len(), 4);
         assert_eq!(items[..3], [Item::Node(1), Item::Node(2), Item::Node(3)]);
-        let Item::Many { folder, members } = &items[3] else { panic!("{items:?}") };
+        let Item::Many { folder, members, .. } = &items[3] else { panic!("{items:?}") };
         assert_eq!((*folder, members.len()), (0, 100));
         assert_eq!(items[3].count(&tree), (100, true));
         // They start past the smallest drawn on its own, and are drawn as their pieces, filling their block.
-        assert_eq!(items[3].bound(&tree), Some((2000, tree.nodes[3].place)));
-        assert_eq!(Item::Node(1).bound(&tree), None);
+        assert_eq!(items[3].bound(), Some((2000, tree.nodes[3].place)));
+        assert_eq!(Item::Node(1).bound(), None);
         let blocks = lay_out(&tree, 300.0, 200.0);
         let many = blocks.iter().find(|block| matches!(block.item, Item::Many { .. })).unwrap();
         assert_eq!(many.pieces.len(), 100);

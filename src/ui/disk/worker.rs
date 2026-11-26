@@ -175,7 +175,8 @@ fn run(asked: Receiver<Asked>, told: Arc<Mutex<Vec<Told>>>, window: HWND, messag
             // Asked nothing for a while, and nothing changed: a drive read ahead (not the one shown), its survey not
             // kept.
             (None, _) => {
-                if let Some(root) = ahead.pop_front().filter(|_| idle).filter(|root| last.as_ref().is_none_or(|last| !last.root.eq_ignore_ascii_case(&root.root))) {
+                // (Taken off the queue only as it is read: asked meanwhile, it waits.)
+                if let Some(root) = idle.then(|| ahead.pop_front()).flatten().filter(|root| last.as_ref().is_none_or(|last| !last.root.eq_ignore_ascii_case(&root.root))) {
                     if let Told::Shown(shown) = read(&root, &places, &mut None, true, &mut |_| {}) {
                         tell(Told::Ahead(shown));
                     }

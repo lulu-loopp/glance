@@ -552,17 +552,12 @@ enum Look {
     Tools,
 }
 
-/// Something dragged to the foot: what it is, the reason it may not go (none: it may), where the pointer is.
+/// Something dragged to the foot: what it is (as it was taken up: the map or the list read anew meanwhile, it is still
+/// what goes), the reason it may not go (none: it may), where the pointer is.
 struct Drag {
-    what: Draggable,
+    about: paint::About,
     why_not: Option<String>,
     at: (f32, f32),
-}
-
-#[derive(Clone, Debug)]
-enum Draggable {
-    Block(usize),
-    Row(usize),
 }
 
 /// What a press on the window's spots does (see `input`).
@@ -623,8 +618,8 @@ enum PlateAct {
 
 /// What a shell thread did, told to the window.
 enum Acted {
-    /// Gathered things moved to the Recycle Bin: those that went, those that did not.
-    Recycled { went: Vec<Gathered>, kept: Vec<Gathered> },
+    /// Gathered things of the drive at `root` moved to the Recycle Bin: those that went, those that did not.
+    Recycled { root: String, went: Vec<Gathered>, kept: Vec<Gathered> },
     /// A OneDrive file or folder left to the cloud alone: its name, how much it frees, whether any was marked.
     Released { bytes: u64, marked: bool },
     /// A drive's Recycle Bin emptied: how much it freed, whether it was.
@@ -691,6 +686,9 @@ pub struct Organizer {
     said: Option<Said>,
     plate: Option<Plate>,
     menu: Option<Menu>,
+    /// How far the menu's items are scrolled, where they are more than the window is tall, and where they are drawn.
+    menu_scroll: f32,
+    menu_at: Rect,
     press: Option<Press>,
     /// What the last click on the map was on (a file's or folder's path): what a double-click shows in Explorer.
     clicked: Option<PathBuf>,
@@ -793,6 +791,8 @@ impl Organizer {
             said: None,
             plate: None,
             menu: None,
+            menu_scroll: 0.0,
+            menu_at: Rect::default(),
             press: None,
             clicked: None,
             drag: None,
@@ -1024,11 +1024,23 @@ impl Organizer {
             Told::Nowhere(_) => {
                 self.listing = false;
                 self.drives = crate::disk::act::drives();
+                // The drive shown gone (taken out): what was read of it let go of, and another shown, or the drives
+                // looked for till one comes.
+                if !self.drives.iter().any(|drive| drive.root.eq_ignore_ascii_case(&self.root)) {
+                    let gone = std::mem::take(&mut self.root);
+                    self.drive_read.retain(|(read, _)| !read.root.eq_ignore_ascii_case(&gone));
+                    self.read_above.clear();
+                    self.shown = None;
+                    self.laid.clear();
+                    if !self.drives.is_empty() {
+                        self.turn(&Asked::default());
+                    }
+                }
             }
             Told::Shown(shown) => {
                 self.listing = false;
-                // (A reading of what was asked before: what is asked now comes after.)
-                if shown.serial != self.serial && !shown.changed {
+                // (A reading of what was asked before, read anew as it changed or not: what is asked now comes after.)
+                if shown.serial != self.serial {
                     return;
                 }
                 let replaced = self.shown.as_ref().is_some_and(|before| before.replaced != shown.replaced || before.root != shown.root);
@@ -1080,6 +1092,15 @@ impl Organizer {
     /// The map laid out anew for the reading shown, at the map's size, moving from the last as `change` says (none:
     /// at once).
     fn relay(&mut self, change: Option<Change>) {
+        // (A press on a block, a row or a tool of one, by its place: laid out anew, another may be there. Let go of.)
+        let by_place = match &self.press {
+            Some(Press { on: Pressed::Block(_) | Pressed::Row(_), .. }) => true,
+            Some(Press { on: Pressed::Spot(target), .. }) => matches!(target, Target::AddTool(_) | Target::ReleaseTool(_) | Target::Row(_) | Target::RowAdd(_) | Target::RowRelease(_)),
+            _ => false,
+        };
+        if by_place {
+            self.press = None;
+        }
         let Some(shown) = self.shown.clone() else { return };
         let (width, height) = self.laid_size;
         if width < 1.0 || height < 1.0 {
@@ -1118,7 +1139,8 @@ impl Organizer {
 
     /// The block of the map at (`x`, `y`) in the window, the deepest there: its place in the layout.
     fn block_at(&self, x: f32, y: f32) -> Option<usize> {
-        if !self.map_at.contains(x, y) {
+        // (None while the map moves from one layout to the next: what is pressed is what is seen, where it is.)
+        if !self.map_at.contains(x, y) || self.anim.is_some() {
             return None;
         }
         let (x, y) = (x - self.map_at.x, y - self.map_at.y);
@@ -1219,6 +1241,11 @@ impl Organizer {
         }
     }
 
+    /// When what waits to go is to go, where anything does.
+    pub fn going_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.since + UNDO_FOR)
+    }
+
     fn say(&mut self, words: String, icon: crate::ui::icons::Icon) {
         self.said = Some(Said { words, icon, since: Instant::now() });
         self.next_frame = Instant::now();
@@ -1236,20 +1263,35 @@ impl Organizer {
     }
 
     fn undo(&mut self) {
+        // (What was gathered meanwhile kept with it, after it.)
         if let Some(pending) = self.pending.take() {
-            self.gathered = pending.items;
+            let meanwhile = std::mem::take(&mut self.gathered);
+            for item in pending.items.into_iter().chain(meanwhile) {
+                self.put_gathered(item);
+            }
         }
         self.next_frame = Instant::now();
+    }
+
+    /// `item` gathered: none where it is, or is in, one gathered already, and what is in it, gathered, in it now.
+    fn put_gathered(&mut self, item: Gathered) {
+        if self.gathered.iter().any(|gathered| item.path.starts_with(&gathered.path)) {
+            return;
+        }
+        if item.folder {
+            self.gathered.retain(|gathered| !gathered.path.starts_with(&item.path));
+        }
+        self.gathered.push(item);
     }
 
     /// What waits to go moved to the Recycle Bin now, on a thread of the shell's.
     fn commit_now(&mut self) {
         let Some(pending) = self.pending.take() else { return };
         self.going.extend(pending.items.iter().cloned());
-        let hwnd = self.hwnd;
+        let (hwnd, root) = (self.hwnd, self.root.clone());
         act(hwnd, move || {
             let (went, kept): (Vec<Gathered>, Vec<Gathered>) = pending.items.into_iter().partition(|item| crate::disk::act::recycle(&item.path));
-            Acted::Recycled { went, kept }
+            Acted::Recycled { root, went, kept }
         });
         self.next_frame = Instant::now();
     }
@@ -1258,16 +1300,19 @@ impl Organizer {
     fn acted(&mut self, acted: Acted) {
         let lang = self.lang;
         match acted {
-            Acted::Recycled { went, kept } => {
+            Acted::Recycled { root, went, kept } => {
                 self.going.retain(|item| !went.contains(item) && !kept.contains(item));
-                if !went.is_empty() {
+                // (Of the drive shown, what went is told with its bin's emptying, and what did not is gathered again;
+                // of one left meanwhile, what did not go is only told.)
+                let here = root.eq_ignore_ascii_case(&self.root);
+                if !went.is_empty() && here {
                     self.went = Some(Went { count: went.len(), bytes: went.iter().map(|item| item.bytes).sum(), until: Instant::now() + WENT_FOR });
                 }
                 if !kept.is_empty() {
                     let count = kept.len();
-                    for item in kept {
-                        if !self.gathered.contains(&item) {
-                            self.gathered.push(item);
+                    if here {
+                        for item in kept {
+                            self.put_gathered(item);
                         }
                     }
                     self.say(format!("{} {}", count_text(count as u64), lang.pick("项未能移至回收站，可能没有权限或正在使用", "items could not be moved to the Recycle Bin: no permission, or in use")), crate::ui::icons::Icon::Info);

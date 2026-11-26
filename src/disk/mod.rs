@@ -195,7 +195,9 @@ impl Places {
 /// The path `path` takes from the drive's root `root` ("C:\\"), where it is on that drive.
 fn on_drive<'a>(path: &'a Path, root: &str) -> Option<&'a Path> {
     let text = path.to_str()?;
-    (text.len() >= root.len() && text[..root.len()].eq_ignore_ascii_case(root)).then(|| Path::new(&text[root.len()..]))
+    // (A path on no drive, "\\服务器\…", may hold no character boundary where the root would end.)
+    let rest = text.get(root.len()..)?;
+    text[..root.len()].eq_ignore_ascii_case(root).then(|| Path::new(rest))
 }
 
 /// A file time (100 ns since 1601) `days` before `now`.
@@ -664,7 +666,9 @@ impl Tree {
         let mut first = Node::of(focus, What::Folder(top.role), held);
         first.name = if focus == ROOT { survey.root.trim_end_matches('\\').to_string() } else { index.name(focus).to_string_lossy().into_owned() };
         first.folded = index.folded_name(focus).to_string();
+        // (What is in no file listed is the system's, as its block is.)
         first.held.bytes += unlisted;
+        first.held.kinds[Kind::System.at()] += unlisted;
         tree.nodes.push(first);
         tree.by_place.insert(focus, 0);
         let mut open = vec![0];

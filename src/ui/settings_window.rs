@@ -94,6 +94,8 @@ const LIST_GAP: f32 = 48.0;
 /// The pages' list, left of the page.
 const NAV: f32 = 200.0;
 const NAV_ITEM: f32 = 40.0;
+/// The least a page's row in the list is, where the window is too short for them at `NAV_ITEM`.
+const NAV_ITEM_LEAST: f32 = 32.0;
 /// The room the components' heading takes in the pages' list, and the gap that sets it (and the rule after its
 /// pages) apart.
 const NAV_HEADING: f32 = 28.0;
@@ -847,10 +849,14 @@ fn tick(now: Instant) -> Option<Duration> {
         if told & THREAD_CLOSE != 0 {
             ui.close_thread();
         }
+        // The organizer's timers, minimized or not: what waits to go goes as its time is up, unseen.
+        if let Some(disk) = ui.disk.as_mut() {
+            disk.timers(now);
+        }
         // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE), and nothing is looked at
-        // again till a message comes (restored, it is told so).
+        // again till a message comes (restored, it is told so), or what waits to go is due.
         if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(ui.hwnd) }.as_bool() {
-            return Duration::MAX;
+            return ui.disk.as_ref().and_then(|disk| disk.going_at()).map_or(Duration::MAX, |at| at.saturating_duration_since(now));
         }
         if ui.relabel_at.is_some_and(|at| now >= at) {
             ui.relabel();
@@ -861,9 +867,8 @@ fn tick(now: Instant) -> Option<Duration> {
         if ui.send_tick(now) {
             ui.next_frame = now;
         }
-        // The organizer's timers (what waits to go goes as its time is up), and its frames on its page.
+        // The organizer's frames on its page.
         if let Some(disk) = ui.disk.as_mut() {
-            disk.timers(now);
             if ui.page == Page::Disk {
                 ui.next_frame = ui.next_frame.min(disk.next_frame());
             }
@@ -2977,7 +2982,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_MOUSEWHEEL => {
             let delta = (wparam.0 >> 16) as u16 as i16;
-            with_ui(|ui| ui.wheel(delta));
+            // (Where the wheel turned, as it tells it on the screen: the pointer's move there may be told after it, and
+            // what is under it is what the wheel moves.)
+            let (x, y) = point(lparam);
+            let mut at = POINT { x, y };
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut at) };
+            with_ui(|ui| {
+                let at = (at.x as f32 / ui.scale, at.y as f32 / ui.scale);
+                if ui.pointer != Some(at) {
+                    if ui.pointer.is_none() {
+                        let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                        let _ = unsafe { TrackMouseEvent(&mut track) };
+                    }
+                    ui.moved(at.0, at.1);
+                }
+                ui.wheel(delta);
+            });
             LRESULT(0)
         }
         // A character typed, or given by the input method, in the name of a sensor being named.
@@ -7163,7 +7183,7 @@ It can be disconnected here at any time, and the status line command put back.",
         self.hovered_now = hovered;
         self.targets.clear();
         self.follows_pointer.clear();
-        self.paint_nav(frame, &palette, now);
+        self.paint_nav(frame, &palette, now, height);
         if self.page == Page::Disk {
             if let Some(disk) = self.disk.as_mut() {
                 disk.draw(frame, now);
@@ -7193,7 +7213,7 @@ It can be disconnected here at any time, and the status line command put back.",
     /// The pages' list: the window's name, then each page, the one shown lit and marked in the accent. The components'
     /// own pages come under their heading (a name, not a page), and a rule sets them apart from the phone's and
     /// Glance's own after them.
-    fn paint_nav(&mut self, frame: &Frame, palette: &Palette, now: Instant) {
+    fn paint_nav(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {
         let lang = self.lang;
         let hovered = self.hovered_now.clone();
         let left = 16.0;
@@ -7203,6 +7223,14 @@ It can be disconnected here at any time, and the status line command put back.",
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let heading = Font::new(Family::Segoe, 12.0, 600.0);
         let mut y = PAD_TOP + 52.0;
+        // (Each page's row as tall as the window holds them all, down to the least a row of the list is.)
+        let pages = NAV_ITEMS.iter().filter(|item| matches!(item, NavItem::Page(_))).count() as f32;
+        let between = NAV_ITEMS.iter().map(|item| match item {
+            NavItem::Components => NAV_GAP + NAV_HEADING,
+            NavItem::Rule => NAV_GAP,
+            NavItem::Page(_) => 0.0,
+        }).sum::<f32>();
+        let item_h = ((height - y - between - 12.0) / pages - 4.0).clamp(NAV_ITEM_LEAST, NAV_ITEM);
         for item in NAV_ITEMS {
             let page = match item {
                 NavItem::Components => {
@@ -7219,8 +7247,8 @@ It can be disconnected here at any time, and the status line command put back.",
                 }
                 NavItem::Page(page) => page,
             };
-            let r = Rect { x: left, y, w: width, h: NAV_ITEM };
-            y += NAV_ITEM + 4.0;
+            let r = Rect { x: left, y, w: width, h: item_h };
+            y += item_h + 4.0;
             let target = Target::Nav(page);
             // (The reports' page is General's own.)
             let (shown, hover) = (page == self.page || (page == Page::General && self.page == Page::Reports), hovered.as_ref() == Some(&target));
@@ -7228,7 +7256,7 @@ It can be disconnected here at any time, and the status line command put back.",
                 fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
             }
             if shown {
-                fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
+                fill(frame, palette.selection, r.x, r.y + r.h / 2.0 - 8.0, 3.0, 16.0, 1.5);
             }
             let cy = r.y + r.h / 2.0;
             let at = Point { x: r.x + 22.0, y: cy };

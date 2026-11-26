@@ -106,7 +106,9 @@ impl Volume {
 
     /// `index` put in its place, its entries' places not those of the one before.
     fn put(&self, index: Index) {
-        *self.index.write().unwrap() = index;
+        // (Counted while it is held: no reader takes the new index with the count of the old.)
+        let mut held = self.index.write().unwrap();
+        *held = index;
         self.replaced.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -135,11 +137,12 @@ impl Volume {
     /// The folders at `listed` (by their places) listed again: those told that they are, are in, or are on the way to
     /// may have changed.
     fn relisted(&self, listed: &[u32]) {
+        // (The index held before what was told, as `read_volume` holds them.)
+        let index = self.index.read().unwrap();
         let mut told = self.told.lock().unwrap();
         if told.values().all(|told| told.changed) {
             return;
         }
-        let index = self.index.read().unwrap();
         for (id, told) in told.iter_mut().filter(|(_, told)| !told.changed) {
             if index.folder(*id).is_none_or(|place| listed.iter().any(|&folder| index.concerns(folder, place))) {
                 *told = Told { stamp: stamp(), changed: true };
@@ -290,21 +293,22 @@ fn read_volume<R>(volume: &Volume, since: Option<(u64, &Watch)>, read: impl FnOn
         return Reading::Listing;
     }
     let index = volume.index.read().unwrap();
-    let changed = match since {
-        Some((replaced, _)) if volume.away() || volume.replaced.load(Ordering::Relaxed) != replaced => Since::Anew,
-        Some((_, watch)) if volume.changed(watch) => Since::Changed,
-        Some(_) => Since::Same,
-        None => Since::Anew,
-    };
-    // (Its root told before it is read, under the same hold: what changes it after is told.)
     let Some(id) = index.id(index::ROOT) else { return Reading::Nowhere };
-    let stamp = {
+    // (Its count read under the hold of its index: put anew, both change together.)
+    let replaced = volume.replaced.load(Ordering::Relaxed);
+    // Whether it changed since, and its root told before it is read, under one hold: what changes it after is told.
+    let (changed, stamp) = {
         let mut told = volume.told.lock().unwrap();
+        let changed = match since {
+            Some((before, _)) if volume.away() || replaced != before => Since::Anew,
+            Some((_, watch)) if told.get(&watch.id).is_none_or(|told| told.stamp != watch.stamp) => Since::Changed,
+            Some(_) => Since::Same,
+            None => Since::Anew,
+        };
         let told = told.entry(id).or_insert_with(|| Told { stamp: stamp(), changed: false });
         told.changed = false;
-        told.stamp
+        (changed, told.stamp)
     };
-    let replaced = volume.replaced.load(Ordering::Relaxed);
     let read = read(&index, changed);
     Reading::Read { read, replaced, watch: Watch { root: volume.drive.path.clone(), id, stamp } }
 }
