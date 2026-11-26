@@ -2506,7 +2506,7 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
             let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
             let font = Font { size: side * 0.45, weight: 650.0, ..theme.body };
-            let ink = if gone { theme.text2.alpha(theme.text2.a * 0.45) } else { theme.text2 };
+            let ink = if gone { theme.text2.alpha(0.45) } else { theme.text2 };
             centred(frame, &letter, font, ink, x, frame.line_in(font, y, side), side);
         }
     }
@@ -5374,11 +5374,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, (grow,
                     };
                     let (gone, come) = (smooth(said * 2.0), smooth(said * 2.0 - 1.0));
                     if gone < 1.0 {
-                        frame.text(label, theme.small, name.alpha(name.a * (1.0 - gone)), left, row_y - COPIED_RISE * gone, LABEL, Align::Start);
+                        frame.text(label, theme.small, name.alpha(1.0 - gone), left, row_y - COPIED_RISE * gone, LABEL, Align::Start);
                     }
                     if come > 0.0 {
                         let word = scene.lang.pick("已复制", "Copied");
-                        frame.text(word, theme.small, name.alpha(name.a * come), left, row_y + COPIED_RISE * (1.0 - come), LABEL, Align::Start);
+                        frame.text(word, theme.small, name.alpha(come), left, row_y + COPIED_RISE * (1.0 - come), LABEL, Align::Start);
                     }
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
@@ -5887,16 +5887,16 @@ fn chosen_plate(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32,
                 (false, true) => 0.19,
             };
             frame.fill_rounded(blue.alpha(wash), x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(blue.alpha(0.45)), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+            frame.stroke_rounded(Fill::Solid(blue.alpha(0.45)), x, y, w, h, radius, 1.0);
         }
         Skin::Paper => {
             frame.fill_rounded(theme.text.alpha(if lit { 0.13 } else { 0.09 }), x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(if lit { theme.text } else { theme.text2 }), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+            frame.stroke_rounded(Fill::Solid(if lit { theme.text } else { theme.text2 }), x, y, w, h, radius, 1.0);
         }
         Skin::Fluent => {
             let accent = super::theme::accent(theme.dark);
             frame.fill_rounded(accent.alpha(if lit { 0.18 } else { 0.13 }), x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(accent.alpha(0.42)), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+            frame.stroke_rounded(Fill::Solid(accent.alpha(0.42)), x, y, w, h, radius, 1.0);
         }
     }
 }
@@ -5935,7 +5935,7 @@ pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32
         frame.stroke_rounded(Fill::Solid(Color::hex(0, 0.07)), x, py, w, ph, radius, 1.0);
     }
     let (top, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
-    frame.stroke_rounded(Fill::Down { top: py + 0.5, from: top, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, radius - 0.5, 1.0);
+    frame.stroke_rounded(Fill::Down { top: py, from: top, bottom: py + ph, to: foot }, x, py, w, ph, radius, 1.0);
 }
 
 /// The choices whose marks slide (see `thumb::Dots::choose`): the station's pages, the notes' views, the choices over a
@@ -6241,7 +6241,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             let radius = (small * 0.25).min(15.0);
             frame.icon(Icon::Image, centre, radius * 1.1, theme.text3);
             let line = (radius / 6.0).clamp(1.5, 2.5);
-            frame.arc(centre, radius, 0.0, std::f32::consts::TAU, theme.text3.alpha(theme.text3.a * 0.25), line);
+            frame.arc(centre, radius, 0.0, std::f32::consts::TAU, theme.text3.alpha(0.25), line);
             if *per_mille > 0 {
                 frame.arc(centre, radius, 0.0, std::f32::consts::TAU * f32::from(*per_mille) / 1000.0, theme.text3, line);
             }
@@ -6326,10 +6326,10 @@ fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, c
 pub(crate) fn paint_file_mark(frame: &dyn Canvas, theme: &Theme, folder: bool, path: &std::path::Path, centre: Point, side: f32, tagged: bool, faint: bool) {
     let shade = if faint { 0.45 } else { 1.0 };
     if folder {
-        frame.icon(Icon::Folder, centre, side, theme.text3.alpha(theme.text3.a * shade));
+        frame.icon(Icon::Folder, centre, side, theme.text3.alpha(shade));
         return;
     }
-    frame.icon(Icon::File, centre, side, theme.text3.alpha(theme.text3.a * shade));
+    frame.icon(Icon::File, centre, side, theme.text3.alpha(shade));
     let kind = path.extension().map(|extension| extension.to_string_lossy().to_uppercase()).unwrap_or_default();
     if tagged && !kind.is_empty() && kind.chars().count() <= 4 {
         // (Over the page's foot, from its left edge out, as the mockup has it.)
@@ -6717,7 +6717,7 @@ fn paint_choices(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f3
         }
         let words = if is_chosen || hovered { theme.text } else { theme.text2 };
         if choice.tag {
-            frame.icon(Icon::Tag, Point { x: x + pad + CHOICE_MARK / 2.0, y: top + CHIP_H / 2.0 }, CHOICE_MARK, words.alpha(words.a * 0.8));
+            frame.icon(Icon::Tag, Point { x: x + pad + CHOICE_MARK / 2.0, y: top + CHIP_H / 2.0 }, CHOICE_MARK, words.alpha(0.8));
         }
         frame.text(&names[one], theme.small, words, x + pad + mark, frame.line_in(theme.small, top, CHIP_H), name_w + 1.0, Align::Start);
         // (The button of its menu, a press on it apart from its own.)
@@ -6799,7 +6799,7 @@ fn paint_button(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32,
     if on {
         frame.fill_rounded(colours.text.alpha(0.08), x, y, w, h, radius);
     }
-    let mark = ink.unwrap_or(if on { colours.text } else { colours.text.alpha(colours.text.a * 0.75) });
+    let mark = ink.unwrap_or(if on { colours.text } else { colours.text.alpha(0.75) });
     frame.icon(icon, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
 }
 
@@ -6831,7 +6831,7 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, (right, 
     let left = if wide + 2.0 * INSET <= room { right - INSET - wide } else { right - room / 2.0 - wide / 2.0 };
     let top = bottom - INSET - TALL + drop;
     let radius = mark_round(theme, &colours, TALL);
-    let faded = |color: Color| color.alpha(color.a * shown);
+    let faded = |color: Color| color.alpha(shown);
     frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
     frame.text(says, font, faded(colours.text), left + PAD, frame.line_in(font, top, TALL), wide, Align::Start);
 }
@@ -7331,7 +7331,7 @@ fn paint_add_on(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, left:
     if lit {
         frame.fill_rounded(theme.hover, left, top, side, side, theme.control_radius.min(side / 2.0));
     }
-    frame.icon(Icon::Add, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(15.0), ink.alpha(ink.a * if lit { 1.0 } else { 0.72 }));
+    frame.icon(Icon::Add, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(15.0), ink.alpha(if lit { 1.0 } else { 0.72 }));
     hits.push((left, top, side, side, Hit::NewNote));
 }
 
@@ -7449,7 +7449,7 @@ fn paint_dots(frame: &dyn Canvas, count: usize, at: f32, middle: f32, y: f32, in
     for n in 0..count {
         let near = (1.0 - (n as f32 - at).abs()).clamp(0.0, 1.0);
         let w = dot + (long - dot) * near;
-        frame.fill_rounded(ink.alpha(ink.a * (0.4 + 0.5 * near)), x, y - dot / 2.0, w, dot, dot / 2.0);
+        frame.fill_rounded(ink.alpha(0.4 + 0.5 * near), x, y - dot / 2.0, w, dot, dot / 2.0);
         x += w + gap;
     }
 }
@@ -7980,7 +7980,7 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
                 frame.fill_rounded(mark, x, y, w, h, round);
                 frame.unclip();
             }
-            _ => frame.stroke_rounded(Fill::Solid(mark), x + 0.75, y + 0.75, w - 1.5, h - 1.5, round, 1.5),
+            _ => frame.stroke_rounded(Fill::Solid(mark), x, y, w, h, round, 1.5),
         }
     }
 }

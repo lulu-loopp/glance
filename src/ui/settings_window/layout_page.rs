@@ -739,8 +739,8 @@ fn edge_glow(frame: &Frame, r: Rect, edge: Edge, reach: f32, color: Color, stren
     };
     // (Eased off, not straight: brightest along the edge itself.)
     let stops = [
-        D2D1_GRADIENT_STOP { position: 0.0, color: color.alpha(color.a * strength).d2d() },
-        D2D1_GRADIENT_STOP { position: 0.35, color: color.alpha(color.a * strength * 0.45).d2d() },
+        D2D1_GRADIENT_STOP { position: 0.0, color: color.alpha(strength).d2d() },
+        D2D1_GRADIENT_STOP { position: 0.35, color: color.alpha(strength * 0.45).d2d() },
         D2D1_GRADIENT_STOP { position: 1.0, color: color.alpha(0.0).d2d() },
     ];
     unsafe {

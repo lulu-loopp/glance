@@ -254,7 +254,7 @@ fn paint_flag(frame: &dyn Canvas, theme: &Theme, flag: Flag, centre: Point, side
 /// How a slot's figure is written: hot where its window is nearly spent, faint where what it tells may be out of date.
 fn figure_ink(theme: &Theme, slot: &Slot) -> Color {
     if slot.faint {
-        theme.text.alpha(theme.text.a * 0.45)
+        theme.text.alpha(0.45)
     } else if slot.used.is_some_and(|used| used >= HOT) {
         theme.signal
     } else {
@@ -1167,7 +1167,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 // (What is left said with it where it fits beside the window's name.)
                 let long = share_told(window.shown(), window.left, true, scene.lang);
                 let value = if frame.measure(&window.name, theme.small) + 8.0 + frame.measure(&long, theme.small) <= wide { long } else { share_told(window.shown(), window.left, false, scene.lang) };
-                let faint = |color: Color| if window.stale { color.alpha(color.a * 0.45) } else { color };
+                let faint = |color: Color| if window.stale { color.alpha(0.45) } else { color };
                 frame.text(&value, theme.small, faint(if hot { theme.signal } else { theme.text }), x, top, wide, Align::End);
                 let bar_y = top + LINE + (BAR_BAND - theme.meter_height) / 2.0;
                 part(&format!("{at}.bar"));
@@ -2361,7 +2361,7 @@ fn ring(frame: &dyn Canvas, theme: &Theme, slot: &Slot, centre: Point, radius: f
     match slot.used.map(|used| if slot.left { 1.0 - used } else { used }) {
         Some(shown) if shown > 0.0 => frame.arc(centre, radius, 0.0, std::f32::consts::TAU * shown.min(1.0), color, width),
         Some(_) => {}
-        None => frame.arc(centre, radius, 0.0, std::f32::consts::TAU, color.alpha(color.a * 0.55), width),
+        None => frame.arc(centre, radius, 0.0, std::f32::consts::TAU, color.alpha(0.55), width),
     }
     frame.key(&format!("{}.mark", slot.source.id()));
     frame.mark(slot.source.mark(), centre, mark, theme.text, 1.0);

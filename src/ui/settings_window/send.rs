@@ -541,7 +541,7 @@ impl Ui {
         // Something dragged over it: where it is let go.
         if self.send.over {
             fill(frame, palette.window.alpha(0.88), area.x, area.y, area.w, area.h, CARD_RADIUS);
-            frame.stroke_rounded_dashed(palette.selection, area.x + 1.0, area.y + 1.0, area.w - 2.0, area.h - 2.0, CARD_RADIUS, 2.0);
+            frame.stroke_rounded_dashed(palette.selection, area.x, area.y, area.w, area.h, CARD_RADIUS, 2.0);
             across(frame, pick(lang, "松开以添加到发送", "Let go to add it"), Font::new(Family::Segoe, 15.0, 600.0), palette.selection, area.x, area.y + area.h / 2.0, area.w);
         }
     }
@@ -624,7 +624,7 @@ impl Ui {
         let font = WORDS_FONT;
         let boxed = Rect { x: left, y, w: width, h: WRITER + 44.0 };
         fill(frame, palette.card, boxed.x, boxed.y, boxed.w, boxed.h, 8.0);
-        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x + 0.75, boxed.y + 0.75, boxed.w - 1.5, boxed.h - 1.5, 7.25, 1.5);
+        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x, boxed.y, boxed.w, boxed.h, 8.0, 1.5);
         let field = Rect { x: left + 10.0, y: y + 10.0, w: width - 20.0, h: WRITER - 14.0 };
         let Some(renaming) = self.renaming.as_mut() else { return y };
         let text = renaming.typing.string();

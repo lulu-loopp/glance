@@ -676,7 +676,7 @@ impl Picker {
                 if hover == Some(&hit) {
                     frame.fill_rounded(highlight, x, y, w, h, round);
                 }
-                frame.stroke_rounded(Fill::Solid(theme.rule), x + 0.5, y + 0.5, w - 1.0, h - 1.0, round, 1.0);
+                frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, round, 1.0);
                 frame.icon(Icon::Add, Point { x: x + w / 2.0, y: y + h / 2.0 }, 14.0, theme.text2);
                 hits.push((x, y, w, h, hit));
             }

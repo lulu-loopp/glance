@@ -1773,7 +1773,7 @@ impl Ui {
                     centred(frame, key, SMALL, Color::hex(0xFFFFFF, 1.0), cap);
                 } else {
                     // (A key's foot: its edge heavier below.)
-                    fill(frame, palette.rule.alpha(palette.rule.a * 2.0), cap.x, cap.y + 2.0, cap.w, cap.h, 4.0);
+                    fill(frame, palette.rule.alpha(2.0), cap.x, cap.y + 2.0, cap.w, cap.h, 4.0);
                     fill(frame, grounds.button, cap.x, cap.y, cap.w, cap.h, 4.0);
                     stroke_inside(frame, cap, 4.0, grounds.button_stroke);
                     centred(frame, key, SMALL, palette.text, cap);

@@ -191,7 +191,7 @@ fn paint_plate(frame: &dyn Canvas, colours: &Colours, (x, y, width, height): (f3
     frame.fill_rounded(colours.sheet, x, y, width, height, radius);
     frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, width, height, radius, 1.0);
     if let Some(rim) = colours.rim {
-        frame.stroke_rounded(Fill::Down { top: y, from: rim, bottom: y + height, to: rim.alpha(rim.a * 0.3) }, x + 1.0, y + 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
+        frame.stroke_rounded(Fill::Down { top: y, from: rim, bottom: y + height, to: rim.alpha(0.3) }, x + 1.0, y + 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
     }
 }
 
@@ -866,7 +866,7 @@ impl Sheet {
             let track = self.shown - 2.0 * INSET;
             let thumb = (track * self.shown / self.height).max(24.0);
             let at = INSET + (track - thumb) * self.scroll / (self.height - self.shown);
-            frame.fill_rounded(colours.icon.alpha(colours.icon.a * 0.45), width - 7.0, at, 3.0, thumb, 1.5);
+            frame.fill_rounded(colours.icon.alpha(0.45), width - 7.0, at, 3.0, thumb, 1.5);
         }
         frame.clip(0.0, 0.0, width, self.shown);
         for (i, (item, top)) in items.iter().zip(self.shown_tops()).enumerate() {

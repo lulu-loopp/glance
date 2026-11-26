@@ -964,7 +964,7 @@ impl Finder {
             frame.fill_rounded(c.sheet, 0.0, 0.0, WIDTH, height, c.radius);
             frame.stroke_rounded(crate::ui::canvas::Fill::Solid(c.stroke), 0.0, 0.0, WIDTH, height, c.radius, 1.0);
             if let Some(rim) = c.rim {
-                frame.stroke_rounded(crate::ui::canvas::Fill::Down { top: 0.0, from: rim, bottom: height, to: rim.alpha(rim.a * 0.3) }, 1.0, 1.0, WIDTH - 2.0, height - 2.0, c.radius - 1.0, 1.0);
+                frame.stroke_rounded(crate::ui::canvas::Fill::Down { top: 0.0, from: rim, bottom: height, to: rim.alpha(0.3) }, 1.0, 1.0, WIDTH - 2.0, height - 2.0, c.radius - 1.0, 1.0);
             }
         }
         self.hits.push((Rect { x: 0.0, y: 0.0, w: WIDTH, h: height }, Hit::Sheet));
@@ -1175,7 +1175,7 @@ impl Finder {
         if most > 0.0 {
             let thumb = (height * height / whole).max(24.0);
             let at = top + (height - thumb) * self.scroll / most;
-            frame.fill_rounded(ink.text3.alpha(ink.text3.a * 0.6), WIDTH - 5.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
+            frame.fill_rounded(ink.text3.alpha(0.6), WIDTH - 5.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
         }
     }
 
@@ -1954,7 +1954,7 @@ struct Inks {
 impl Inks {
     /// The same, `shown` as clear (0 to 1): what comes up drawn in them.
     fn faded(&self, shown: f32) -> Inks {
-        let by = |c: Color| c.alpha(c.a * shown);
+        let by = |c: Color| c.alpha(shown);
         Inks {
             text: by(self.text),
             text2: by(self.text2),
@@ -2127,7 +2127,7 @@ impl SortButton {
         if turn.is_some() {
             let arrows = Point { x: whole.x + TURN_PAD + SORT_ICON / 2.0, y: middle };
             let (on, off) = if self.down { (Icon::ArrowDownOfTwo, Icon::ArrowUpOfTwo) } else { (Icon::ArrowUpOfTwo, Icon::ArrowDownOfTwo) };
-            frame.icon(off, arrows, SORT_ICON, ink.text3.alpha(ink.text3.a * 0.6));
+            frame.icon(off, arrows, SORT_ICON, ink.text3.alpha(0.6));
             frame.icon(on, arrows, SORT_ICON, if lit == Some(Hit::Turn) { ink.text } else { ink.text2 });
         } else {
             frame.icon(Icon::ArrowUpDown, Point { x: x - SORT_ICON / 2.0, y: middle }, SORT_ICON, text);

@@ -4849,7 +4849,7 @@ impl Ui {
         let words = (room - out).max(0.0);
         let boxed = Rect { x: x - out, y: cy - tall / 2.0, w: words + 2.0 * out, h: tall };
         fill(frame, palette.control, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
-        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x + 0.75, boxed.y + 0.75, boxed.w - 1.5, boxed.h - 1.5, 5.25, 1.5);
+        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x, boxed.y, boxed.w, boxed.h, 6.0, 1.5);
         let typing = &renaming.typing;
         let before = |at: usize| renaming.width_to(frame.gfx, font, at);
         let caret_x = before(typing.caret);

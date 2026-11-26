@@ -368,7 +368,7 @@ impl Linking {
             frame.fill_rounded(plate.highlight, x, y, wide, tall, radius);
             let focused = self.focused.get() == which;
             let edge = if focused { accent } else { theme.rule };
-            frame.stroke_rounded(super::super::canvas::Fill::Solid(edge), x + 0.5, y + 0.5, wide - 1.0, tall - 1.0, radius, if focused { 1.5 } else { 1.0 });
+            frame.stroke_rounded(super::super::canvas::Fill::Solid(edge), x, y, wide, tall, radius, if focused { 1.5 } else { 1.0 });
             let field = self.field(which);
             frame.clip(x + 1.0, y + 1.0, wide - 2.0, tall - 2.0);
             if field.words().is_empty() && !field.composing() {
@@ -398,7 +398,7 @@ impl Linking {
             (true, _) if theme.dark => (accent, Color::hex(0x000000, 0.9)),
             (true, _) => (accent, Color::hex(0xFFFFFF, 1.0)),
         };
-        frame.fill_rounded(if lit { ground.alpha(ground.a * 0.85) } else { ground }, x, y, wide, tall, radius);
+        frame.fill_rounded(if lit { ground.alpha(0.85) } else { ground }, x, y, wide, tall, radius);
         let (said, bold) = (lang.pick("确定", "OK"), Font { weight: 600.0, ..small });
         let across = frame.measure(said, bold);
         middle(said, bold, ink, (x + (wide - across) / 2.0, y, across + 1.0, tall), Align::Start);

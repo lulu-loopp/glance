@@ -963,7 +963,7 @@ impl Dialog {
             frame.icon(Icon::Check, Point { x: r.x + OPTION_BOX / 2.0, y: top + OPTION_BOX / 2.0 }, 14.0, Color::hex(0xFFFFFF, 1.0));
         } else {
             frame.fill_rounded(if over { c.button_hover } else { c.field }, r.x, top, OPTION_BOX, OPTION_BOX, 4.0);
-            frame.stroke_rounded(Fill::Solid(c.field_bottom), r.x + 0.5, top + 0.5, OPTION_BOX - 1.0, OPTION_BOX - 1.0, 4.0, 1.0);
+            frame.stroke_rounded(Fill::Solid(c.field_bottom), r.x, top, OPTION_BOX, OPTION_BOX, 4.0, 1.0);
         }
         let (ascent, descent) = frame.gfx.baseline(BODY);
         let wide = frame.gfx.measure(words, BODY).min(r.w - OPTION_BOX - 10.0);

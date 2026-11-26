@@ -1297,7 +1297,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
                     canvas.fill_rounded(accent, bx, by, side, side, 4.0);
                     canvas.icon(Icon::Check, Point { x: bx + side / 2.0, y: by + side / 2.0 }, 11.0, super::view::ink_on(accent));
                 } else {
-                    canvas.stroke_rounded(super::canvas::Fill::Solid(theme.text3), bx + 0.75, by + 0.75, side - 1.5, side - 1.5, 3.5, 1.5);
+                    canvas.stroke_rounded(super::canvas::Fill::Solid(theme.text3), bx, by, side, side, 4.0, 1.5);
                 }
                 let said = lang.pick("以后直接接收这台设备的文件", "Accept files from this device without asking");
                 canvas.text(said, theme.small, if over == Some(Spot::Trust) { theme.text } else { theme.text2 }, bx + side + 8.0, canvas.line_in(theme.small, y, TRUST_ROW), inner - side - 9.0, Align::Start);
@@ -1322,7 +1322,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             let radius = theme.control_radius.max(6.0);
             canvas.fill_rounded(theme.track, x, y, inner, FIELD, radius);
             let (ring, width) = if keys { (accent, 1.5) } else { (theme.text3.alpha(0.6), 1.0) };
-            canvas.stroke_rounded(super::canvas::Fill::Solid(ring), x + width / 2.0, y + width / 2.0, inner - width, FIELD - width, radius, width);
+            canvas.stroke_rounded(super::canvas::Fill::Solid(ring), x, y, inner, FIELD, radius, width);
             let font = Font { size: PIN_SIZE, ..theme.body };
             let words = if trying { theme.text3 } else { theme.text };
             // Each character on its own, spaced as a PIN is read; where each place between them is, kept.

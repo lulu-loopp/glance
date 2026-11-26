@@ -2287,7 +2287,7 @@ impl Looker {
             }
             frame.stroke_rounded(Fill::Solid(c.stroke), 0.0, 0.0, w, h, c.radius, 1.0);
             if let Some(rim) = c.rim {
-                frame.stroke_rounded(Fill::Down { top: 0.0, from: rim, bottom: h, to: rim.alpha(rim.a * 0.3) }, 1.0, 1.0, w - 2.0, h - 2.0, c.radius - 1.0, 1.0);
+                frame.stroke_rounded(Fill::Down { top: 0.0, from: rim, bottom: h, to: rim.alpha(0.3) }, 1.0, 1.0, w - 2.0, h - 2.0, c.radius - 1.0, 1.0);
             }
         }
         if self.skin == Skin::Paper {
@@ -2542,7 +2542,7 @@ impl Looker {
         };
         if picked {
             frame.fill_rounded(accent.alpha(0.16), at.x, at.y, at.w, at.h, radius);
-            frame.stroke_rounded(Fill::Solid(accent), at.x + 0.75, at.y + 0.75, at.w - 1.5, at.h - 1.5, radius, 1.5);
+            frame.stroke_rounded(Fill::Solid(accent), at.x, at.y, at.w, at.h, radius, 1.5);
         } else if lit {
             frame.fill_rounded(theme.hover, at.x, at.y, at.w, at.h, radius);
         }
@@ -2846,7 +2846,7 @@ impl Looker {
     /// A button at `at` with `icon` in `ink`, a little dimmer till the pointer is on it (played or paused: solid):
     /// `hit` as it is clicked.
     fn round_button(&mut self, frame: &Frame, at: Rect, icon: Icon, ink: Color, hit: Hit) {
-        let ink = ink.alpha(ink.a * if self.pointer_on(at) { 1.0 } else { 0.78 });
+        let ink = ink.alpha(if self.pointer_on(at) { 1.0 } else { 0.78 });
         let centre = Point { x: at.x + at.w / 2.0, y: at.y + at.h / 2.0 };
         match icon {
             Icon::Play => frame.icon_solid(icon, Point { x: centre.x + 1.0, ..centre }, 13.0, ink),
