@@ -229,7 +229,7 @@
     <string name="hand_failed_some">已发送 %1$d 个，%2$d 个未能发送</string>
     <string name="hand_why_unreached">无法连接到 %1$s。请确认电脑已开机，并与手机处于同一网络。</string>
     <string name="hand_why_broken">与 %1$s 的连接已中断。请确认电脑仍在运行，并与手机处于同一网络，然后重试。</string>
-    <string name="hand_why_busy">%1$s 一直在接收其他文件，请稍后重试。</string>
+    <string name="hand_why_busy">%1$s 一直在接收其他文件。</string>
     <string name="hand_why_room">%1$s 的中转站空间不足，无法放入这些文件。可在电脑上清理中转站后重试。</string>
     <string name="hand_why_large">「%1$s」超过了电脑允许的单个文件大小。</string>
     <string name="hand_why_unread">无法读取「%1$s」。</string>

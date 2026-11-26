@@ -239,7 +239,7 @@
     <string name="hand_failed_some">%1$d sent, %2$d failed</string>
     <string name="hand_why_unreached">Couldn\'t connect to %1$s. Make sure the PC is on and on the same network as this phone.</string>
     <string name="hand_why_broken">The connection to %1$s was lost. Make sure the PC is still running and on the same network as this phone, then try again.</string>
-    <string name="hand_why_busy">%1$s was busy receiving other files. Try again later.</string>
+    <string name="hand_why_busy">%1$s was busy receiving other files.</string>
     <string name="hand_why_room">%1$s\'s Station doesn\'t have room for these files. Clear some space on the PC, then try again.</string>
     <string name="hand_why_large">“%1$s” is larger than the PC accepts for a single file.</string>
     <string name="hand_why_unread">“%1$s” couldn\'t be read.</string>

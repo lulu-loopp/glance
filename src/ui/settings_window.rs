@@ -3283,8 +3283,8 @@ impl Ui {
                 rows.extend(self.followed.iter().map(|report| Row::Report(report.id.clone())));
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "此处列出近 90 天内从本机发送的诊断信息。Glance 检查更新时一并获取开发者的回复与处理状态，有新消息时会提示。打开一份反馈可查看全部往来，并补充说明、截图或新的诊断信息。",
-                    "Diagnostics sent from this PC in the last 90 days. When Glance checks for updates, it also gets the developer's replies and each report's status, and lets you know of anything new. Open a report to read the whole conversation and add details, screenshots or new diagnostics.",
+                    "近 90 天内从本机发送的诊断信息。Glance 检查更新时会一并获取开发者的回复，有新消息时会提示。",
+                    "Diagnostics sent from this PC in the last 90 days. When Glance checks for updates, it also gets the developer's replies and lets you know of anything new.",
                 )));
             }
             (Page::General, _) => {
@@ -4397,8 +4397,8 @@ impl Ui {
                     Some(folder) => {
                         let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
                         let said = match lang {
-                            Lang::Zh => format!("以原名存入 {}。中转站中同时列出，移除或到期只去掉那一项，文件保留", folder.display()),
-                            Lang::En => format!("Saved under their own names in {}. Removing them from Station, or their expiry, keeps the files", folder.display()),
+                            Lang::Zh => format!("以原名存入 {}。从中转站移除或到期后，文件仍保留", folder.display()),
+                            Lang::En => format!("Saved under their own names in {}. The files stay when removed from Station or expired", folder.display()),
                         };
                         (said, name)
                     }
@@ -5026,8 +5026,8 @@ impl Ui {
             Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "Files from trusted devices are accepted automatically")),
             Field::DevicesForm => Some(pick(
                 self.lang,
-                "圆环仅在设备不超过四个且类型各不相同时使用，否则以列表显示",
-                "Rings are used when there are at most four devices, each of a different kind. Otherwise they are listed",
+                "设备超过四个或类型重复时，以列表显示",
+                "With more than four devices, or two of a kind, they are listed",
             )),
             Field::AiForm => Some(pick(
                 self.lang,
@@ -5041,10 +5041,10 @@ impl Ui {
             )),
             Field::RecentScope => Some(pick(
                 self.lang,
-                "选择指定文件夹时，仅列出下列文件夹及其子文件夹中的文件",
-                "With Chosen folders, only files in the folders below and their subfolders are listed",
+                "选择“指定文件夹”时，仅列出下列文件夹中的文件",
+                "With Chosen folders, only files in the folders below are listed",
             )),
-            Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer against the screen edge to open the panel. Firmer means fewer accidental opens")),
+            Field::Push => Some(pick(self.lang, "力度越重，越不易误触", "Firmer means fewer accidental opens")),
             Field::WebSearch => Some(pick(
                 self.lang,
                 "选择网页搜索结果之前，不会发送任何内容",
@@ -5052,8 +5052,8 @@ impl Ui {
             )),
             Field::OverFullscreen => Some(pick(
                 self.lang,
-                "包括独占全屏与无边框全屏的游戏。独占全屏的游戏会暂时切出，收起面板后自动恢复",
-                "Includes exclusive and borderless fullscreen games. Exclusive fullscreen games step out until the panel closes",
+                "独占全屏的游戏会暂时切出，收起面板后恢复",
+                "Exclusive fullscreen games step out until the panel closes",
             )),
             _ => None,
         }
@@ -5066,7 +5066,7 @@ impl Ui {
         let (name, hint, on) = match switch {
             Switch::Live => (
                 p("背景实时刷新", "Live background"),
-                Some(p("玻璃背后的画面随桌面实时更新，背景变化时会占用一定的处理器与显卡资源", "The glass follows the desktop as it changes, using some CPU and GPU time")),
+                Some(p("桌面变化时会占用一定的处理器与显卡资源", "Uses some CPU and GPU time while the desktop changes")),
                 self.settings.live_backdrop,
             ),
             Switch::TearOff => (
@@ -5091,8 +5091,8 @@ impl Ui {
             Switch::OverlayOutline => (
                 p("文字描边", "Text outline"),
                 Some(p(
-                    "玻璃调至透明时，为文字、标记与曲线添加细描边，使其在各类背景上保持清晰",
-                    "When the glass is more transparent, text, markers and charts get a fine outline to stay readable on any background",
+                    "玻璃较透明时，使文字与曲线在各类背景上保持清晰",
+                    "Keeps text and charts readable on any background when the glass is clear",
                 )),
                 self.settings.overlay.outline,
             ),
@@ -5151,7 +5151,7 @@ impl Ui {
             }
             Switch::NearbyNotice => (
                 p("在屏幕边缘提示", "Show at the screen edge"),
-                Some(p("有设备请求发送、正在接收和收到文件时，在工作台所在的屏幕边缘提示", "When a device asks to send, while receiving and when files arrive, at the edge of the screen Workbench is on")),
+                Some(p("有设备请求发送或收到文件时，在工作台所在的边缘提示", "When a device asks to send or files arrive, at the edge Workbench is on")),
                 self.settings.nearby_notice,
             ),
             // The version this is, where the user looks for a newer one.
@@ -5543,13 +5543,13 @@ You can disconnect here at any time, and the original status line command will b
             "ai:claude" => return ("Claude".into(), Some(p("来自 Claude Code", "From Claude Code"))),
             "ai:codex" => return ("ChatGPT".into(), Some(p("来自 Codex", "From Codex"))),
             "ai:qwen" => return ("Qwen".into(), Some(p("来自 Qwen Code", "From Qwen Code"))),
-            "ai:deepseek" => return ("DeepSeek".into(), Some(p("DeepSeek 开放平台的余额与今日消费", "DeepSeek platform balance and today's spending"))),
+            "ai:deepseek" => return ("DeepSeek".into(), Some(p("来自 DeepSeek 开放平台", "From the DeepSeek platform"))),
             "ai:kimi" => return ("Kimi".into(), Some(p("来自 Kimi Code", "From Kimi Code"))),
-            "ai:moonshot" => return ("Moonshot".into(), Some(p("Moonshot AI 开放平台的余额与今日消费", "Moonshot AI platform balance and today's spending"))),
-            "ai:glm" => return ("GLM".into(), Some(p("智谱 GLM Coding Plan 的用量额度与账户余额，以及 ZCode 的 Token 用量与会话", "Zhipu GLM Coding Plan limits and account balance, plus ZCode tokens and sessions"))),
-            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费，以及 MiniMax Code 的 Token 用量与会话", "MiniMax Token Plan limits, or platform balance and today's spending, plus MiniMax Code tokens and sessions"))),
-            "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("火山方舟 Coding Plan 的用量额度", "Volcengine Ark Coding Plan limits"))),
-            "ai:openrouter" => return ("OpenRouter".into(), Some(p("OpenRouter 的余额、今日消费与密钥额度", "OpenRouter credits, today's spending and the key's limit"))),
+            "ai:moonshot" => return ("Moonshot".into(), Some(p("来自 Moonshot AI 开放平台", "From the Moonshot AI platform"))),
+            "ai:glm" => return ("GLM".into(), Some(p("来自智谱 GLM Coding Plan 与 ZCode", "From Zhipu GLM Coding Plan and ZCode"))),
+            "ai:minimax" => return ("MiniMax".into(), Some(p("来自 MiniMax Token Plan、开放平台与 MiniMax Code", "From MiniMax Token Plan, its platform and MiniMax Code"))),
+            "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("来自火山方舟 Coding Plan", "From Volcengine Ark Coding Plan"))),
+            "ai:openrouter" => return ("OpenRouter".into(), Some(p("来自 OpenRouter", "From OpenRouter"))),
             _ => {}
         }
         if let Some(group) = id.strip_prefix(OVERLAY) {
@@ -5586,16 +5586,16 @@ You can disconnect here at any time, and the original status line command will b
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要安装歌词插件）",
-                    "What is playing: cover, progress, controls, volume, and lyrics that scroll as it plays. To find lyrics, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Lyrics need the player to report its position (NetEase Cloud Music needs the lyrics plugin)",
+                    "正在播放的歌曲与滚动歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要安装歌词插件）",
+                    "What is playing, with scrolling lyrics. To find lyrics, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Lyrics need the player to report its position (NetEase Cloud Music needs the lyrics plugin)",
                 )),
             ),
             "notes" => (p("便签", "Notes"), Some(p("想法与备忘，每条保存为一个 Markdown 文件，可放在桌面上", "Ideas and reminders, each saved as a Markdown file, which can be pinned to the desktop"))),
             "todo" => (
                 p("待办", "To-do"),
                 Some(p(
-                    "要做的事项，可设定日期与时间，勾选后移入已完成。全部事项保存在便签文件夹的“待办.md”中",
-                    "Tasks with an optional date and time, moved to Done once checked. All are saved in “To-do.md” in the notes folder",
+                    "可设定日期与时间，保存在便签文件夹的“待办.md”中",
+                    "With optional dates and times, saved in “To-do.md” in the notes folder",
                 )),
             ),
             "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Frequently used programs, files, folders and websites"))),
@@ -6946,7 +6946,7 @@ You can disconnect here at any time, and the original status line command will b
                 if sent {
                     super::ask::thread::sent(window);
                 } else {
-                    super::ask::thread::failed(window, pick(lang, "发送失败，请稍后重试", "Couldn't send. Try again later"));
+                    super::ask::thread::failed(window, pick(lang, "未能发送", "Couldn't send"));
                 }
             }
             self.added = Some((id, sent));
