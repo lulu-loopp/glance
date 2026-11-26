@@ -39,6 +39,10 @@ pub enum Ask {
     /// The files come lately that stay are others now (see `shelf::Item::held`).
     Held,
     Remove(u64),
+    /// `id`, one it keeps itself, given out by this name from now on (see `shelf::What::renamed_by`).
+    Rename(u64, String),
+    /// The file or folder at the first path renamed to the second (see `super::rename_there`).
+    Moved(std::path::PathBuf, std::path::PathBuf),
     /// All that does not stay taken off: of what was put on it, or (with `true`) of what was copied lately.
     Clear(bool),
     /// What `id` holds put on the clipboard.
@@ -742,6 +746,8 @@ impl Station {
                 }
                 Ask::Held => self.hold(),
                 Ask::Remove(id) => self.keep.remove(id),
+                Ask::Rename(id, name) => self.keep.rename(id, &name),
+                Ask::Moved(from, to) => self.keep.moved(&from, &to),
                 Ask::Clear(copied) => self.keep.clear(copied),
                 Ask::Copy(id) | Ask::PasteOut(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
@@ -916,7 +922,8 @@ impl Station {
     fn opened(&self, id: u64) -> Option<Content> {
         let item = self.keep.shelf.get(id)?;
         match &item.what {
-            super::shelf::What::Picture { file } => Some(Content::Files(vec![self.keep.folder.path(file)])),
+            super::shelf::What::Picture { file, name } if name.is_empty() => Some(Content::Files(vec![self.keep.folder.path(file)])),
+            super::shelf::What::Picture { file, name } => Some(Content::Files(vec![self.keep.folder.named(file, name)?])),
             _ => self.keep.content_of(item),
         }
     }

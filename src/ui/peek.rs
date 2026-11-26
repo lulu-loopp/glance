@@ -1524,7 +1524,7 @@ mod tests {
         assert_eq!(shown_words(&text), Some((false, "会议改到 3 号会议室， 记得带报价单".to_string())));
         let long = What::Text { text: "字".repeat(WORDS_LOOKED_AT + 50) };
         assert_eq!(shown_words(&long).unwrap().1.chars().count(), WORDS_LOOKED_AT);
-        assert_eq!(shown_words(&What::Picture { file: "a.png".into() }), None);
+        assert_eq!(shown_words(&What::Picture { file: "a.png".into(), name: String::new() }), None);
     }
 
     /// Words that came make it as tall as their lines and the row under them, never less than the picture beside them.

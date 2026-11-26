@@ -15,7 +15,7 @@
 //! Only the shelf: its files are the folder's (see `super::folder`), its windows the station's thread's.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One thing on the station.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -163,8 +163,12 @@ pub enum What {
     /// A web address (not fetched: fetching would tell its site of each one put here).
     Link { url: String },
     /// A picture the station keeps itself (pasted, dragged from a page, sent by the phone): its file's name in its own
-    /// folder.
-    Picture { file: String },
+    /// folder, and the name it was given (none till it is renamed: see `Shelf::rename`), which it is given out by.
+    Picture {
+        file: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        name: String,
+    },
     /// A file that had no path (dragged from a browser or a mail, its contents given): saved in its own folder as it
     /// came, by its name there and the name it was given. Or text too long to keep on the shelf itself (`words`),
     /// saved so, named by its first words: words still, given back as words.
@@ -184,11 +188,77 @@ impl What {
     pub fn own_files(&self) -> Vec<&str> {
         match self {
             What::Files { kept, .. } => kept.iter().map(String::as_str).collect(),
-            What::Picture { file } | What::Saved { file, .. } => vec![file.as_str()],
+            What::Picture { file, .. } | What::Saved { file, .. } => vec![file.as_str()],
             What::Came { files } => files.iter().map(|arrived| arrived.file.as_str()).collect(),
             What::Text { .. } | What::Link { .. } => Vec::new(),
         }
     }
+
+    /// How it is renamed, where it has a name to rename: a file or folder alone, put on it where it is, renamed there;
+    /// one the station keeps itself (a picture, a file saved as it came, or what one sending from a device nearby
+    /// held: a file, or a folder), given out by a name of its own (see `rename`). Words and addresses have none, nor
+    /// files put on it, or sent, together.
+    pub fn renamed_by(&self) -> Option<Renamed<'_>> {
+        match self {
+            What::Files { paths, .. } => match paths.as_slice() {
+                [path] => Some(Renamed::There(path)),
+                _ => None,
+            },
+            What::Picture { name, .. } => Some(Renamed::Own { name: name.clone(), folder: false }),
+            What::Saved { name, words: false, .. } => Some(Renamed::Own { name: name.clone(), folder: false }),
+            What::Came { files } => match entries(files).as_slice() {
+                [Entry::File(arrived)] => Some(Renamed::Own { name: arrived.name.clone(), folder: false }),
+                [Entry::Folder { name, .. }] => Some(Renamed::Own { name: name.to_string(), folder: true }),
+                _ => None,
+            },
+            What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => None,
+        }
+    }
+
+    /// Given out by `name` from now on, where it is one the station keeps itself (see `renamed_by`): a folder sent, all
+    /// its files under it. Whether it is.
+    fn rename(&mut self, name: &str) -> bool {
+        match self {
+            What::Picture { name: was, .. } | What::Saved { name: was, words: false, .. } => *was = name.to_string(),
+            What::Came { files } => {
+                let one = match entries(files).as_slice() {
+                    [Entry::File(_)] => false,
+                    [Entry::Folder { .. }] => true,
+                    _ => return false,
+                };
+                for arrived in files.iter_mut() {
+                    arrived.name = match arrived.name.split_once('/') {
+                        Some((_, under)) if one => format!("{name}/{under}"),
+                        _ => name.to_string(),
+                    };
+                }
+            }
+            What::Files { .. } | What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => return false,
+        }
+        true
+    }
+
+    /// Its files where they are, the file or folder at `from` (and what is in it) now at `to`. Whether any was.
+    fn moved(&mut self, from: &Path, to: &Path) -> bool {
+        let What::Files { paths, .. } = self else { return false };
+        let mut changed = false;
+        for path in paths.iter_mut() {
+            if let Ok(under) = path.strip_prefix(from) {
+                *path = if under.as_os_str().is_empty() { to.to_path_buf() } else { to.join(under) };
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// How a thing on the station is renamed (see `What::renamed_by`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Renamed<'a> {
+    /// The file or folder where it is, renamed there.
+    There(&'a Path),
+    /// One the station keeps itself, given out by `name` (none yet: a picture never renamed), a `folder` sent.
+    Own { name: String, folder: bool },
 }
 
 /// Which of what is on the station, or was copied lately, its page shows: all; what is pinned; what is of one tag, by
@@ -493,6 +563,17 @@ impl Shelf {
         }
     }
 
+    /// `id`, one it keeps itself, given out by `name` from now on (see `What::renamed_by`). Whether it is.
+    pub fn rename(&mut self, id: u64, name: &str) -> bool {
+        self.items.iter_mut().find(|item| item.id == id).is_some_and(|item| item.what.rename(name))
+    }
+
+    /// The file or folder at `from` renamed to `to` (by Glance, or seen so): what holds it, or what is in it, holds
+    /// it there. Whether anything does.
+    pub fn moved(&mut self, from: &Path, to: &Path) -> bool {
+        self.items.iter_mut().fold(false, |changed, item| item.what.moved(from, to) || changed)
+    }
+
     /// The tag `id` gone at `now_ms`, what was of it left.
     pub fn remove_tag(&mut self, id: u32, now_ms: u64) {
         self.tags.retain(|tag| tag.id != id);
@@ -556,7 +637,7 @@ mod tests {
     }
 
     fn picture(name: &str) -> What {
-        What::Picture { file: name.into() }
+        What::Picture { file: name.into(), name: String::new() }
     }
 
     #[test]
@@ -582,6 +663,59 @@ mod tests {
         // Picture files are pictures and files both (files with one not a picture, a folder, files alone).
         assert_eq!(taken(Filter::Pictures), [2, 3, 7]);
         assert_eq!(taken(Filter::Files), [3, 4, 5, 6, 7]);
+    }
+
+    /// What has a name is renamed: a file or folder alone where it is, there; one kept here (a picture, a file saved as
+    /// it came, a file or a folder sent alone) by a name of its own, a folder's files under it. Words, addresses, files
+    /// together and sendings of several have none. A file or folder renamed where it is is followed by what holds it,
+    /// or what is in it, and nothing else.
+    #[test]
+    fn what_has_a_name_is_renamed() {
+        let arrived = |name: &str| Arrived { file: format!("n1-{name}"), name: name.into() };
+        let files = |paths: &[&str]| What::Files { paths: paths.iter().map(PathBuf::from).collect(), kept: Vec::new() };
+        let mut shelf = Shelf::default();
+        let ids = [
+            files(&[r"D:\a.jpg"]),
+            picture("1.png"),
+            What::Saved { file: "2".into(), name: "bill.pdf".into(), words: false },
+            What::Came { files: vec![arrived("x.jpg")] },
+            What::Came { files: vec![arrived("资料/x.pdf"), arrived("资料/图/y.png")] },
+            text("a"),
+            What::Link { url: "https://glancepc.com".into() },
+            files(&[r"D:\a.jpg", r"D:\b.jpg"]),
+            What::Came { files: vec![arrived("x.jpg"), arrived("y.jpg")] },
+            What::Saved { file: "3".into(), name: "很长.txt".into(), words: true },
+        ]
+        .map(|what| shelf.put(what, 0, false, false, 0));
+        let by = |shelf: &Shelf, at: usize| shelf.get(ids[at]).unwrap().what.renamed_by().map(|renamed| match renamed {
+            Renamed::There(path) => path.display().to_string(),
+            Renamed::Own { name, folder } => format!("{name}{}", if folder { "/" } else { "" }),
+        });
+        let named: Vec<_> = (0..ids.len()).map(|at| by(&shelf, at)).collect();
+        assert_eq!(named, [Some(r"D:\a.jpg".into()), Some(String::new()), Some("bill.pdf".into()), Some("x.jpg".into()), Some("资料/".into()), None, None, None, None, None]);
+        for (at, name) in [(1, "白板.png"), (2, "账单.pdf"), (3, "海.jpg"), (4, "旧资料")] {
+            assert!(shelf.rename(ids[at], name));
+            assert_eq!(by(&shelf, at).unwrap().trim_end_matches('/'), name);
+        }
+        let What::Came { files: sent } = &shelf.get(ids[4]).unwrap().what else { unreachable!() };
+        assert_eq!(sent.iter().map(|one| one.name.as_str()).collect::<Vec<_>>(), ["旧资料/x.pdf", "旧资料/图/y.png"]);
+        // (Kept by the names they were kept by.)
+        assert_eq!(sent[0].file, "n1-资料/x.pdf");
+        for at in [0, 5, 7, 8, 9] {
+            assert!(!shelf.rename(ids[at], "b"));
+        }
+        // Renamed where they are.
+        let put = shelf.put(files(&[r"D:\照片\c.jpg", r"D:\照片2\d.jpg"]), 0, false, false, 0);
+        assert!(shelf.moved(Path::new(r"D:\a.jpg"), Path::new(r"D:\海.jpg")));
+        assert!(shelf.moved(Path::new(r"D:\照片"), Path::new(r"D:\旅行")));
+        assert!(!shelf.moved(Path::new(r"D:\无"), Path::new(r"D:\有")));
+        let paths = |id: u64| match &shelf.get(id).unwrap().what {
+            What::Files { paths, .. } => paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        assert_eq!(paths(ids[0]), [r"D:\海.jpg"]);
+        assert_eq!(paths(ids[7]), [r"D:\海.jpg", r"D:\b.jpg"]);
+        assert_eq!(paths(put), [r"D:\旅行\c.jpg", r"D:\照片2\d.jpg"]);
     }
 
     /// With all that was copied, what is pinned is listed first, the three last used, and only there. Folded, none of

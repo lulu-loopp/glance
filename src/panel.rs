@@ -2164,6 +2164,11 @@ impl Controller {
                         crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Item(id)]), at, look, crate::update::language());
                     }
                 }
+                (Some(crate::station::Choice::Rename), _) => {
+                    if let Some((at, naming)) = name_at().zip(crate::station::renaming(crate::station::Thing::Item(id))) {
+                        crate::ui::rename::open(owner, naming, at, look, crate::update::language());
+                    }
+                }
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
@@ -2209,6 +2214,11 @@ impl Controller {
                 Some(crate::station::RecentChoice::NewTag) => {
                     if let Some(at) = name_at() {
                         crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Recent(file)]), at, look, crate::update::language());
+                    }
+                }
+                Some(crate::station::RecentChoice::Rename) => {
+                    if let Some((at, naming)) = name_at().zip(crate::station::renaming(crate::station::Thing::Recent(file))) {
+                        crate::ui::rename::open(owner, naming, at, look, crate::update::language());
                     }
                 }
                 Some(choice) => crate::station::recent_chose(file, *choice),

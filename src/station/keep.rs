@@ -91,7 +91,7 @@ impl Keep {
             (Content::Text(text), What::Link { url }) => url == text.trim(),
             (Content::Text(text), What::Text { text: kept }) => kept == text,
             (Content::Text(text), What::Saved { file, words: true, .. }) => holds(file, text.as_bytes()),
-            (Content::Png(png), What::Picture { file }) => holds(file, png),
+            (Content::Png(png), What::Picture { file, .. }) => holds(file, png),
             (Content::Saved { name, bytes }, What::Saved { file, name: kept, words: false }) => kept == name && holds(file, bytes),
             (Content::Files(paths), What::Files { paths: at, kept }) => {
                 paths == at
@@ -121,7 +121,7 @@ impl Keep {
                     Ok((What::Saved { file, name: format!("{first}.txt"), words: true }, text.len() as u64))
                 }
             }
-            Content::Png(png) => Ok((What::Picture { file: self.kept(&png, "png", false)? }, png.len() as u64)),
+            Content::Png(png) => Ok((What::Picture { file: self.kept(&png, "png", false)?, name: String::new() }, png.len() as u64)),
             // (Given by another program, from where it does not say: as from the Internet, as Windows takes such a
             // file, not trusted once it is on the station.)
             Content::Saved { name, bytes } => {
@@ -398,6 +398,20 @@ impl Keep {
         self.save();
     }
 
+    /// `id`, one it keeps itself, given out by `name` from now on (see `Shelf::rename`).
+    pub fn rename(&mut self, id: u64, name: &str) {
+        if self.shelf.rename(id, name) {
+            self.save();
+        }
+    }
+
+    /// The file or folder at `from` renamed to `to`: what holds it holds it there (see `Shelf::moved`).
+    pub fn moved(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        if self.shelf.moved(from, to) {
+            self.save();
+        }
+    }
+
     /// Takes off what has stayed its days (see `Rules::keep_days`).
     pub fn expire(&mut self, now_ms: u64) {
         let gone = self.shelf.expire(self.rules, now_ms);
@@ -425,7 +439,7 @@ impl Keep {
                     })
                     .collect::<Option<Vec<PathBuf>>>()?,
             ),
-            What::Picture { file } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
+            What::Picture { file, .. } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
             What::Saved { file, words: true, .. } => Content::Text(std::fs::read_to_string(self.folder.path(file)).ok()?),
             What::Saved { file, name, words: false } => Content::Files(vec![self.folder.named(file, name)?]),
             What::Came { files } => Content::Files(self.given(files)?),

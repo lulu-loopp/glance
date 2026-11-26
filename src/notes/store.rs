@@ -161,7 +161,7 @@ impl Folder {
         let bytes = text.as_bytes();
         std::fs::write(&beside, bytes)?;
         let placed = match was {
-            None => put_new(&beside, &path),
+            None => crate::os::move_new(&beside, &path),
             Some(was) => {
                 // (Kept under a name of its own each time: one left by a save cut short, never looked at, is never
                 // written over or taken away by the next.)
@@ -177,7 +177,7 @@ impl Folder {
                     }
                     // (Its file moved to where it is kept, and this not put in its place: put back where it was.)
                     Err(error) if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => {
-                        let _ = put_new(&displaced, &path);
+                        let _ = crate::os::move_new(&displaced, &path);
                         Err(error)
                     }
                     Err(error) => Err(error),
@@ -209,15 +209,15 @@ impl Folder {
         // stays. Moved aside first, in one move, and looked at where no one else writes: looked at in its place and
         // then taken away by its name, a file written there in between was taken away in its stead.
         let taken = self.free_hidden(&format!(".{name}.glance-taken"));
-        if put_new(&path, &taken).is_ok() {
+        if crate::os::move_new(&path, &taken).is_ok() {
             if std::fs::read(&taken).is_ok_and(|now| now == text.as_bytes()) {
                 std::fs::remove_file(&taken)?;
-            } else if put_new(&taken, &path).is_err() {
+            } else if crate::os::move_new(&taken, &path).is_err() {
                 // (Another's, and yet another written in its place meanwhile: kept beside it, never over it.)
                 self.put_new_named(&format!("{stem}{}.md", self.apart), &taken)?;
             }
         }
-        if put_new(displaced, &path).is_err() {
+        if crate::os::move_new(displaced, &path).is_err() {
             self.put_new_named(&format!("{stem}{}.md", self.apart), displaced)?;
         }
         Ok(written)
@@ -246,7 +246,7 @@ impl Folder {
     fn put_new_named(&self, name: &str, from: &Path) -> std::io::Result<String> {
         loop {
             let free = self.free_name(name);
-            match put_new(from, &self.path.join(&free)) {
+            match crate::os::move_new(from, &self.path.join(&free)) {
                 Ok(()) => return Ok(free),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
@@ -401,25 +401,12 @@ fn system_code_page(_: &[u8]) -> Option<String> {
 /// its place (winerror.h's `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`): the file is then only where it is kept.
 const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 
-/// The file at `from` given the name `to`, where no file has it (one that does: `AlreadyExists`).
-#[cfg(windows)]
-fn put_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
-    unsafe { MoveFileExW(&windows::core::HSTRING::from(from.as_os_str()), &windows::core::HSTRING::from(to.as_os_str()), MOVE_FILE_FLAGS(0)) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))
-}
-
 /// The file at `from` put in the place of the one at `to`, which is kept as `kept` (gone: `NotFound`).
 #[cfg(windows)]
 fn put_over(from: &Path, to: &Path, kept: &Path) -> std::io::Result<()> {
     use windows::Win32::Storage::FileSystem::{ReplaceFileW, REPLACE_FILE_FLAGS};
     let name = |path: &Path| windows::core::HSTRING::from(path.as_os_str());
     unsafe { ReplaceFileW(&name(to), &name(from), &name(kept), REPLACE_FILE_FLAGS(0), None, None) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))
-}
-
-#[cfg(not(windows))]
-fn put_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(from, to)?;
-    std::fs::remove_file(from)
 }
 
 #[cfg(not(windows))]

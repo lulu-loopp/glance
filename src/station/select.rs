@@ -546,6 +546,6 @@ mod tests {
         assert_eq!(files_in(&files), 3);
         assert_eq!(files_in(&What::Text { text: "a".into() }), 1);
         assert_eq!(files_in(&What::Link { url: "https://a.b".into() }), 1);
-        assert_eq!(files_in(&What::Picture { file: "1.png".into() }), 1);
+        assert_eq!(files_in(&What::Picture { file: "1.png".into(), name: String::new() }), 1);
     }
 }

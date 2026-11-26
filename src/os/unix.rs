@@ -20,3 +20,9 @@ pub fn apps_dark() -> bool {
 pub fn accent(_dark: bool) -> Option<u32> {
     None
 }
+
+/// The file at `from` given the name `to`, where nothing has it (one that does: `AlreadyExists`).
+pub fn move_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
+}

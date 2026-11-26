@@ -594,7 +594,7 @@ fn held_name(what: &Held, lang: Lang) -> String {
         }
         Held::Text { text } => text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().take(120).collect(),
         Held::Link { url } => url.clone(),
-        Held::Picture { .. } => lang.pick("图片", "Picture").into(),
+        Held::Picture { name, .. } => crate::ui::view::picture_named(name, lang),
         Held::Saved { name, .. } => name.clone(),
     }
 }

@@ -1706,7 +1706,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
                 }
                 What::Text { text } => (lang.pick("文字", "Text").to_string(), Shows::Words(text.clone()), true),
                 What::Link { url } => (tile.label, Shows::Words(url.clone()), false),
-                What::Picture { file } => (lang.pick("图片", "Picture").to_string(), Shows::File(folder.path(file)), false),
+                What::Picture { file, name } => (picture_named(name, lang), Shows::File(folder.path(file)), false),
                 What::Saved { file, words: true, .. } => (lang.pick("文字", "Text").to_string(), Shows::Kept(folder.path(file)), true),
                 What::Saved { file, name, words: false } => (name.clone(), Shows::File(folder.path(file)), false),
                 What::Came { files } => (tile.label, shows_files(crate::station::shelf::entries(files).iter().map(|entry| entry_path(&folder, entry)).collect()), false),
@@ -1770,6 +1770,11 @@ enum Face {
     Receiving { per_mille: u16 },
 }
 
+/// What a picture the station keeps is called: the name it was given, else what it is.
+pub fn picture_named(name: &str, lang: Lang) -> String {
+    if name.is_empty() { lang.pick("图片", "Picture").into() } else { name.to_string() }
+}
+
 impl Tile {
     /// `item` as its tile shows it (its tags of those there are, `tags`, its own files in `folder`), `now` (ms since 1970).
     fn of(item: &crate::station::shelf::Item, tags: &[crate::station::shelf::Tag], folder: &crate::station::folder::Folder, lang: Lang, now: u64) -> Tile {
@@ -1805,7 +1810,7 @@ impl Tile {
                 Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(FACE_LINES).collect::<Vec<_>>().join("\n")),
             ),
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
-            What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
+            What::Picture { file, name } => (picture_named(name, lang), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
             What::Saved { file, name, words } => (name.clone(), if *words { lang.pick("文字", "Text") } else { lang.pick("文件", "File") }.into(), Face::Picture { path: folder.path(file), more: 0 }),
             // (Where they came from said with what they are: a folder sent, as that folder.)
             What::Came { files } => {
@@ -6590,6 +6595,14 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     hits.extend(shown_in((bx, by, ROW_PIN, ROW_PIN, *button), room));
                     right -= ROW_PIN;
                 }
+                // Before them, the preview's shortcut, where the pointer has rested on it (its picture too small to hold
+                // it): in the room when it came leaves while it is lit.
+                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+                    let wide = hint_wide(frame, theme, says);
+                    let gap = if right < x + width { 4.0 } else { 0.0 };
+                    hint_plate(frame, theme, says, said, (right - gap - wide, y + (LIST_ROW - HINT_TALL) / 2.0));
+                    right -= gap + wide;
+                }
                 if let Some(when) = tile.when.as_ref().filter(|_| !lit) {
                     let wide = frame.measure(when, theme.small);
                     frame.text(when, theme.small, theme.text3, right - wide, frame.line_in(theme.small, y, LIST_ROW), wide + 1.0, Align::Start);
@@ -6815,25 +6828,39 @@ fn corner_marked(tile: &Tile, small: f32) -> bool {
 
 const HINT_TALL: f32 = 20.0;
 const HINT_INSET: f32 = 6.0;
+const HINT_PAD: f32 = 7.0;
 
 /// The preview's shortcut said on a thing (`says`), as shown as `shown`: a small plate in the skin's sheet, as its
 /// menus' are, at the bottom right corner of its picture (there, `room` wide: its buttons are at its top); settling into
 /// place as it comes in.
 fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, (right, bottom, room): (f32, f32, f32)) {
-    const TALL: f32 = HINT_TALL;
-    const PAD: f32 = 7.0;
-    const INSET: f32 = HINT_INSET;
-    let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
-    let font = Font { size: theme.small.size.min(11.5), weight: 600.0, ..theme.small };
-    let wide = PAD + frame.measure(says, font) + PAD;
-    let drop = (1.0 - shown) * 2.0;
+    let wide = hint_wide(frame, theme, says);
     // (Where the picture is narrower than what is said, under its middle.)
-    let left = if wide + 2.0 * INSET <= room { right - INSET - wide } else { right - room / 2.0 - wide / 2.0 };
-    let top = bottom - INSET - TALL + drop;
-    let radius = mark_round(theme, &colours, TALL);
+    let left = if wide + 2.0 * HINT_INSET <= room { right - HINT_INSET - wide } else { right - room / 2.0 - wide / 2.0 };
+    hint_plate(frame, theme, says, shown, (left, bottom - HINT_INSET - HINT_TALL));
+}
+
+/// The words the preview's shortcut is said in.
+fn hint_font(theme: &Theme) -> Font {
+    Font { size: theme.small.size.min(11.5), weight: 600.0, ..theme.small }
+}
+
+/// How wide the plate the preview's shortcut (`says`) is said on is.
+fn hint_wide(frame: &dyn Canvas, theme: &Theme, says: &str) -> f32 {
+    2.0 * HINT_PAD + frame.measure(says, hint_font(theme))
+}
+
+/// The plate the preview's shortcut (`says`) is said on, as shown as `shown`, its corner at (`left`, `top`) once in:
+/// settling into place as it comes in.
+fn hint_plate(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, (left, top): (f32, f32)) {
+    let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
+    let font = hint_font(theme);
+    let wide = hint_wide(frame, theme, says);
+    let top = top + (1.0 - shown) * 2.0;
+    let radius = mark_round(theme, &colours, HINT_TALL);
     let faded = |color: Color| color.alpha(shown);
-    frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
-    frame.text(says, font, faded(colours.text), left + PAD, frame.line_in(font, top, TALL), wide, Align::Start);
+    frame.fill_rounded(faded(colours.sheet), left, top, wide, HINT_TALL, radius);
+    frame.text(says, font, faded(colours.text), left + HINT_PAD, frame.line_in(font, top, HINT_TALL), wide, Align::Start);
 }
 
 /// The mark on a thing just copied (see `copied`), as clear as `clear` (none at 0): a pill of the lane's `ink`, a tick
@@ -10732,6 +10759,51 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The preview's shortcut is said on the thing the pointer rests on, in every form of every page of the lane: once,
+    /// within the thing, and on a line clear of its buttons (its picture too small to hold it there).
+    #[test]
+    fn the_preview_shortcut_is_said_on_lines_as_on_cards() {
+        use crate::station::{recent::{Entry, Key}, shelf::{Item, What}};
+        let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Glass, true), [Arc::new(sample(None, None, None))]);
+        let seen = Seen::of(&history);
+        let scene = |hover: Hit| Scene { music_apart: false, hint: Some((hover, 1.0, "Ctrl+Q")), info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(hover), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let items = |copied: bool| [1, 2, 3].map(|id: u64| Item { id, what: What::Text { text: "a".into() }, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 });
+        let entry = |file: u128| Entry::File(Key { drive: 'C', file });
+        let folder = crate::station::folder::Folder::own();
+        let ink = theme.ink("station");
+        for page in [Tab::default(), Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
+            let hit = match page {
+                Tab::Shelf(_) => Hit::Shelf(2),
+                Tab::Copies(_) => Hit::Copied(2),
+                Tab::Recent(_) => Hit::Recent(entry(2)),
+            };
+            let held = items(page == Tab::Copies(Default::default()));
+            for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
+                let (said, mut hits) = (Said::default(), Vec::new());
+                let tiles: Vec<Tile> = held.iter().map(|item| Tile::of(item, &[], &folder, Lang::Zh, 0)).collect();
+                match page {
+                    Tab::Shelf(_) => paint_shelf(&said, &scene(hit), ink, (0.0, 0.0, 324.0), &tiles, &LanePage::default(), Shows::View(view), STATION_TALL, None, false, &mut hits),
+                    Tab::Copies(_) => paint_copies(&said, &scene(hit), ink, (0.0, 0.0, 324.0), &tiles, &copies_page(view), STATION_TALL, &mut hits),
+                    Tab::Recent(_) => {
+                        let rows: Vec<Lately> = (1..=3).map(|file| Lately { entry: entry(file), day: "今天", label: "a".into(), about: String::new(), when: "10:13".into(), path: std::path::PathBuf::new(), more: 0, dated: String::new(), pinned: false, tags: Vec::new() }).collect();
+                        paint_recent(&said, &scene(hit), ink, (0.0, 0.0, 324.0), &rows, &recent_page(view), STATION_TALL, false, &mut hits);
+                    }
+                }
+                let marks: Vec<(f32, f32)> = said.3.borrow().iter().filter(|(text, ..)| text == "Ctrl+Q").map(|(_, x, y, _)| (*x, *y)).collect();
+                assert_eq!(marks.len(), 1, "{page:?} {view:?}");
+                let (x, y) = marks[0];
+                let right = x + Nothing.measure("Ctrl+Q", hint_font(&theme));
+                let thing = hits.iter().find(|one| one.4 == hit).unwrap();
+                assert!(x >= thing.0 && right <= thing.0 + thing.2 && y >= thing.1 && y <= thing.1 + thing.3, "{page:?} {view:?}: ({x}, {y}) out of {thing:?}");
+                if view == ShelfView::List {
+                    for button in hits.iter().filter(|one| matches!(one.4, Hit::PinThing(_) | Hit::TagThing(_))) {
+                        assert!(right <= button.0, "{page:?}: the shortcut runs into {button:?}");
+                    }
+                }
+            }
+        }
+    }
+
     /// The choices over a page: what is on the station has none while nothing there is pinned or tagged (nor shown by
     /// either), what was copied always has what is pinned among them, the files come lately while anything is. Its tags
     /// are those its own things have, and one nothing has anywhere, on every page.
@@ -11960,7 +12032,7 @@ seven".into()));
             item(1, words("a"), false),
             item(2, words("b"), true),
             item(3, What::Link { url: "https://a.b".into() }, true),
-            item(4, What::Picture { file: "4.png".into() }, true),
+            item(4, What::Picture { file: "4.png".into(), name: String::new() }, true),
             item(5, words("c"), false),
         ];
         crate::station::run::pretend(items.clone(), crate::settings::ShelfView::Cards);
@@ -13229,7 +13301,7 @@ seven".into()));
         let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
-            item(2, What::Picture { file: "2.png".into() }, true),
+            item(2, What::Picture { file: "2.png".into(), name: String::new() }, true),
             item(3, What::Link { url: "https://glancepc.com".into() }, true),
             item(4, What::Text { text: "put by hand".into() }, false),
             item(5, What::Files { paths: vec![std::path::PathBuf::from(r"C:\a.txt")], kept: Vec::new() }, true),

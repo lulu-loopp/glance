@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetCapture, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT};
@@ -25,6 +26,8 @@ use crate::ui::window::{Window, CAPTURE_LOST};
 /// Its measures (DIPs), as the agreed design has them.
 const PAD: f32 = 10.0;
 const FIELD_W: f32 = 150.0;
+/// A file's name's field: wider, a file's names being longer.
+const FILE_FIELD_W: f32 = 240.0;
 const FIELD_H: f32 = 28.0;
 const GAP: f32 = 8.0;
 /// The words' inset in the field.
@@ -32,17 +35,32 @@ const INSET: f32 = 8.0;
 /// The most a name holds (UTF-16 units), and a tag's.
 const MOST: usize = 64;
 const TAG_MOST: usize = 24;
+/// The most a file's name holds (Windows' own most).
+const NAME_MOST: usize = 255;
 
 /// What is done with what is written, as it is kept.
 pub type Kept = Box<dyn FnOnce(&str)>;
 
+/// What is done with what is written where that may be refused (see `Naming::file`): tried on a thread of its own (a
+/// file renamed on a drive slow to answer never holds the panel), the box up till it answers: done, or why not.
+pub type Tried = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// What is done with what is written as Enter is pressed: done as the box goes, or tried first (see `Tried`).
+enum Keeping {
+    Now(Kept),
+    Tried(Tried),
+}
+
 /// What a name is written for: the name it has now, what is said where nothing is written, the most it holds (UTF-16
-/// units), and what is done with what is written.
+/// units), how much of it is chosen as the box opens (UTF-16 units from its start), how wide its field is (DIPs), and
+/// what is done with what is written.
 pub struct Naming {
     shown: String,
     empty: &'static str,
     most: usize,
-    keep: Kept,
+    chosen: usize,
+    field: f32,
+    keep: Keeping,
 }
 
 impl Naming {
@@ -54,18 +72,48 @@ impl Naming {
                 crate::station::apps::rename(app, alias);
             }
         };
-        Naming { shown, empty: "", most: MOST, keep: Box::new(keep) }
+        Naming { chosen: units(&shown), shown, empty: "", most: MOST, field: FIELD_W, keep: Keeping::Now(Box::new(keep)) }
     }
 
     /// A tag of what was copied, named `shown` now (nothing: a new one): what is written given to `keep`.
     pub fn tag(shown: String, lang: Lang, keep: impl FnOnce(&str) + 'static) -> Naming {
-        Naming { shown, empty: lang.pick("标签名称", "Tag name"), most: TAG_MOST, keep: Box::new(keep) }
+        Naming { chosen: units(&shown), shown, empty: lang.pick("标签名称", "Tag name"), most: TAG_MOST, field: FIELD_W, keep: Keeping::Now(Box::new(keep)) }
     }
+
+    /// A file's name, or (`folder`) a folder's, `shown` now: written whole, its kind's ending not chosen (as Explorer
+    /// has it). What is written taken as a file's name is (see `os::name_written`) given to `rename` where it is
+    /// another: done, or why not (said in the box, which stays). Written empty, or as it was, it is left as it was; one
+    /// a name may not be is refused, said why.
+    pub fn file(shown: String, folder: bool, lang: Lang, rename: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> Naming {
+        let was = shown.clone();
+        let tried = move |written: &str| match crate::os::name_written(written) {
+            Ok(None) => Ok(()),
+            Ok(Some(name)) if name == was => Ok(()),
+            Ok(Some(name)) => rename(&name),
+            Err(crate::os::NameRefused::Holds) => Err(lang.pick("名称不能包含 \\ / : * ? \" < > |", "A name can't contain \\ / : * ? \" < > |").into()),
+            Err(crate::os::NameRefused::Device) => Err(lang.pick("此名称由系统保留", "This name is reserved by Windows").into()),
+        };
+        let chosen = if folder { units(&shown) } else { units(stem(&shown)) };
+        Naming { shown, empty: lang.pick("名称", "Name"), most: NAME_MOST, chosen, field: FILE_FIELD_W, keep: Keeping::Tried(Arc::new(tried)) }
+    }
+}
+
+/// How long `text` is in UTF-16 units.
+fn units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// A file's name but its kind's ending (".jpg"): all of a name with none, or only one (".gitignore").
+fn stem(name: &str) -> &str {
+    name.rfind('.').filter(|at| *at > 0).map_or(name, |at| &name[..at])
 }
 
 /// What `keys::LEFT` posted to its window says where Enter was pressed: what is written kept. (Esc posts 1, another
 /// window in front 0: left as it was.)
 const KEEP: usize = 2;
+
+/// Posted to its window where what was written, tried (see `Tried`), was refused: why, in `Renaming::answer`.
+const REFUSED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 60;
 
 /// What a message to it came to.
 pub enum Handled {
@@ -93,9 +141,20 @@ struct Renaming {
     rect: RECT,
     /// The window its menu was opened from (the panel's, a widget's).
     owner: isize,
-    /// What is said where nothing is written, and what is done with what is.
+    /// What is said where nothing is written, and what is done with what is (taken as it goes).
     empty: &'static str,
-    keep: Kept,
+    keep: Option<Keeping>,
+    /// How wide its field is (DIPs).
+    field: f32,
+    /// Where it was asked (its corner there, as near as its screen lets it), and that screen's room for it.
+    at: POINT,
+    work: RECT,
+    /// What is written being tried (see `Tried`): the keys write nothing meanwhile.
+    trying: bool,
+    /// Why what was written last was refused, as it answered (see `REFUSED`), and said in place of what the keys do till
+    /// what is written changes.
+    answer: Arc<Mutex<Option<String>>>,
+    said: Option<String>,
     typing: Typing,
     /// How far the words are turned left in the field, their caret kept in it (DIPs).
     scroll: f32,
@@ -170,8 +229,9 @@ pub fn close(keep: bool) {
     let rect = renaming.rect;
     let before = renaming.before;
     renaming.window.destroy();
-    if keep {
-        (renaming.keep)(&renaming.typing.string());
+    // (What was tried is done as it answered.)
+    if let (true, Some(Keeping::Now(kept))) = (keep, renaming.keep) {
+        kept(&renaming.typing.string());
     }
     crate::widget::own_window_changed(rect);
     if held && !before.is_invalid() {
@@ -201,7 +261,9 @@ fn answer(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<O
                 return None;
             }
             if key == VK_RETURN {
-                let _ = unsafe { PostMessageW(Some(hwnd), crate::ui::keys::LEFT, WPARAM(KEEP), LPARAM(0)) };
+                if RENAME.with_borrow_mut(|rename| rename.as_mut().is_some_and(|renaming| renaming.enter(hwnd))) {
+                    let _ = unsafe { PostMessageW(Some(hwnd), crate::ui::keys::LEFT, WPARAM(KEEP), LPARAM(0)) };
+                }
                 return Some(Some(LRESULT(0)));
             }
             let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
@@ -247,18 +309,64 @@ fn answer(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<O
     }
 }
 
-/// `change` made to what is written in it, drawn so.
+/// `change` made to what is written in it (none while it is tried), drawn so: why it was refused no longer said.
 fn written(change: impl FnOnce(&mut Typing)) {
     RENAME.with_borrow_mut(|rename| {
-        if let Some(renaming) = rename.as_mut() {
+        if let Some(renaming) = rename.as_mut().filter(|renaming| !renaming.trying) {
+            let was = renaming.typing.text.clone();
             change(&mut renaming.typing);
             renaming.follow_caret();
+            if renaming.said.is_some() && renaming.typing.text != was {
+                renaming.said = None;
+                renaming.place();
+            }
             let _ = renaming.draw();
         }
     });
 }
 
 impl Renaming {
+    /// Enter pressed in its window `hwnd`: whether what is written is kept as it goes (see `KEEP`). Where it is to be
+    /// tried first, tried (once at a time): its answer posted to it, kept where it was done (`KEEP`), else why not
+    /// (`REFUSED`).
+    fn enter(&mut self, hwnd: HWND) -> bool {
+        let Some(Keeping::Tried(tried)) = &self.keep else { return true };
+        if !self.trying {
+            self.trying = true;
+            let (tried, written, answer, window) = (tried.clone(), self.typing.string(), self.answer.clone(), hwnd.0 as isize);
+            std::thread::spawn(move || {
+                let done = tried(&written);
+                let (message, wparam) = if done.is_ok() { (crate::ui::keys::LEFT, KEEP) } else { (REFUSED, 0) };
+                *answer.lock().unwrap() = done.err();
+                let _ = unsafe { PostMessageW(Some(HWND(window as *mut _)), message, WPARAM(wparam), LPARAM(0)) };
+            });
+        }
+        false
+    }
+
+    /// What is said beside its field: why what was written was refused, else what the keys do.
+    fn aside(&self) -> &str {
+        self.said.as_deref().unwrap_or_else(|| self.hint())
+    }
+
+    /// Its window where it was asked, as wide as it is now (see `width`), its corner as near there as its screen lets
+    /// it.
+    fn place(&mut self) {
+        let room = self.room;
+        let px = |dips: f32| (dips * self.scale).round() as i32;
+        let (w, h) = (px(self.width() + 2.0 * room), px(HEIGHT + 2.0 * room));
+        let (at, work) = (self.at, self.work);
+        let left = (at.x - px(room)).clamp(work.left - px(room), (work.right - w + px(room)).max(work.left - px(room)));
+        let top = (at.y - px(room)).clamp(work.top - px(room), (work.bottom - h + px(room)).max(work.top - px(room)));
+        let was = self.rect;
+        self.rect = RECT { left, top, right: left + w, bottom: top + h };
+        if was != RECT::default() {
+            self.window.place(self.rect);
+            crate::widget::own_window_changed(was);
+            crate::widget::own_window_changed(self.rect);
+        }
+    }
+
     fn new(owner: HWND, naming: Naming, at: POINT, look: Look, lang: Lang) -> Option<Renaming> {
         let contact = crate::mouse::monitor_at(at)?;
         // (On the device for its screen: see `gfx::on_screen`.)
@@ -279,7 +387,7 @@ impl Renaming {
         let mut typing = Typing::most(naming.most);
         typing.put(&naming.shown.encode_utf16().collect::<Vec<_>>());
         typing.go(0, false);
-        typing.go(typing.text.len(), true);
+        typing.go(naming.chosen.min(typing.text.len()), true);
         let mut renaming = Renaming {
             gfx,
             window,
@@ -294,20 +402,20 @@ impl Renaming {
             rect: RECT::default(),
             owner: owner.0 as isize,
             empty: naming.empty,
-            keep: naming.keep,
+            keep: Some(naming.keep),
+            field: naming.field,
+            at,
+            work: contact.work,
+            trying: false,
+            answer: Arc::default(),
+            said: None,
             typing,
             scroll: 0.0,
             before: HWND::default(),
             _showing: showing,
         };
         // Its plate's corner where it was asked, as near as its screen lets it.
-        let room = renaming.room;
-        let px = |dips: f32| (dips * renaming.scale).round() as i32;
-        let (w, h) = (px(renaming.width() + 2.0 * room), px(HEIGHT + 2.0 * room));
-        let work = contact.work;
-        let left = (at.x - px(room)).clamp(work.left - px(room), (work.right - w + px(room)).max(work.left - px(room)));
-        let top = (at.y - px(room)).clamp(work.top - px(room), (work.bottom - h + px(room)).max(work.top - px(room)));
-        renaming.rect = RECT { left, top, right: left + w, bottom: top + h };
+        renaming.place();
         renaming.follow_caret();
         if !renaming.draw() {
             renaming.window.destroy();
@@ -331,9 +439,9 @@ impl Renaming {
         Font { size: 12.0, ..self.font() }
     }
 
-    /// How wide its plate is (DIPs): its field, then what the keys do.
+    /// How wide its plate is (DIPs): its field, then what is said beside it.
     fn width(&self) -> f32 {
-        PAD + FIELD_W + GAP + self.gfx.measure(self.hint(), self.hint_font()).ceil() + PAD
+        PAD + self.field + GAP + self.gfx.measure(self.aside(), self.hint_font()).ceil() + PAD
     }
 
     /// How far into its words (DIPs) the unit `at` of them is.
@@ -343,7 +451,7 @@ impl Renaming {
 
     /// Its words turned so that the caret stays in its field.
     fn follow_caret(&mut self) {
-        let room = FIELD_W - 2.0 * INSET;
+        let room = self.field - 2.0 * INSET;
         let caret = self.into_words(self.typing.caret);
         let whole = self.into_words(self.typing.text.len());
         self.scroll = self.scroll.min(caret).max(caret - room).min((whole - room).max(0.0)).max(0.0);
@@ -365,7 +473,7 @@ impl Renaming {
         match msg.message {
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !on_plate => Handled::Left,
             // A press in its field: the caret there (with Shift, the selection to there).
-            WM_LBUTTONDOWN if (PAD..=PAD + FIELD_W).contains(&x) => {
+            WM_LBUTTONDOWN if (PAD..=PAD + self.field).contains(&x) => {
                 let at = self.unit_at(x - PAD - INSET + self.scroll);
                 let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
                 self.typing.go(at, shift);
@@ -375,6 +483,14 @@ impl Renaming {
             }
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN => Handled::Taken,
             CAPTURE_LOST => Handled::Left,
+            // What was written refused, as it was tried: why said beside it, the keys its again.
+            REFUSED => {
+                self.trying = false;
+                self.said = self.answer.lock().unwrap().take();
+                self.place();
+                let _ = self.draw();
+                Handled::Taken
+            }
             _ => Handled::Not,
         }
     }
@@ -418,7 +534,7 @@ impl Renaming {
             Skin::Fluent => 4.0,
             _ => 7.0,
         };
-        let (x, y, w, h) = (PAD, PAD, FIELD_W, FIELD_H);
+        let (x, y, w, h) = (PAD, PAD, self.field, FIELD_H);
         frame.fill_rounded(theme.track, x, y, w, h, round);
         frame.stroke_rounded(Fill::Solid(if theme.skin == Skin::Glass { theme.text2 } else { accent }), x - 0.75, y - 0.75, w + 1.5, h + 1.5, round + 0.75, 1.5);
         let line = frame.line_in(font, y, h);
@@ -437,7 +553,8 @@ impl Renaming {
         frame.fill(theme.text, left + self.into_words(self.typing.caret), y + 6.0, 1.2, h - 12.0);
         frame.unclip();
         let hint = self.hint_font();
-        frame.text(self.hint(), hint, theme.text3, x + w + GAP, frame.line_in(hint, y, h), self.width(), Align::Start);
+        let aside = if self.said.is_some() { theme.signal } else { theme.text3 };
+        frame.text(self.aside(), hint, aside, x + w + GAP, frame.line_in(hint, y, h), self.width(), Align::Start);
     }
 }
 
@@ -458,5 +575,32 @@ mod tests {
         assert_eq!(kept(&app, "工作", " 周报 "), Some(Some("周报".into())));
         assert_eq!(kept(&app, "周报", ""), Some(None));
         assert_eq!(kept(&app, "周报", "Docs"), Some(None));
+    }
+
+    /// A file's name opens with all but its kind's ending chosen (a folder's whole, a name with no ending, or only
+    /// one, whole). What is written is tried as Explorer takes a name: written empty, or as it was, nothing is done;
+    /// what a name may not be refused, said why; else the name given to be done, and its answer told.
+    #[test]
+    fn a_file_is_renamed_as_explorer_renames_it() {
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let naming = |shown: &str, folder: bool| {
+            let asked = asked.clone();
+            Naming::file(shown.into(), folder, Lang::Zh, move |name| {
+                asked.lock().unwrap().push(name.to_string());
+                if name == "在用.txt" { Err("在用".into()) } else { Ok(()) }
+            })
+        };
+        assert_eq!(naming("报告.final.docx", false).chosen, units("报告.final"));
+        assert_eq!(naming("v1.2", true).chosen, units("v1.2"));
+        assert_eq!(naming(".gitignore", false).chosen, units(".gitignore"));
+        assert_eq!(naming("README", false).chosen, units("README"));
+        let Keeping::Tried(tried) = naming("a.txt", false).keep else { panic!("a file's name is tried") };
+        assert_eq!(tried("  "), Ok(()));
+        assert_eq!(tried("a.txt. "), Ok(()));
+        assert!(tried("a?.txt").is_err());
+        assert!(tried("con.txt").is_err());
+        assert_eq!(tried(" b.txt "), Ok(()));
+        assert_eq!(tried("在用.txt"), Err("在用".into()));
+        assert_eq!(*asked.lock().unwrap(), ["b.txt", "在用.txt"]);
     }
 }

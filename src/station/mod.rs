@@ -187,6 +187,7 @@ pub enum Choice {
     Open,
     Preview,
     Show,
+    Rename,
     Pin,
     Tags,
     Tag(u32),
@@ -263,6 +264,67 @@ pub fn renaming_tag(id: u32, name: String) -> crate::ui::rename::Naming {
     crate::ui::rename::Naming::tag(name, crate::update::language(), move |written| run::ask(run::Ask::RenameTag(id, written.to_string())))
 }
 
+/// The box `thing` is renamed in (see `ui::rename`), where it has a name to rename (see `shelf::What::renamed_by`; a
+/// file come lately alone): a file or folder where it is renamed there (see `rename_there`), one the station keeps
+/// itself given out by the name written from now on (a picture never renamed opened as what it is, of its kind).
+pub fn renaming(thing: Thing) -> Option<crate::ui::rename::Naming> {
+    use crate::ui::rename::Naming;
+    let lang = crate::update::language();
+    let there = |path: std::path::PathBuf| {
+        let folder = thumbs::looked(&path) == Some(thumbs::Looked::Folder);
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        Some(Naming::file(name, folder, lang, move |written| rename_there(&path, written, lang)))
+    };
+    match thing {
+        Thing::Item(id) => {
+            let shown = run::shown();
+            let item = shown.items.iter().find(|item| item.id == id)?;
+            match item.what.renamed_by()? {
+                shelf::Renamed::There(path) => there(path.to_path_buf()),
+                shelf::Renamed::Own { name, folder } => {
+                    let name = match &item.what {
+                        shelf::What::Picture { file, .. } if name.is_empty() => {
+                            let kind = std::path::Path::new(file).extension().map_or_else(String::new, |kind| format!(".{}", kind.to_string_lossy()));
+                            format!("{}{kind}", lang.pick("图片", "Picture"))
+                        }
+                        _ => name,
+                    };
+                    Some(Naming::file(name, folder, lang, move |written| {
+                        run::ask(run::Ask::Rename(id, written.to_string()));
+                        Ok(())
+                    }))
+                }
+            }
+        }
+        Thing::Recent(entry @ recent::Entry::File(_)) => there(recent::paths_of(entry)?.into_iter().next()?),
+        Thing::Recent(recent::Entry::Burst(..)) => None,
+    }
+}
+
+/// The file or folder at `path` named `name` where it is (where nothing there has that name): what holds it on the
+/// station holds it so (see `shelf::Shelf::moved`; the files come lately follow it themselves). Why not, where not.
+fn rename_there(path: &std::path::Path, name: &str, lang: crate::ui::text::Lang) -> Result<(), String> {
+    let to = path.with_file_name(name);
+    match crate::os::move_new(path, &to) {
+        Ok(()) => {
+            run::ask(run::Ask::Moved(path.to_path_buf(), to));
+            Ok(())
+        }
+        Err(error) => {
+            crate::journal::note(format!("station: not renamed ({error})"));
+            // (winerror.h: a file not found, its path not found; access denied, a sharing violation; a file there, one
+            // already there.)
+            Err(match error.raw_os_error() {
+                Some(2 | 3) => lang.pick("此项目已不存在", "This item no longer exists"),
+                Some(5 | 32) => lang.pick("此项目正在使用，或没有修改权限", "This item is in use, or can't be changed"),
+                Some(80 | 183) => lang.pick("此位置已有同名的项目", "An item with this name already exists here"),
+                _ => lang.pick("未能重命名", "Couldn't rename"),
+            }
+            .to_string())
+        }
+    }
+}
+
 /// The menu of the thing `id` on the station (a right click on it), at `at` on the screen (`over_the_panel`: as
 /// `Menu::open_at` says): up, with what its rows do.
 pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<Choice>)> {
@@ -283,6 +345,9 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     rows.push((Choice::Preview, lang.pick("预览", "Preview"), Icon::Image, false));
     if in_explorer {
         rows.push((Choice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false));
+    }
+    if item.what.renamed_by().is_some() {
+        rows.push((Choice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false));
     }
     rows.push((Choice::Pin, if item.pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
     rows.push((Choice::Remove, lang.pick("移除", "Remove"), Icon::Trash, true));
@@ -311,8 +376,9 @@ pub fn chose(id: u64, choice: Choice) {
         Choice::Preview => return,
         Choice::Show => run::Ask::Show(id),
         Choice::Pin => return pin(&[thing], !marks(&[thing]).0),
-        // (A new one named in its box first, opened by the thread the menu was up on: see `ui::rename`.)
-        Choice::Tags | Choice::NewTag => return,
+        // (A new one named in its box first, and it renamed in its own, opened by the thread the menu was up on: see
+        // `ui::rename`.)
+        Choice::Tags | Choice::NewTag | Choice::Rename => return,
         Choice::Tag(tag) => return turn_tag(&[thing], tag),
         Choice::Send => return,
         Choice::SendTo(key) => run::Ask::SendTo(vec![run::Given::Item(id)], key),
@@ -468,6 +534,7 @@ pub enum RecentChoice {
     Show,
     Station,
     CopyPath,
+    Rename,
     Pin,
     Tags,
     Tag(u32),
@@ -491,6 +558,7 @@ pub fn recent_menu(entry: recent::Entry, at: windows::Win32::Foundation::POINT, 
             (RecentChoice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false),
             (RecentChoice::Station, lang.pick("放入中转站", "Add to Station"), Icon::Inbox, false),
             (RecentChoice::CopyPath, lang.pick("复制路径", "Copy path"), Icon::Clipboard, false),
+            (RecentChoice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false),
         ],
         recent::Entry::Burst(..) => vec![
             (RecentChoice::Show, lang.pick("打开所在文件夹", "Open containing folder"), Icon::Panel, false),
@@ -528,7 +596,7 @@ pub fn recent_chose(entry: recent::Entry, choice: RecentChoice) {
         RecentChoice::Pin => pin(&[thing], !marks(&[thing]).0),
         RecentChoice::Tag(tag) => turn_tag(&[thing], tag),
         // (A new one named in its box first, opened by the thread the menu was up on: see `ui::rename`.)
-        RecentChoice::Tags | RecentChoice::NewTag | RecentChoice::Send => {}
+        RecentChoice::Tags | RecentChoice::NewTag | RecentChoice::Rename | RecentChoice::Send => {}
         RecentChoice::SendTo(key) => run::ask(run::Ask::SendTo(vec![run::Given::Files(paths)], key)),
         RecentChoice::CopyPath => {
             let copied = match entry {
@@ -740,7 +808,7 @@ mod tests {
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Link { url: "https://a.b".into() }, false),
-            item(3, What::Picture { file: "3.png".into() }, true),
+            item(3, What::Picture { file: "3.png".into(), name: String::new() }, true),
             item(4, What::Saved { file: "4".into(), name: "a.txt".into(), words: true }, false),
         ];
         let choices = |hits: &[Hit], files: &[recent::Came]| many_choices(hits, &items, files);

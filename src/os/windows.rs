@@ -88,3 +88,10 @@ pub fn accent(dark: bool) -> Option<u32> {
     let color = UISettings::new().and_then(|settings| settings.GetColorValue(shade)).ok()?;
     Some(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32)
 }
+
+/// The file or folder at `from` given the name `to`, where nothing has it (one that does: `AlreadyExists`): moved, not
+/// copied, on the same drive.
+pub fn move_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+    unsafe { MoveFileExW(&windows::core::HSTRING::from(from.as_os_str()), &windows::core::HSTRING::from(to.as_os_str()), MOVE_FILE_FLAGS(0)) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))
+}
