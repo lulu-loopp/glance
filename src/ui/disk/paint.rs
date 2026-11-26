@@ -11,7 +11,7 @@ use windows_numerics::Matrix3x2;
 
 use super::*;
 use crate::disk::{Role, AGES};
-use crate::ui::canvas::{Align, Canvas, Color, Family, Font, Point};
+use crate::ui::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use crate::ui::gfx::{rect, Frame};
 use crate::ui::icons::Icon;
 
@@ -26,6 +26,8 @@ const TOOLS_Y: f32 = 136.0;
 const CARDS_Y: f32 = 180.0;
 pub(super) const SIDE_W: f32 = 272.0;
 pub(super) const ROW_H: f32 = 44.0;
+/// A row of the lists by type and by time: taller, its share of the largest under it.
+const PICK_ROW_H: f32 = 50.0;
 const TABS_H: f32 = 44.0;
 const SUM_H: f32 = 28.0;
 const CARD_RADIUS: f32 = 8.0;
@@ -35,9 +37,12 @@ const PLATE_W: f32 = 320.0;
 /// The mark under the tab shown (its width), as the settings' own tabs' is.
 const TAB_MARK: f32 = 16.0;
 const TAG_W: f32 = 280.0;
-/// How dim what is not lit is drawn, and a ground then.
-const DIM: f32 = 0.28;
+/// How much of a block (or a piece of one) not lit is gone, dimmed wholly; how dimmed a ground is then (its words a
+/// half as much as that).
+const DIMS: f32 = 0.65;
 const GROUND_DIM: f32 = 0.5;
+/// A change of the drive's use its words count to (bytes): less is told at once.
+const HALF_GB: f64 = (1u64 << 29) as f64;
 
 fn body(size: f32, weight: f32) -> Font {
     Font::new(Family::Segoe, size, weight)
@@ -73,7 +78,25 @@ pub(super) fn geo(width: f32, height: f32) -> Geo {
 
 /// What the side list shows of its rows: where they start, how tall they may be.
 pub(super) fn list_area(side: Rect) -> Rect {
-    Rect { x: side.x + 8.0, y: side.y + TABS_H + SUM_H, w: side.w - 16.0, h: side.h - TABS_H - SUM_H - 8.0 }
+    Rect { x: side.x + 6.0, y: side.y + TABS_H + SUM_H, w: side.w - 12.0, h: side.h - TABS_H - SUM_H - 6.0 }
+}
+
+/// How tall a row of the list `tab` is.
+pub(super) fn row_height(tab: Tab) -> f32 {
+    match tab {
+        Tab::Largest => ROW_H,
+        Tab::Types | Tab::Ages => PICK_ROW_H,
+    }
+}
+
+/// The tools on the block under the pointer (its place in the layout): its plus (or the button telling of it, a
+/// system item's), where it is; its button freeing it to the cloud; the room they take at a ground's name line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct BlockTools {
+    pub at: usize,
+    pub add: Option<(Rect, Icon)>,
+    pub release: Option<Rect>,
+    pub room: f32,
 }
 
 pub(super) fn kind_name(kind: Kind, lang: Lang) -> &'static str {
@@ -212,8 +235,8 @@ impl Organizer {
                 }
                 What::Folder(_) | What::Rest => match light {
                     // A kind alone (or one peeked at in the legend) lights what is mostly of it.
-                    Some(Light::Kind(kind)) if !self.filter.on() || self.peek.is_some() => node.kind() == *kind && (!self.filter.on() || self.lit_place(shown, at)),
-                    _ => self.lit_place(shown, at),
+                    Some(Light::Kind(kind)) if !self.filter.on() || self.peek.is_some() => node.kind() == *kind && (!self.filter.on() || self.lit_place(shown, at, light)),
+                    _ => self.lit_place(shown, at, light),
                 },
             }
         };
@@ -223,11 +246,20 @@ impl Organizer {
         }
     }
 
-    fn lit_place(&self, shown: &Shown, at: usize) -> bool {
+    /// Whether the folder (or the rest) at `at` holds a file lit by `light` that passes the filter: read with the
+    /// lists, for what lights the map (or for a type's row or a time's peeked at, apart from it).
+    fn lit_place(&self, shown: &Shown, at: usize, light: Option<&Light>) -> bool {
         let node = &shown.tree.nodes[at];
-        match node.what {
-            What::Rest => shown.detail.lit_rests.contains(&node.place),
-            _ => shown.detail.lit_folders.contains(&node.place),
+        let rest = node.what == What::Rest;
+        let peeked = match light {
+            Some(Light::Extension(extension)) if light != self.light.as_ref() => Some(shown.detail.by_extension.get(extension)),
+            Some(Light::Age(age)) if light != self.light.as_ref() => Some(shown.detail.by_age.get(*age)),
+            _ => None,
+        };
+        match peeked {
+            Some(lit) => lit.is_some_and(|lit| if rest { lit.rests.contains(&node.place) } else { lit.folders.contains(&node.place) }),
+            None if rest => shown.detail.lit_rests.contains(&node.place),
+            None => shown.detail.lit_folders.contains(&node.place),
         }
     }
 
@@ -247,31 +279,70 @@ impl Organizer {
         self.targets.push((at, target));
     }
 
+    /// How far the look `look` of `target` has faded to `on` (0 to 1), over `lasts` seconds on CSS's own ease, as the
+    /// mockup's transitions do: kept from frame to frame while the spot is drawn. A spot's look under the pointer comes
+    /// up from none; whether it is on is as it is where the spot is first drawn.
+    fn fade(&mut self, target: &Target, look: Look, on: bool, lasts: f32) -> f32 {
+        let to = if on { 1.0 } else { 0.0 };
+        if crate::panel::reduced_motion() {
+            return to as f32;
+        }
+        let now = self.now;
+        match self.fades.iter_mut().find(|(spot, of, _, _)| spot == target && *of == look) {
+            Some((_, _, tween, seen)) => {
+                *seen = true;
+                tween.go(to, now);
+                self.fading |= tween.moving(now);
+                tween.at(now) as f32
+            }
+            None if look == Look::On => {
+                self.fades.push((target.clone(), look, Tween::new(to, lasts, EASE), true));
+                to as f32
+            }
+            None if on => {
+                let mut tween = Tween::new(0.0, lasts, EASE);
+                tween.go(1.0, now);
+                self.fades.push((target.clone(), look, tween, true));
+                self.fading = true;
+                0.0
+            }
+            None => 0.0,
+        }
+    }
+
     /// Everything drawn; whether anything moves still.
     pub(super) fn paint(&mut self, frame: &Frame, now: Instant, dt: f32) -> bool {
         let palette = self.palette.clone();
         let (width, height) = self.client();
         let g = geo(width, height);
         let hot = self.hot();
-        // The legend's kind under the pointer lights the map while it is there.
+        self.now = now;
+        self.fading = false;
+        for fade in &mut self.fades {
+            fade.3 = false;
+        }
+        // The legend's kind under the pointer lights the map while it is there, as a type's row or a time's does.
         self.peek = match &hot {
             Some(Target::Legend(kind)) => Some(Light::Kind(*kind)),
+            Some(Target::TypeRow(extension)) => Some(Light::Extension(extension.clone())),
+            Some(Target::AgeRow(age)) => Some(Light::Age(*age)),
             _ => None,
         };
         self.targets.clear();
-        let mut moving = false;
-        self.paint_head(frame, &palette, g, dt, &mut moving);
+        let mut moving = self.paint_head(frame, &palette, g, now);
         if self.root.is_empty() {
             self.paint_no_drive(frame, &palette, g);
-            return moving;
+        } else {
+            moving |= self.paint_drives(frame, &palette, g, now, &hot);
+            self.paint_tools(frame, &palette, g, &hot);
+            moving |= self.paint_map_card(frame, &palette, g, now, dt, &hot);
+            moving |= self.paint_side(frame, &palette, g, dt, &hot);
+            moving |= self.paint_foot(frame, &palette, g, now, &hot);
+            moving |= self.paint_over(frame, &palette, g, now, &hot);
         }
-        moving |= self.paint_drives(frame, &palette, g, dt, &hot);
-        self.paint_tools(frame, &palette, g, &hot);
-        moving |= self.paint_map_card(frame, &palette, g, now, dt, &hot);
-        moving |= self.paint_side(frame, &palette, g, dt, &hot);
-        moving |= self.paint_foot(frame, &palette, g, now, &hot);
-        self.paint_over(frame, &palette, g, now, &hot);
-        moving
+        // (The looks of spots no longer drawn let go of.)
+        self.fades.retain(|fade| fade.3);
+        moving || self.fading
     }
 
     fn paint_no_drive(&mut self, frame: &Frame, p: &Palette, g: Geo) {
@@ -282,29 +353,39 @@ impl Organizer {
         centred(frame, lang.pick("磁盘整理读取搜索的索引，开启搜索后即可在这里查看磁盘。", "The organizer reads search's index: drives are shown here once search is on."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
     }
 
-    /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown.
-    fn paint_head(&mut self, frame: &Frame, p: &Palette, g: Geo, dt: f32, moving: &mut bool) {
+    /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown: its words
+    /// counting to a change of half a GB or more, its meter's parts sliding to theirs. Whether they move still.
+    fn paint_head(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant) -> bool {
         let lang = self.lang;
         let title_font = display(28.0, 600.0);
         frame.text(lang.pick("磁盘整理", "Disk Organizer"), title_font, p.text, PAGE_X, frame.line_in(title_font, TITLE_Y, 44.0), g.page_w - 300.0, Align::Start);
-        let Some(drive) = self.drives.iter().find(|drive| drive.root.eq_ignore_ascii_case(&self.root)).cloned() else { return };
+        let Some(drive) = self.drives.iter().find(|drive| drive.root.eq_ignore_ascii_case(&self.root)).cloned() else { return false };
         let used = drive.total.saturating_sub(drive.free);
-        // The meter eased toward what is used (what went shows going).
-        if self.used_shown.0 != drive.root {
-            self.used_shown = (drive.root.clone(), used as f64);
-        }
-        let k = 1.0 - (-dt * 1000.0 / 120.0).exp();
-        self.used_shown.1 += (used as f64 - self.used_shown.1) * k as f64;
-        if (self.used_shown.1 - used as f64).abs() > drive.total as f64 * 0.0005 {
-            *moving = true;
-        } else {
-            self.used_shown.1 = used as f64;
-        }
         let bin = self.shown.as_ref().filter(|shown| shown.root == drive.root).map_or(0, |shown| shown.bin.0);
         let pick: u64 = self.gathered.iter().map(|item| item.bytes).sum::<u64>() + self.pending.as_ref().map_or(0, |pending| pending.items.iter().map(|item| item.bytes).sum());
+        // The meter's parts: what is used but for the Recycle Bin (what is gathered at its end), the Recycle Bin's.
+        let parts = [used.saturating_sub(bin), pick, bin];
+        if self.meter_of != drive.root || crate::panel::reduced_motion() {
+            self.meter_of = drive.root.clone();
+            self.used_told.set(used as f64);
+            for (tween, part) in self.meter.iter_mut().zip(parts) {
+                tween.set(part as f64);
+            }
+        } else {
+            if (used as f64 - self.used_told.to).abs() < HALF_GB {
+                self.used_told.set(used as f64);
+            } else {
+                self.used_told.go(used as f64, now);
+            }
+            for (tween, part) in self.meter.iter_mut().zip(parts) {
+                tween.go(part as f64, now);
+            }
+        }
+        let moving = self.used_told.moving(now) || self.meter.iter().any(|tween| tween.moving(now));
+        let told = self.used_told.at(now).max(0.0) as u64;
         let block_w = 500.0f32.min(g.page_w - 320.0).max(240.0);
         let right = PAGE_X + g.page_w;
-        let mut runs: Vec<(String, bool)> = vec![(lang.pick("已用 ", "Used ").into(), false), (size_text(used, lang), true), (format!("{}{}{}{}", lang.pick("，共 ", ", of "), size_text(drive.total, lang), lang.pick("，可用 ", ", free "), size_text(drive.free, lang)), false)];
+        let mut runs: Vec<(String, bool)> = vec![(lang.pick("已用 ", "Used ").into(), false), (size_text(told, lang), true), (format!("{}{}{}{}", lang.pick("，共 ", ", of "), size_text(drive.total, lang), lang.pick("，可用 ", ", free "), size_text(drive.total.saturating_sub(told), lang)), false)];
         if bin > 0 {
             runs.push((format!("{}{}", lang.pick("，回收站 ", ", Recycle Bin "), size_text(bin, lang)), false));
         }
@@ -319,34 +400,37 @@ impl Organizer {
             frame.text(text, font(*bold), if *bold { p.text } else { p.text2 }, x, y, w + 2.0, Align::Start);
             x += w;
         }
-        // The meter: what is used (the Recycle Bin's part and what is gathered striped, at its end).
+        // The meter: what is used, what is gathered striped at its end, the Recycle Bin's striped after it.
         let bar = Rect { x: right - block_w, y: 56.0, w: block_w, h: 6.0 };
         fill(frame, p.meter, bar.x, bar.y, bar.w, bar.h, 3.0);
         if drive.total > 0 {
             let of = |bytes: f64| (bytes / drive.total as f64).clamp(0.0, 1.0) as f32 * bar.w;
-            let used_w = of(self.used_shown.1);
-            let pick_w = of(pick as f64).min(used_w);
-            let bin_w = of(bin as f64).min(used_w - pick_w);
+            let [own, gathered, binned] = self.meter.map(|tween| tween.at(now));
+            let used_w = of(own);
+            let pick_w = of(gathered).min(used_w);
+            let bin_w = of(binned).min(bar.w - used_w);
             within(frame, bar, 3.0, 1.0, || {
-                fill(frame, p.accent, bar.x, bar.y, used_w - pick_w - bin_w, bar.h, 0.0);
-                if bin_w > 0.0 {
-                    let r = Rect { x: bar.x + used_w - pick_w - bin_w, w: bin_w, ..bar };
-                    fill(frame, p.text3.alpha(0.6), r.x, r.y, r.w, r.h, 0.0);
-                    stripes(frame, r, p.stripe);
-                }
+                fill(frame, p.accent, bar.x, bar.y, used_w, bar.h, 0.0);
                 if pick_w > 0.0 {
                     let r = Rect { x: bar.x + used_w - pick_w, w: pick_w, ..bar };
-                    fill(frame, p.accent.alpha(0.5), r.x, r.y, r.w, r.h, 0.0);
-                    stripes(frame, r, p.stripe);
+                    let _clip = frame.clipped(r.x, r.y, r.w, r.h);
+                    fill(frame, p.meter, r.x, r.y, r.w, r.h, 0.0);
+                    stripes(frame, r, p.accent);
+                }
+                if bin_w > 0.0 {
+                    let r = Rect { x: bar.x + used_w, w: bin_w, ..bar };
+                    let _clip = frame.clipped(r.x, r.y, r.w, r.h);
+                    stripes(frame, r, p.text3);
                 }
             });
         }
+        moving
     }
 
     /// The drives, a tab each, as the settings' own tabs are: the one shown marked under its middle by a short bar in
-    /// the accent, a drive nearly out of space by a dot after its name (told of under the pointer). Those that do not
-    /// fit in a menu, the one shown never among them. Whether the mark moves still.
-    fn paint_drives(&mut self, frame: &Frame, p: &Palette, g: Geo, dt: f32, hot: &Option<Target>) -> bool {
+    /// the accent (growing in as it is chosen), a drive nearly out of space by a dot after its name (told of under the
+    /// pointer). Those that do not fit in a menu, the one shown never among them. Whether the mark moves still.
+    fn paint_drives(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, hot: &Option<Target>) -> bool {
         const BETWEEN: f32 = 28.0;
         const DOT: f32 = 12.0;
         const MORE: f32 = 32.0;
@@ -373,8 +457,9 @@ impl Organizer {
             let is_shown = Some(at) == chosen;
             let target = Target::Drive(at);
             let r = Rect { x: x - 12.0, y: TABS_Y, w: widths[at] + 24.0, h };
-            if *hot == Some(target.clone()) && !is_shown {
-                fill(frame, p.hover, r.x, r.y + 4.0, r.w, r.h - 8.0, 6.0);
+            let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()) && !is_shown, 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y + 4.0, r.w, r.h - 8.0, 6.0);
             }
             let f = font(is_shown);
             let name_w = frame.measure(&names[at], f);
@@ -391,8 +476,9 @@ impl Organizer {
         if !hidden.is_empty() {
             let r = Rect { x: x - 12.0, y: TABS_Y + 4.0, w: MORE, h: h - 8.0 };
             let target = Target::DriveMore(hidden.clone());
-            if *hot == Some(target.clone()) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
+            let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
             }
             frame.icon(Icon::Ellipsis, Point { x: r.x + r.w / 2.0, y: cy }, 16.0, p.text2);
             // (A drive among them nearly out of space: its dot on the button too.)
@@ -401,18 +487,16 @@ impl Organizer {
             }
             self.spot(r, target);
         }
-        // The mark goes to the drive chosen, as the list's tabs' does.
+        // The mark grows in under the drive chosen, from its middle.
         let Some(middle) = middle else { return false };
-        let to = middle - TAB_MARK / 2.0;
-        let at = self.drive_mark.get_or_insert(to);
-        let k = 1.0 - (-dt * 1000.0 / 60.0).exp();
-        *at += (to - *at) * k;
-        let moving = (to - *at).abs() > 0.3;
-        if !moving {
-            *at = to;
+        if self.drive_mark.as_ref().is_none_or(|(root, _)| *root != self.root) {
+            self.drive_mark = Some((self.root.clone(), now));
         }
-        fill(frame, p.accent, *at, TABS_Y + h - 2.0 - 3.0, TAB_MARK, 3.0, 1.5);
-        moving
+        let since = self.drive_mark.as_ref().map_or(0.0, |(_, since)| now.saturating_duration_since(*since).as_secs_f32());
+        let grown = if crate::panel::reduced_motion() { 1.0 } else { SLIDE.at(since / 0.22) };
+        let w = TAB_MARK * grown;
+        fill(frame, p.accent, middle - w / 2.0, TABS_Y + h - 2.0 - 3.0, w, 3.0, 1.5);
+        grown < 1.0
     }
 
     /// Back, the path to the folder shown, and the filters.
@@ -420,15 +504,11 @@ impl Organizer {
         let lang = self.lang;
         let top = TOOLS_Y;
         let right = PAGE_X + g.page_w;
-        // The filters from the right.
+        // The filters from the right: each pressed while its own filter is on (the preset's two by it too).
         let preset = self.filter.old && self.filter.least == 1 << 30;
-        let size_label = match self.filter.least {
-            0 => lang.pick("大小", "Size").to_string(),
-            least => least_text(least, lang),
-        };
         let buttons: [(Target, Icon, String, bool, bool); 3] = [
-            (Target::FilterOld, Icon::Clock, lang.pick("超过一年未修改", "Not changed in a year").into(), self.filter.old && !preset, false),
-            (Target::FilterSize, Icon::BySize, size_label, self.filter.least > 0 && !preset, true),
+            (Target::FilterOld, Icon::Clock, lang.pick("超过一年未修改", "Not changed in a year").into(), self.filter.old, false),
+            (Target::FilterSize, Icon::BySize, least_text(self.filter.least, lang), self.filter.least > 0, true),
             (Target::FilterPreset, Icon::Archive, lang.pick("大且旧的文件", "Large and old").into(), preset, false),
         ];
         let font = body(13.0, 400.0);
@@ -442,23 +522,26 @@ impl Organizer {
         }
         let tools_left = x;
         for (r, target, icon, label, on, menu) in placed.into_iter().rev() {
-            let hovered = *hot == Some(target.clone());
-            button(frame, p, r, on, hovered);
-            let ink = if on { p.on_accent } else { p.text };
+            let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+            let pressed = self.fade(&target, Look::On, on, 0.12);
+            button(frame, p, r, 6.0, pressed, 1.06, lit);
+            let ink = mix(p.text, p.on_accent, pressed);
             frame.icon(icon, Point { x: r.x + 11.0 + 7.0, y: r.y + r.h / 2.0 }, 14.0, ink);
             frame.text(&label, font, ink, r.x + 11.0 + 14.0 + 8.0, frame.line_in(font, r.y, r.h), r.w, Align::Start);
             if menu {
-                frame.icon(Icon::ChevronDown, Point { x: r.x + r.w - 11.0 - 6.0, y: r.y + r.h / 2.0 }, 12.0, ink);
+                frame.icon(Icon::ChevronDown, Point { x: r.x + r.w - 11.0 - 6.0, y: r.y + r.h / 2.0 }, 12.0, mix(p.text2, p.on_accent, pressed));
             }
             self.spot(r, target);
         }
-        // Back, then the path.
+        // Back (faint where there is no folder above), then the path.
         let back = Rect { x: PAGE_X, y: top, w: 32.0, h: 32.0 };
         let can_go_up = !self.at_root();
-        if can_go_up && *hot == Some(Target::Back) {
-            fill(frame, p.hover, back.x, back.y, back.w, back.h, 6.0);
+        let usable = self.fade(&Target::Back, Look::On, can_go_up, 0.2);
+        let lit = self.fade(&Target::Back, Look::Hot, can_go_up && *hot == Some(Target::Back), 0.12);
+        if lit > 0.0 {
+            fill(frame, p.hover.alpha(lit), back.x, back.y, back.w, back.h, 6.0);
         }
-        frame.icon(Icon::ArrowLeft, Point { x: back.x + 16.0, y: back.y + 16.0 }, 16.0, if can_go_up { p.text } else { p.text3.alpha(0.6) });
+        frame.icon(Icon::ArrowLeft, Point { x: back.x + 16.0, y: back.y + 16.0 }, 16.0, p.text.alpha(0.36 + 0.64 * usable));
         if can_go_up {
             self.spot(back, Target::Back);
         }
@@ -491,10 +574,11 @@ impl Organizer {
             let hidden: Vec<(String, PathBuf)> = crumbs[..first_shown].iter().rev().cloned().collect();
             let r = Rect { x, y: top, w: MORE, h: 32.0 };
             let target = Target::CrumbMore(hidden);
-            if *hot == Some(target.clone()) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
+            let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
             }
-            frame.icon(Icon::Ellipsis, Point { x: r.x + 16.0, y: r.y + 16.0 }, 16.0, p.text2);
+            frame.icon(Icon::Ellipsis, Point { x: r.x + 16.0, y: r.y + 16.0 }, 16.0, mix(p.text2, p.text, lit));
             self.spot(r, target);
             x += MORE;
             frame.icon(Icon::ChevronRight, Point { x: x + SEPARATOR / 2.0, y: top + 16.0 }, 12.0, p.text3);
@@ -505,11 +589,12 @@ impl Organizer {
             let w = width_of(at);
             let r = Rect { x, y: top, w, h: 32.0 };
             let target = Target::Crumb(crumbs[at].1.clone());
-            if !last && *hot == Some(target.clone()) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
+            let lit = self.fade(&target, Look::Hot, !last && *hot == Some(target.clone()), 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
             }
             let font = crumb_font(last);
-            frame.text(&crumbs[at].0, font, if last { p.text } else { p.text2 }, r.x + 6.0, frame.line_in(font, r.y, r.h), r.w - 12.0, Align::Start);
+            frame.text(&crumbs[at].0, font, if last { p.text } else { mix(p.text2, p.text, lit) }, r.x + 6.0, frame.line_in(font, r.y, r.h), r.w - 12.0, Align::Start);
             if !last {
                 self.spot(r, target);
             }
@@ -521,7 +606,8 @@ impl Organizer {
         }
     }
 
-    /// The map's card: the map, and its legend under it. Whether it moves still.
+    /// The map's card: the map, and its legend under it (each kind a button, pressed where it lights the map). Whether
+    /// it moves still.
     fn paint_map_card(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, dt: f32, hot: &Option<Target>) -> bool {
         let lang = self.lang;
         card(frame, p, g.card);
@@ -536,43 +622,49 @@ impl Organizer {
         let mut kinds: Vec<(Kind, u64)> = crate::disk::KINDS.iter().map(|&kind| (kind, root.kinds[kind.at()])).filter(|(_, bytes)| *bytes > 0).collect();
         kinds.sort_by(|a, b| b.1.cmp(&a.1));
         let chip_font = body(12.0, 400.0);
-        let inner_w = g.card.w - 24.0;
-        let mut lines: Vec<Vec<(Kind, String, f32)>> = vec![Vec::new()];
+        let legend_x = g.card.x + 6.0;
+        let legend_w = g.card.w - 12.0;
+        let mut lines: Vec<Vec<(Kind, String, String, f32)>> = vec![Vec::new()];
         let mut line_w = 0.0;
         for (kind, bytes) in kinds {
-            let text = format!("{} {}", kind_name(kind, lang), size_text(bytes, lang));
-            let w = 8.0 + 10.0 + 6.0 + frame.measure(&text, chip_font) + 8.0;
-            if line_w + w > inner_w && !lines.last().unwrap().is_empty() {
+            let name = kind_name(kind, lang).to_string();
+            let value = size_text(bytes, lang);
+            let w = 8.0 + 10.0 + 6.0 + frame.measure(&name, chip_font) + 6.0 + frame.measure(&value, chip_font) + 8.0;
+            if line_w + w > legend_w && !lines.last().unwrap().is_empty() {
                 lines.push(Vec::new());
                 line_w = 0.0;
             }
-            line_w += w + 4.0;
-            lines.last_mut().unwrap().push((kind, text, w));
+            line_w += w + 2.0;
+            lines.last_mut().unwrap().push((kind, name, value, w));
         }
-        let legend_h = lines.len() as f32 * CHIP_H + (lines.len() as f32 - 1.0) * 6.0;
-        let map = Rect { x: g.card.x + 12.0, y: g.card.y + 12.0, w: inner_w, h: (g.card.h - 12.0 - 12.0 - legend_h - 12.0).max(40.0) };
+        let legend_h = lines.len() as f32 * CHIP_H + (lines.len() as f32 - 1.0) * 4.0;
+        let map = Rect { x: g.card.x + 12.0, y: g.card.y + 12.0, w: g.card.w - 24.0, h: (g.card.h - 12.0 - 8.0 - legend_h - 8.0).max(40.0) };
         let lighting = self.peek.clone().or(self.light.clone());
-        let mut y = map.y + map.h + 12.0;
+        let mut y = map.y + map.h + 8.0;
         for line in lines {
-            let mut x = map.x;
-            for (kind, text, w) in line {
+            let mut x = legend_x;
+            for (kind, name, value, w) in line {
                 let r = Rect { x, y, w, h: CHIP_H };
-                let on = self.light == Some(Light::Kind(kind));
                 let target = Target::Legend(kind);
-                if on {
-                    fill(frame, p.control, r.x, r.y, r.w, r.h, 4.0);
-                    stroke_inside(frame, r, 4.0, p.accent);
-                } else if *hot == Some(target.clone()) {
-                    fill(frame, p.hover, r.x, r.y, r.w, r.h, 4.0);
+                let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+                let pressed = self.fade(&target, Look::On, self.light == Some(Light::Kind(kind)), 0.12);
+                button(frame, p, r, 4.0, pressed, 1.0, lit);
+                let swatch = Rect { x: r.x + 8.0, y: r.y + 7.0, w: 10.0, h: 10.0 };
+                fill(frame, p.fill[kind.at()], swatch.x, swatch.y, swatch.w, swatch.h, 3.0);
+                if pressed < 1.0 {
+                    stroke_inside(frame, swatch, 3.0, Color::hex(0, 0.1 * (1.0 - pressed)));
                 }
-                let faded = lighting.as_ref().is_some_and(|light| *light != Light::Kind(kind)) && matches!(lighting, Some(Light::Kind(_)));
-                let alpha = if faded { 0.5 } else { 1.0 };
-                fill(frame, p.fill[kind.at()].alpha(alpha), r.x + 8.0, r.y + 7.0, 10.0, 10.0, 2.0);
-                frame.text(&text, chip_font, p.text2.alpha(alpha), r.x + 24.0, frame.line_in(chip_font, r.y, r.h), r.w - 28.0, Align::Start);
+                if pressed > 0.0 {
+                    Canvas::stroke_rounded(frame, Fill::Solid(p.on_accent.alpha(pressed)), swatch.x - 1.0, swatch.y - 1.0, swatch.w + 2.0, swatch.h + 2.0, 4.0, 1.0);
+                }
+                let name_w = frame.measure(&name, chip_font);
+                let line_y = frame.line_in(chip_font, r.y, r.h);
+                frame.text(&name, chip_font, mix(p.text, p.on_accent, pressed), r.x + 24.0, line_y, name_w + 2.0, Align::Start);
+                frame.text(&value, chip_font, mix(p.text2, p.on_accent, pressed), r.x + 24.0 + name_w + 6.0, line_y, r.w, Align::Start);
                 self.spot(r, target);
-                x += w + 4.0;
+                x += w + 2.0;
             }
-            y += CHIP_H + 6.0;
+            y += CHIP_H + 4.0;
         }
         // Laid out anew for a map of another size (at once: a window being sized is not a change of what it shows).
         if (map.w - self.laid_size.0).abs() > 0.5 || (map.h - self.laid_size.1).abs() > 0.5 {
@@ -585,163 +677,188 @@ impl Organizer {
         }
         self.map_at = map;
         self.spot(map, Target::Map);
-        let moving = self.paint_map(frame, p, map, now, dt, lighting.as_ref());
-        // The tools on the block under the pointer.
-        if let (Some(at), None, None) = (self.hover, &self.drag, &self.anim) {
-            self.paint_block_tools(frame, p, map, at, hot);
-        }
-        moving
+        // The tools on the block under the pointer (while the map is still and nothing is dragged), and the room they
+        // take at a ground's name.
+        let tools = match (self.hover, &self.drag, &self.anim) {
+            (Some(at), None, None) => self.block_tools(frame, map, at),
+            _ => None,
+        };
+        let moving = self.paint_map(frame, p, map, now, dt, lighting.as_ref(), tools.as_ref(), hot);
+        self.paint_block_tools(frame, p, now, tools.as_ref(), hot) || moving
     }
 
-    /// The map's blocks, as they are now (moving, if they do). Whether anything moves still.
-    fn paint_map(&mut self, frame: &Frame, p: &Palette, map: Rect, now: Instant, dt: f32, lighting: Option<&Light>) -> bool {
+    /// The map's blocks, as they are now (moving, if they do): a block becoming a folder's ground going in (or a ground
+    /// a block going out) crossing from the one look to the other; each block, and each piece of one, dimmed as the
+    /// filters and what lights the map say (eased), a ground's words with it; what is gathered striped. Once the map
+    /// is still, the file chosen outlined, and the block under the pointer (or the file whose row is). Whether anything
+    /// moves still.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_map(&mut self, frame: &Frame, p: &Palette, map: Rect, now: Instant, dt: f32, lighting: Option<&Light>, tools: Option<&BlockTools>, hot: &Option<Target>) -> bool {
         let lang = self.lang;
         let blocks = self.now_rects(now);
         let animating = self.anim.as_ref().is_some_and(|anim| now < anim.began + anim.lasts);
         if !animating {
             self.anim = None;
         }
+        let radius = crate::disk::map::RADIUS;
         let lights = self.filter.on() || lighting.is_some();
         let k = 1.0 - (-dt * 1000.0 / 70.0).exp();
         let mut dims_moving = false;
         frame.clip(map.x - 2.0, map.y - 2.0, map.w + 4.0, map.h + 4.0);
-        let hover_key = self.hover.and_then(|at| self.laid.get(at)).map(|placed| placed.key);
-        let chosen = self.chosen.clone();
+        let hover_key = self.hover.and_then(|at| self.laid.get(at)).map(|placed| placed.key).filter(|_| !animating);
         let any_gathered = !self.gathered.is_empty() || !self.going.is_empty() || self.pending.is_some();
-        // A ground's outline (under the pointer, or gathered), over what it holds: drawn once the blocks are.
-        let mut grounds_over: Vec<(Rect, Color, bool)> = Vec::new();
-        for (placed, at, alpha, group) in blocks {
+        for seen in blocks {
+            let Seen { placed, at, alpha, ground, was } = seen;
             let r = Rect { x: map.x + at.x, y: map.y + at.y, w: at.w, h: at.h };
             if r.w < 0.5 || r.h < 0.5 || alpha <= 0.01 {
                 continue;
             }
-            let shown = &placed.shown;
+            // How it looks as a block: itself, or (a ground now, going in) what it was before.
+            let block = if placed.block.group { was.as_ref().filter(|was| !was.block.group).unwrap_or(&placed) } else { &placed };
+            let shown = &block.shown;
             let tree = &shown.tree;
-            let item = &placed.block.item;
+            let item = &block.block.item;
             let kind = item.kind(tree);
-            let target = if !lights {
-                1.0
-            } else if group {
+            let dim_to = if !lights {
+                0.0
+            } else if ground > 0.5 {
                 GROUND_DIM
             } else if self.lit(shown, item, lighting) {
+                0.0
+            } else {
                 1.0
-            } else {
-                DIM
             };
-            let dim = self.dims.entry(placed.key).or_insert(target);
-            *dim += (target - *dim) * k;
-            if (target - *dim).abs() > 0.004 {
-                dims_moving = true;
-            } else {
-                *dim = target;
+            let dim = eased(&mut self.dims, placed.key, dim_to, k, &mut dims_moving);
+            let pieces = &block.block.pieces;
+            let mut piece_dims = Vec::with_capacity(pieces.len());
+            for piece in pieces {
+                let to = if lights && !self.lit(shown, &piece.item, lighting) { 1.0 } else { 0.0 };
+                piece_dims.push(eased(&mut self.dims, key_of(shown, &piece.item), to, k, &mut dims_moving));
             }
-            let dim = *dim;
-            let about = self.about(shown, item);
-            let hovered = hover_key == Some(placed.key) && !animating;
-            let gathered = !matches!(about.what, Some(What::Unlisted)) && about.many_in.is_none() && self.gathered_at(&about.path);
-            if group {
-                // A ground: its name above what it holds, its size at the right where there is room.
-                fill(frame, p.ground.alpha(alpha * dim), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS);
-                if hovered {
-                    grounds_over.push((r, p.edge.alpha(alpha), false));
-                }
-                let font = body(12.0, 600.0);
-                let size = size_text(about.bytes, lang);
-                let size_w = frame.measure(&size, body(12.0, 400.0));
-                let ink = p.text.alpha(alpha * dim.max(0.5));
-                let y = frame.line_in(font, r.y, crate::disk::map::LABEL);
-                let room = r.w - 16.0;
-                if room > size_w + 48.0 {
-                    frame.text(&about.name, font, ink, r.x + 8.0, y, room - size_w - 8.0, Align::Start);
-                    frame.text(&size, body(12.0, 400.0), p.text2.alpha(alpha * dim.max(0.5)), r.x + 8.0, y, room, Align::End);
-                } else {
-                    frame.text(&about.name, font, ink, r.x + 8.0, y, room, Align::Start);
-                }
-                if gathered {
-                    within(frame, r, crate::disk::map::RADIUS, alpha, || stripes(frame, r, p.stripe));
-                    grounds_over.push((r, p.text2.alpha(alpha), true));
-                }
-                continue;
-            }
-            let fills = if hovered { &p.fill_hot } else { &p.fill };
-            let pieces = &placed.block.pieces;
-            let piece_rect = |at: &Rect| Rect { x: r.x + at.x * r.w, y: r.y + at.y * r.h, w: at.w * r.w, h: at.h * r.h };
-            // What is gathered among its pieces (the block not gathered whole): striped as the block would be, each
-            // folder split into pieces outlined with all it holds, as deep as it is.
-            let (mut marked, mut outlined): (Vec<Rect>, Vec<Rect>) = (Vec::new(), Vec::new());
-            if any_gathered && !gathered {
-                let mut taken: Vec<&Path> = Vec::new();
-                let mut mark = |item: &Item, at: &Rect, fold: bool| {
-                    let Item::Node(node) = item else { return };
-                    let path = shown.paths[*node].as_path();
-                    if taken.iter().any(|top| under(path, top)) || !self.gathered_at(path) {
-                        return;
+            let hovered = hover_key == Some(placed.key);
+            let as_block = alpha * (1.0 - ground);
+            if as_block > 0.01 {
+                let about = self.about(shown, item);
+                let gathered = !matches!(about.what, Some(What::Unlisted)) && about.many_in.is_none() && self.gathered_at(&about.path);
+                let piece_rect = |at: &Rect| Rect { x: r.x + at.x * r.w, y: r.y + at.y * r.h, w: at.w * r.w, h: at.h * r.h };
+                // What is gathered among its pieces (the block not gathered whole): striped as the block would be, each
+                // folder split into pieces outlined with all it holds, as deep as it is.
+                let (mut marked, mut outlined): (Vec<Rect>, Vec<Rect>) = (Vec::new(), Vec::new());
+                if any_gathered && !gathered {
+                    let mut taken: Vec<&Path> = Vec::new();
+                    let mut mark = |item: &Item, at: &Rect, fold: bool| {
+                        let Item::Node(node) = item else { return };
+                        let path = shown.paths[*node].as_path();
+                        if taken.iter().any(|top| under(path, top)) || !self.gathered_at(path) {
+                            return;
+                        }
+                        taken.push(path);
+                        marked.push(piece_rect(at));
+                        if fold {
+                            outlined.push(piece_rect(at));
+                        }
+                    };
+                    for fold in &block.block.folds {
+                        mark(&fold.item, &fold.at, true);
                     }
-                    taken.push(path);
-                    marked.push(piece_rect(at));
-                    if fold {
-                        outlined.push(piece_rect(at));
-                    }
-                };
-                for fold in &placed.block.folds {
-                    mark(&fold.item, &fold.at, true);
-                }
-                for piece in pieces {
-                    mark(&piece.item, &piece.at, false);
-                }
-            }
-            within(frame, r, crate::disk::map::RADIUS, alpha * dim, || {
-                if pieces.is_empty() {
-                    fill(frame, fills[kind.at()], r.x, r.y, r.w, r.h, 0.0);
-                } else {
-                    fill(frame, p.ring, r.x, r.y, r.w, r.h, 0.0);
                     for piece in pieces {
-                        let pr = piece_rect(&piece.at);
-                        let piece_kind = piece.item.kind(tree);
-                        let piece_lit = !lights || self.lit(shown, &piece.item, lighting);
-                        let fill_color = fills[piece_kind.at()];
-                        fill(frame, if piece_lit { fill_color } else { fill_color.alpha(0.45) }, pr.x, pr.y, pr.w, pr.h, 0.0);
+                        mark(&piece.item, &piece.at, false);
                     }
                 }
-                if gathered {
-                    stripes(frame, r, p.stripe);
-                }
-                for at in &marked {
-                    let _clip = frame.clipped(at.x, at.y, at.w, at.h);
-                    stripes(frame, *at, p.stripe);
-                }
-                // Its name and size, where there is room.
-                if r.w >= 36.0 && r.h >= 18.0 {
-                    let name_font = body(12.0, 600.0);
-                    let size = size_text(about.bytes, lang);
-                    if r.h >= 42.0 && r.w >= 56.0 {
-                        frame.text(&about.name, name_font, p.text, r.x + 8.0, r.y + 6.0, r.w - 14.0, Align::Start);
-                        frame.text(&size, body(12.0, 400.0), p.text2, r.x + 8.0, r.y + 22.0, r.w - 14.0, Align::Start);
+                let seen_as = 1.0 - dim * DIMS;
+                within(frame, r, radius, as_block, || {
+                    if pieces.is_empty() {
+                        let fills = if hovered { &p.fill_hot } else { &p.fill };
+                        fill(frame, fills[kind.at()].alpha(seen_as), r.x, r.y, r.w, r.h, 0.0);
                     } else {
-                        frame.text(&about.name, name_font, p.text, r.x + 6.0, frame.line_in(name_font, r.y, r.h), r.w - 10.0, Align::Start);
+                        fill(frame, p.ring, r.x, r.y, r.w, r.h, 0.0);
+                        for (piece, piece_dim) in pieces.iter().zip(&piece_dims) {
+                            let pr = piece_rect(&piece.at);
+                            fill(frame, p.fill[piece.item.kind(tree).at()].alpha(1.0 - piece_dim * DIMS), pr.x, pr.y, pr.w, pr.h, 0.0);
+                        }
+                        if hovered {
+                            fill(frame, p.hover, r.x, r.y, r.w, r.h, 0.0);
+                        }
+                    }
+                    if gathered {
+                        stripes(frame, r, p.stripe);
+                    }
+                    for at in &marked {
+                        let _clip = frame.clipped(at.x, at.y, at.w, at.h);
+                        stripes(frame, *at, p.stripe);
+                    }
+                    // Its name and size, where there is room.
+                    if r.w >= 36.0 && r.h >= 18.0 {
+                        let name_font = body(12.0, 600.0);
+                        let size = size_text(about.bytes, lang);
+                        if r.h >= 42.0 && r.w >= 56.0 {
+                            frame.text(&about.name, name_font, p.text.alpha(seen_as), r.x + 8.0, r.y + 6.0, r.w - 14.0, Align::Start);
+                            frame.text(&size, body(12.0, 400.0), p.text2.alpha(seen_as), r.x + 8.0, r.y + 22.0, r.w - 14.0, Align::Start);
+                        } else {
+                            frame.text(&about.name, name_font, p.text.alpha(seen_as), r.x + 6.0, frame.line_in(name_font, r.y, r.h), r.w - 10.0, Align::Start);
+                        }
+                    }
+                });
+                if gathered {
+                    frame.stroke_rounded_dashed(p.text2.alpha(as_block), r.x, r.y, r.w, r.h, radius, 1.0);
+                }
+                for at in &outlined {
+                    frame.stroke_rounded_dashed(p.text.alpha(as_block * seen_as * 0.7), at.x, at.y, at.w, at.h, 0.0, 1.0);
+                }
+            }
+            let as_ground = alpha * ground;
+            if as_ground > 0.01 {
+                // A ground: its name above what it holds, its size at the right where there is room (and the tools are
+                // not up), quiet under the pointer.
+                let about = self.about(&placed.shown, &placed.block.item);
+                fill(frame, p.ground.alpha(as_ground), r.x, r.y, r.w, r.h, radius);
+                if hovered {
+                    fill(frame, p.hover.alpha(as_ground), r.x, r.y, r.w, r.h, radius);
+                }
+                if r.h >= 20.0 && r.w >= 40.0 {
+                    let font = body(12.0, 600.0);
+                    let size_font = body(12.0, 400.0);
+                    let size = size_text(about.bytes, lang);
+                    let size_w = frame.measure(&size, size_font);
+                    let room = r.w - 16.0;
+                    let tools_here = tools.filter(|_| hovered);
+                    let show_size = room - size_w - 8.0 > 40.0 && tools_here.is_none_or(|tools| tools.add.is_none());
+                    let keep = tools_here.map_or(0.0, |tools| tools.room);
+                    let seen_as = as_ground * (1.0 - dim * 0.5);
+                    let y = frame.line_in(font, r.y, crate::disk::map::LABEL);
+                    frame.text(&about.name, font, p.text.alpha(seen_as), r.x + 8.0, y, if show_size { room - size_w - 8.0 } else { room - keep }, Align::Start);
+                    if show_size {
+                        frame.text(&size, size_font, p.text2.alpha(seen_as), r.x + 8.0, y, room, Align::End);
                     }
                 }
-            });
-            if gathered {
-                frame.stroke_rounded_dashed(p.text.alpha(alpha * 0.7), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
-            }
-            for at in &outlined {
-                frame.stroke_rounded_dashed(p.text.alpha(alpha * dim * 0.7), at.x, at.y, at.w, at.h, 0.0, 1.0);
-            }
-            if chosen.as_ref().is_some_and(|chosen| *chosen == about.path) && about.many_in.is_none() && !matches!(about.what, Some(What::Rest | What::Unlisted)) {
-                stroke_inside(frame, r, crate::disk::map::RADIUS, p.accent.alpha(alpha));
-                stroke_inside(frame, Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, crate::disk::map::RADIUS - 1.0, p.accent.alpha(alpha));
-                stroke_inside(frame, Rect { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 4.0 }, (crate::disk::map::RADIUS - 2.0).max(0.0), p.ring.alpha(alpha));
-            } else if hovered {
-                // (The box given is the outline's outer edge: the line is drawn inside it.)
-                Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(p.edge), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.5);
+                if !matches!(about.what, Some(What::Unlisted)) && self.gathered_at(&about.path) {
+                    within(frame, r, radius, as_ground, || stripes(frame, r, p.stripe));
+                    frame.stroke_rounded_dashed(p.text2.alpha(as_ground), r.x, r.y, r.w, r.h, radius, 1.0);
+                }
             }
         }
-        for (r, color, dashed) in grounds_over {
-            if dashed {
-                frame.stroke_rounded_dashed(color, r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
-            } else {
-                stroke_inside(frame, r, crate::disk::map::RADIUS, color);
+        // Once still: the file chosen, ringed in the accent; the block under the pointer (not a ground), or the file
+        // whose row is under it, outlined.
+        if !animating {
+            let at_map = |e: Rect| Rect { x: map.x + e.x, y: map.y + e.y, ..e };
+            let chosen = self.chosen.clone();
+            if let Some((e, piece)) = chosen.as_deref().and_then(|path| self.exact_rect(path)) {
+                outline(frame, at_map(e), piece, p.accent, 2.0, Some(p.ring));
+            }
+            let hovered = match self.hover.and_then(|at| self.laid.get(at)) {
+                Some(placed) => (!placed.block.group).then(|| (placed.block.at, false, self.about(&placed.shown, &placed.block.item).path)),
+                None => match hot {
+                    Some(Target::Row(at) | Target::RowAdd(at) | Target::RowRelease(at)) if self.tab == Tab::Largest => {
+                        let path = self.shown.as_ref().and_then(|shown| shown.detail.rows.get(*at)).map(|row| row.path.clone());
+                        path.and_then(|path| self.exact_rect(&path).map(|(e, piece)| (e, piece, path)))
+                    }
+                    _ => None,
+                },
+            };
+            if let Some((e, piece, path)) = hovered {
+                if chosen.as_ref() != Some(&path) {
+                    outline(frame, at_map(e), piece, p.edge, 1.5, None);
+                }
             }
         }
         frame.unclip();
@@ -751,92 +868,191 @@ impl Organizer {
         }
         // (What is dimmed no longer drawn is let go of.)
         if !animating {
-            let keys: std::collections::HashSet<Key> = self.laid.iter().map(|placed| placed.key).collect();
+            let mut keys: std::collections::HashSet<Key> = std::collections::HashSet::new();
+            for placed in &self.laid {
+                keys.insert(placed.key);
+                keys.extend(placed.block.pieces.iter().map(|piece| key_of(&placed.shown, &piece.item)));
+            }
             self.dims.retain(|key, _| keys.contains(key));
         }
         animating || dims_moving
     }
 
-    /// The tools of the block hovered: gathered to go (or, a system item, told of), and freed to OneDrive.
-    fn paint_block_tools(&mut self, frame: &Frame, p: &Palette, map: Rect, at: usize, hot: &Option<Target>) {
-        let Some(placed) = self.laid.get(at).cloned() else { return };
+    /// The tools of the block at `at` (its place in the layout) on the map at `map`, as the mockup places them: at its
+    /// top right (on a ground's name line), the plus (or, a system item, the button telling of it) where the block is
+    /// wide enough, freeing it to the cloud beside it where its words fit.
+    fn block_tools(&self, frame: &Frame, map: Rect, at: usize) -> Option<BlockTools> {
+        let placed = self.laid.get(at)?;
         let about = self.about(&placed.shown, &placed.block.item);
         let b = placed.block.at;
-        let r = Rect { x: map.x + b.x, y: map.y + b.y, w: b.w, h: b.h };
-        if r.w < 40.0 || r.h < 32.0 {
-            return;
+        let e = Rect { x: map.x + b.x, y: map.y + b.y, w: b.w, h: b.h };
+        let group = placed.block.group;
+        let label = crate::disk::map::LABEL;
+        if e.h < if group { label } else { 30.0 } {
+            return None;
         }
-        let mut right = r.x + r.w - 4.0;
-        let tool = |frame: &Frame, x: f32, icon: Icon, target: &Target| {
-            let t = Rect { x: x - 24.0, y: r.y + 4.0, w: 24.0, h: 24.0 };
-            let hovered = *hot == Some(target.clone());
-            frame.shadow(Color::hex(0, if p.dark { 0.3 } else { 0.12 }), t.x, t.y, t.w, t.h, 6.0, 3.0, 1.0);
-            fill(frame, if hovered { p.fly } else { p.fly.alpha(0.94) }, t.x, t.y, t.w, t.h, 6.0);
-            stroke_inside(frame, t, 6.0, p.fly_stroke);
-            frame.icon(icon, Point { x: t.x + 12.0, y: t.y + 12.0 }, 14.0, p.text);
-            t
-        };
         let info_like = about.info.is_some() || matches!(about.what, Some(What::File { system: true }));
-        if info_like {
-            let target = Target::AddTool(at);
-            let t = tool(frame, right, Icon::Info, &target);
-            self.spot(t, target);
-            return;
-        }
-        if about.why_not.is_none() {
-            let target = Target::AddTool(at);
-            let t = tool(frame, right, Icon::Add, &target);
-            self.spot(t, target);
+        let can = if info_like {
+            Some(Icon::Info)
+        } else if about.why_not.is_none() {
+            Some(Icon::Add)
+        } else {
+            None
+        };
+        let top = e.y + if group { (label - 24.0) / 2.0 } else { 4.0 };
+        let fits = can.is_some() && e.w >= 48.0;
+        let mut right = e.x + e.w - 4.0;
+        if fits {
             right -= 28.0;
         }
+        let mut room = 0.0;
+        let mut release = None;
         let releasable = about.onedrive && about.bytes > 0 && matches!(about.what, Some(What::File { system: false } | What::Folder(Role::Plain)));
-        if releasable && r.w >= 72.0 {
-            let target = Target::ReleaseTool(at);
-            let t = tool(frame, right, Icon::Cloud, &target);
-            self.spot(t, target);
+        if releasable {
+            let w = release_width(frame, self.lang);
+            if e.w >= w + if can.is_some() { 40.0 } else { 12.0 } {
+                release = Some(Rect { x: right - w, y: top, w, h: 24.0 });
+                room = w + 4.0;
+            }
+        }
+        let add = match can {
+            Some(icon) if fits => {
+                room += 28.0;
+                Some((Rect { x: e.x + e.w - 28.0, y: top, w: 24.0, h: 24.0 }, icon))
+            }
+            _ => None,
+        };
+        (add.is_some() || release.is_some()).then_some(BlockTools { at, add, release, room })
+    }
+
+    /// The tools of the block under the pointer, popping up as they come (and not again as the pointer goes from one
+    /// block to the next), and going as they came. Whether they move still.
+    fn paint_block_tools(&mut self, frame: &Frame, p: &Palette, now: Instant, tools: Option<&BlockTools>, hot: &Option<Target>) -> bool {
+        let moving = keep(&mut self.tools_shown, tools, |_, _| true, now, 0.16);
+        let Some(shown) = self.tools_shown.clone() else { return moving };
+        let opacity = shown.shown(now, 0.12, EASE);
+        let scale = 0.8 + 0.2 * shown.shown(now, 0.16, SLIDE);
+        let live = shown.went.is_none();
+        let tools = shown.what;
+        if let Some(r) = tools.release {
+            let label = self.lang.pick("释放空间", "Free up space");
+            self.paint_tool(frame, p, r, Icon::Cloud, Some(label), Target::ReleaseTool(tools.at), (opacity, scale, live), hot);
+        }
+        if let Some((r, icon)) = tools.add {
+            self.paint_tool(frame, p, r, icon, None, Target::AddTool(tools.at), (opacity, scale, live), hot);
+        }
+        moving
+    }
+
+    /// A tool on a block: a flyout's button, the accent's under the pointer; seen as much as `opacity` says, `scale`
+    /// times as large, pressable where `live`.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tool(&mut self, frame: &Frame, p: &Palette, r: Rect, icon: Icon, label: Option<&str>, target: Target, (opacity, scale, live): (f32, f32, bool), hot: &Option<Target>) {
+        let lit = live && *hot == Some(target.clone());
+        {
+            let _faint = faint(frame, opacity);
+            let _moved = shifted(frame, 0.0, 0.0, Some((r.x + r.w / 2.0, r.y + r.h / 2.0, scale)));
+            frame.shadow(Color::hex(0, 0.16), r.x, r.y, r.w, r.h, 4.0, 3.0, 2.0);
+            fill(frame, if lit { p.accent } else { p.fly }, r.x, r.y, r.w, r.h, 4.0);
+            Canvas::stroke_rounded(frame, Fill::Solid(p.fly_stroke), r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, 5.0, 1.0);
+            let ink = if lit { p.on_accent } else { p.text };
+            match label {
+                None => frame.icon(icon, Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 14.0, ink),
+                Some(label) => {
+                    frame.icon(icon, Point { x: r.x + 6.0 + 7.0, y: r.y + r.h / 2.0 }, 14.0, ink);
+                    let font = body(12.0, 400.0);
+                    frame.text(label, font, ink, r.x + 6.0 + 14.0 + 6.0, frame.line_in(font, r.y, r.h), r.w, Align::Start);
+                }
+            }
+        }
+        if live {
+            self.spot(r, target);
         }
     }
 
-    /// The lists beside the map. Whether they move still.
+    /// The row of the list shown that is the file under the pointer on the map (or its type, or its time).
+    fn row_of_hovered(&self, shown: &Shown) -> Option<usize> {
+        if self.drag.is_some() || self.anim.is_some() {
+            return None;
+        }
+        let placed = self.laid.get(self.hover?)?;
+        let Item::Node(at) = placed.block.item else { return None };
+        let node = &placed.shown.tree.nodes[at];
+        if !matches!(node.what, What::File { .. }) {
+            return None;
+        }
+        match self.tab {
+            Tab::Largest => shown.detail.rows.iter().position(|row| row.path == placed.shown.paths[at]),
+            Tab::Types => shown.detail.extensions.iter().position(|listed| listed.extension == crate::disk::extension_of(&node.folded)),
+            Tab::Ages => Some(crate::disk::age_of(node.held.written, shown.at)),
+        }
+    }
+
+    /// How many rows the list shown has.
+    pub(super) fn list_count(&self) -> usize {
+        self.shown.as_ref().map_or(0, |shown| match self.tab {
+            Tab::Largest => shown.detail.rows.len(),
+            Tab::Types => shown.detail.extensions.len(),
+            Tab::Ages => AGES,
+        })
+    }
+
+    /// The list's scroll thumb, in the list's `area` (its rows `count`), as it is scrolled now; and how far the list
+    /// scrolls. None where it all fits.
+    pub(super) fn thumb(&self, area: Rect, count: usize) -> Option<(Rect, f32)> {
+        let whole = count as f32 * row_height(self.tab);
+        let most = whole - area.h;
+        if most <= 0.5 {
+            return None;
+        }
+        let h = (area.h * area.h / whole).max(24.0);
+        let y = area.y + (self.scroll / most).clamp(0.0, 1.0) * (area.h - h);
+        Some((Rect { x: area.x + area.w + 1.0, y, w: 4.0, h }, most))
+    }
+
+    /// The lists beside the map: the largest files (each with its tools under the pointer), the files by type and by
+    /// time (each lighting the map under the pointer, pressed to light it); the row of the file under the pointer on
+    /// the map lit too. Whether they move still.
     fn paint_side(&mut self, frame: &Frame, p: &Palette, g: Geo, dt: f32, hot: &Option<Target>) -> bool {
         let lang = self.lang;
+        let now = self.now;
         let side = g.side;
         card(frame, p, side);
         let mut moving = false;
-        // The tabs, the chosen one's mark sliding to it.
+        // The tabs, the mark under the one shown sliding to it.
         let tabs = [(Tab::Largest, lang.pick("最大的文件", "Largest files")), (Tab::Types, lang.pick("按类型", "By type")), (Tab::Ages, lang.pick("按时间", "By time"))];
         let font = body(13.0, 600.0);
         let mut x = side.x + 8.0;
-        let mut mark_to = (0.0, 0.0);
+        let mut mark_to = None;
         for (tab, label) in tabs {
             let w = frame.measure(label, font) + 24.0;
             let r = Rect { x, y: side.y + 6.0, w, h: TABS_H - 12.0 };
             let target = Target::Tab(tab);
             let on = self.tab == tab;
-            if !on && *hot == Some(target.clone()) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 6.0);
+            let lit = self.fade(&target, Look::Hot, !on && *hot == Some(target.clone()), 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
             }
             frame.text(label, font, if on { p.text } else { p.text2 }, r.x + 12.0, frame.line_in(font, r.y, r.h), w, Align::Start);
             if on {
-                mark_to = (r.x + r.w / 2.0 - 8.0, 16.0);
+                mark_to = Some(r.x + r.w / 2.0 - TAB_MARK / 2.0);
             }
             self.spot(r, target);
             x += w + 2.0;
         }
-        if self.tab_mark.1 == 0.0 {
-            self.tab_mark = mark_to;
+        if let Some(to) = mark_to {
+            let mark = self.tab_mark.get_or_insert_with(|| Tween::new(to as f64, 0.26, SLIDE));
+            if crate::panel::reduced_motion() {
+                mark.set(to as f64);
+            } else {
+                mark.go(to as f64, now);
+            }
+            moving |= mark.moving(now);
+            fill(frame, p.accent, mark.at(now) as f32, side.y + TABS_H - 5.0, TAB_MARK, 3.0, 1.5);
         }
-        let k = 1.0 - (-dt * 1000.0 / 60.0).exp();
-        self.tab_mark.0 += (mark_to.0 - self.tab_mark.0) * k;
-        if (mark_to.0 - self.tab_mark.0).abs() > 0.3 {
-            moving = true;
-        } else {
-            self.tab_mark.0 = mark_to.0;
-        }
-        fill(frame, p.accent, self.tab_mark.0, side.y + TABS_H - 5.0, 16.0, 3.0, 1.5);
         let Some(shown) = self.shown.clone().filter(|shown| shown.root.eq_ignore_ascii_case(&self.root)) else { return moving };
         let detail = &shown.detail;
-        // The sum line.
+        // The sum line, and gathering all that passes where the list is filtered or lit.
         let sum_font = body(12.0, 400.0);
         let sum_y = frame.line_in(sum_font, side.y + TABS_H, SUM_H);
         let sum = match self.tab {
@@ -850,25 +1066,27 @@ impl Organizer {
             },
             Tab::Ages => lang.pick("按最后修改的时间", "By when last changed").into(),
         };
-        frame.text(&sum, sum_font, p.text3, side.x + 16.0, sum_y, side.w - 32.0, Align::Start);
-        let addable: Vec<usize> = detail.rows.iter().enumerate().filter(|(_, row)| !self.gathered_at(&row.path)).map(|(at, _)| at).collect();
-        if self.tab == Tab::Largest && (self.filter.on() || self.light.is_some()) && !addable.is_empty() {
+        let mut sum_right = side.x + side.w - 16.0;
+        let addable = detail.rows.iter().any(|row| !self.gathered_at(&row.path));
+        if self.tab == Tab::Largest && (self.filter.on() || self.light.is_some()) && addable {
             let label = lang.pick("全部加入", "Gather all");
-            let w = frame.measure(label, sum_font) + 12.0;
-            let r = Rect { x: side.x + side.w - 10.0 - w, y: side.y + TABS_H + 2.0, w, h: SUM_H - 4.0 };
-            if *hot == Some(Target::AddAll) {
-                fill(frame, p.hover, r.x, r.y, r.w, r.h, 4.0);
+            let link_font = body(13.0, 400.0);
+            let content = 12.0 + 4.0 + frame.measure(label, link_font);
+            let r = Rect { x: side.x + side.w - 16.0 - content - 4.0, y: side.y + TABS_H + 3.0, w: content + 8.0, h: SUM_H - 6.0 };
+            let lit = self.fade(&Target::AddAll, Look::Hot, *hot == Some(Target::AddAll), 0.12);
+            if lit > 0.0 {
+                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 4.0);
             }
-            frame.text(label, sum_font, p.accent, r.x + 6.0, sum_y, w, Align::Start);
+            frame.icon(Icon::Add, Point { x: r.x + 4.0 + 6.0, y: r.y + r.h / 2.0 }, 12.0, p.accent);
+            frame.text(label, link_font, p.accent, r.x + 4.0 + 16.0, frame.line_in(link_font, r.y, r.h), content, Align::Start);
             self.spot(r, Target::AddAll);
+            sum_right = r.x - 8.0;
         }
+        frame.text(&sum, sum_font, p.text2, side.x + 16.0, sum_y, sum_right - side.x - 16.0, Align::Start);
         let area = list_area(side);
-        let count = match self.tab {
-            Tab::Largest => detail.rows.len(),
-            Tab::Types => detail.extensions.len(),
-            Tab::Ages => AGES,
-        };
-        let most_scroll = (count as f32 * ROW_H - area.h).max(0.0);
+        let row_h = row_height(self.tab);
+        let count = self.list_count();
+        let most_scroll = (count as f32 * row_h - area.h).max(0.0);
         self.scroll_to = self.scroll_to.clamp(0.0, most_scroll);
         let k = 1.0 - (-dt * 1000.0 / 50.0).exp();
         self.scroll += (self.scroll_to - self.scroll) * k;
@@ -882,33 +1100,38 @@ impl Organizer {
             centred(frame, none, body(13.0, 400.0), p.text3, area.x, area.y + 40.0, area.w);
             return moving;
         }
+        let from_map = self.row_of_hovered(&shown);
         frame.clip(area.x, area.y, area.w, area.h);
-        let first = (self.scroll / ROW_H).floor().max(0.0) as usize;
-        let last = (((self.scroll + area.h) / ROW_H).ceil() as usize).min(count);
+        let first = (self.scroll / row_h).floor().max(0.0) as usize;
+        let last = (((self.scroll + area.h) / row_h).ceil() as usize).min(count);
         let name_font = body(13.0, 400.0);
         let sub_font = body(12.0, 400.0);
         let biggest = match self.tab {
-            Tab::Largest => detail.rows.first().map_or(1, |row| row.bytes),
+            Tab::Largest => 1,
             Tab::Types => detail.extensions.first().map_or(1, |extension| extension.bytes),
             Tab::Ages => detail.ages.iter().map(|age| age.1).max().unwrap_or(1),
         }
         .max(1);
         for at in first..last {
-            let r = Rect { x: area.x, y: area.y + at as f32 * ROW_H - self.scroll, w: area.w, h: ROW_H };
-            let (target, icon, hue, name, sub, bytes, on) = match self.tab {
+            let r = Rect { x: area.x, y: area.y + at as f32 * row_h - self.scroll, w: area.w, h: row_h };
+            // Each row: what it is, its icon and colour, its name and what is under it, its size, whether it is chosen
+            // (or lights the map), whether nothing is in it; a file's tools (gathered, freed to the cloud).
+            let (target, icon, hue, name, sub, bytes, on, empty, add, release) = match self.tab {
                 Tab::Largest => {
                     let row = &detail.rows[at];
-                    let parent = row.path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default();
-                    (Target::Row(at), kind_icon(row.kind), p.hue[row.kind.at()], row.name.clone(), parent, row.bytes, self.chosen.as_ref() == Some(&row.path))
+                    let gathered = self.gathered_at(&row.path);
+                    let sub = if gathered { lang.pick("已在待清理中", "Already gathered").to_string() } else { row.path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default() };
+                    let release = self.in_onedrive(&row.path) && row.bytes > 0;
+                    (Target::Row(at), kind_icon(row.kind), p.hue[row.kind.at()], row.name.clone(), sub, row.bytes, self.chosen.as_ref() == Some(&row.path), false, !gathered, release)
                 }
                 Tab::Types => {
                     let extension = &detail.extensions[at];
-                    let name = if extension.extension.is_empty() { lang.pick("无扩展名", "No extension").to_string() } else { format!(".{}", extension.extension) };
+                    let name = if extension.extension.is_empty() { lang.pick("其他扩展名", "Other extensions").to_string() } else { format!(".{}", extension.extension) };
                     let sub = match lang {
                         Lang::Zh => format!("{} · {} 个文件", kind_name(extension.kind, lang), count_text(extension.files)),
                         Lang::En => format!("{} · {} files", kind_name(extension.kind, lang), count_text(extension.files)),
                     };
-                    (Target::TypeRow(extension.extension.clone()), kind_icon(extension.kind), p.hue[extension.kind.at()], name, sub, extension.bytes, self.light == Some(Light::Extension(extension.extension.clone())))
+                    (Target::TypeRow(extension.extension.clone()), kind_icon(extension.kind), p.hue[extension.kind.at()], name, sub, extension.bytes, self.light == Some(Light::Extension(extension.extension.clone())), false, false, false)
                 }
                 Tab::Ages => {
                     let (files, bytes) = detail.ages[at];
@@ -916,62 +1139,72 @@ impl Organizer {
                         Lang::Zh => format!("{} 个文件", count_text(files)),
                         Lang::En => format!("{} files", count_text(files)),
                     };
-                    (Target::AgeRow(at), Icon::Clock, p.text2, age_name(at, lang).to_string(), sub, bytes, self.light == Some(Light::Age(at)))
+                    (Target::AgeRow(at), Icon::Clock, p.text2, age_name(at, lang).to_string(), sub, bytes, self.light == Some(Light::Age(at)), files == 0, false, false)
                 }
             };
-            let hovered = self.row_hover.as_ref() == Some(&target) || *hot == Some(target.clone()) || matches!(hot, Some(Target::RowAdd(n) | Target::RowRelease(n)) if *n == at && self.tab == Tab::Largest);
-            if on {
-                fill(frame, p.chosen, r.x, r.y + 1.0, r.w, r.h - 2.0, 6.0);
-            } else if hovered {
-                fill(frame, p.hover, r.x, r.y + 1.0, r.w, r.h - 2.0, 6.0);
-            }
-            frame.icon(icon, Point { x: r.x + 18.0, y: r.y + r.h / 2.0 }, 16.0, hue);
-            let size = size_text(bytes, lang);
-            let size_w = frame.measure(&size, sub_font) + 4.0;
-            let mut text_right = r.x + r.w - 10.0;
-            let gathered_row = self.tab == Tab::Largest && self.gathered_at(&detail.rows[at.min(detail.rows.len().saturating_sub(1))].path);
-            if hovered && self.tab == Tab::Largest && !gathered_row {
-                // The row's tools in place of its size.
-                let row = &detail.rows[at];
-                let add = Rect { x: r.x + r.w - 8.0 - 24.0, y: r.y + 10.0, w: 24.0, h: 24.0 };
-                let add_target = Target::RowAdd(at);
-                if *hot == Some(add_target.clone()) {
-                    fill(frame, p.control, add.x, add.y, add.w, add.h, 4.0);
+            let row_hot = *hot == Some(target.clone()) || matches!(hot, Some(Target::RowAdd(n) | Target::RowRelease(n)) if *n == at && self.tab == Tab::Largest);
+            let lit = self.fade(&target, Look::Hot, row_hot || from_map == Some(at), 0.12);
+            let has_tools = add || release;
+            let tools = if has_tools { self.fade(&target, Look::Tools, row_hot, 0.12) } else { 0.0 };
+            let add_r = Rect { x: r.x + r.w - 8.0 - 24.0, y: r.y + 10.0, w: 24.0, h: 24.0 };
+            let release_r = Rect { x: if add { r.x + r.w - 36.0 - 24.0 } else { add_r.x }, ..add_r };
+            {
+                let _faint = faint(frame, if empty { 0.45 } else { 1.0 });
+                if on {
+                    fill(frame, p.chosen, r.x, r.y, r.w, r.h, 6.0);
+                    fill(frame, p.accent, r.x, r.y + 14.0, 3.0, r.h - 28.0, 1.5);
+                } else if lit > 0.0 {
+                    fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
                 }
-                frame.icon(Icon::Add, Point { x: add.x + 12.0, y: add.y + 12.0 }, 14.0, p.text);
-                self.spot(add, add_target);
-                text_right = add.x - 4.0;
-                if self.in_onedrive(&row.path) {
-                    let release = Rect { x: r.x + r.w - 36.0 - 24.0, y: r.y + 10.0, w: 24.0, h: 24.0 };
-                    let release_target = Target::RowRelease(at);
-                    if *hot == Some(release_target.clone()) {
-                        fill(frame, p.control, release.x, release.y, release.w, release.h, 4.0);
+                frame.icon(icon, Point { x: r.x + 10.0 + 7.0, y: r.y + r.h / 2.0 }, 14.0, hue);
+                let size = size_text(bytes, lang);
+                let size_w = frame.measure(&size, sub_font) + 2.0;
+                let size_right = r.x + r.w - 10.0;
+                let size_seen = 1.0 - tools;
+                if size_seen > 0.0 {
+                    frame.text(&size, sub_font, p.text2.alpha(size_seen), size_right - size_w, frame.line_in(sub_font, r.y, r.h), size_w, Align::End);
+                }
+                let text_x = r.x + 36.0;
+                let text_right = size_right - size_w - 12.0;
+                let top = r.y + (r.h - 34.0) / 2.0;
+                frame.text(&name, name_font, p.text, text_x, top, text_right - text_x, Align::Start);
+                frame.text(&sub, sub_font, p.text2, text_x, top + 18.0, text_right - text_x, Align::Start);
+                // A type's or a time's share of the largest.
+                if self.tab != Tab::Largest {
+                    let track = Rect { x: r.x + 34.0, y: r.y + r.h - 3.0 - 2.0, w: r.w - 34.0 - 10.0, h: 2.0 };
+                    fill(frame, p.rule, track.x, track.y, track.w, track.h, 1.0);
+                    fill(frame, p.accent.alpha(0.7), track.x, track.y, track.w * (bytes as f64 / biggest as f64) as f32, track.h, 1.0);
+                }
+                if tools > 0.0 {
+                    let _faint = faint(frame, tools);
+                    if release {
+                        row_button(frame, p, release_r, Icon::Cloud, *hot == Some(Target::RowRelease(at)));
                     }
-                    frame.icon(Icon::Cloud, Point { x: release.x + 12.0, y: release.y + 12.0 }, 14.0, p.text);
-                    self.spot(release, release_target);
-                    text_right = release.x - 4.0;
-                }
-            } else {
-                frame.text(&size, sub_font, p.text2, text_right - size_w, frame.line_in(sub_font, r.y, r.h), size_w, Align::End);
-                text_right -= size_w + 8.0;
-                if gathered_row {
-                    frame.icon(Icon::Inbox, Point { x: text_right - 6.0, y: r.y + r.h / 2.0 }, 12.0, p.text3);
-                    text_right -= 16.0;
+                    if add {
+                        row_button(frame, p, add_r, Icon::Add, *hot == Some(Target::RowAdd(at)));
+                    }
                 }
             }
-            let text_x = r.x + 36.0;
-            frame.text(&name, name_font, p.text, text_x, r.y + 5.0, text_right - text_x, Align::Start);
-            frame.text(&sub, sub_font, p.text3, text_x, r.y + 23.0, text_right - text_x, Align::Start);
-            // Its share of the largest.
-            let share = (bytes as f64 / biggest as f64) as f32;
-            fill(frame, hue.alpha(0.5), text_x, r.y + r.h - 4.0, (r.x + r.w - 10.0 - text_x) * share, 2.0, 1.0);
             self.spot(Rect { x: r.x, y: r.y.max(area.y), w: r.w, h: (r.y + r.h).min(area.y + area.h) - r.y.max(area.y) }, target);
+            // (The tools found before their row: where they are whole in the list.)
+            if row_hot {
+                let inside = |t: &Rect| t.y >= area.y - 1.0 && t.y + t.h <= area.y + area.h + 1.0;
+                if release && inside(&release_r) {
+                    self.spot(release_r, Target::RowRelease(at));
+                }
+                if add && inside(&add_r) {
+                    self.spot(add_r, Target::RowAdd(at));
+                }
+            }
         }
         frame.unclip();
-        // The tools spotted before their row: put after it again, to be found first.
-        let tools: Vec<(Rect, Target)> = self.targets.iter().filter(|(_, target)| matches!(target, Target::RowAdd(_) | Target::RowRelease(_))).cloned().collect();
-        self.targets.retain(|(_, target)| !matches!(target, Target::RowAdd(_) | Target::RowRelease(_)));
-        self.targets.extend(tools.into_iter().filter(|(r, _)| r.y >= area.y - 1.0 && r.y + r.h <= area.y + area.h + 1.0));
+        // A thin scroll thumb, as the mockup's list has (held and dragged to scroll).
+        if let Some((thumb, _)) = self.thumb(area, count) {
+            let held = matches!(self.press, Some(Press { on: Pressed::Thumb(_), .. }));
+            let lit = self.fade(&Target::Thumb, Look::Hot, held || *hot == Some(Target::Thumb), 0.12);
+            fill(frame, mix(p.rule, p.text3, lit), thumb.x, thumb.y, thumb.w, thumb.h, 2.0);
+            self.spot(Rect { x: thumb.x - 2.0, w: thumb.w + 4.0, ..thumb }, Target::Thumb);
+        }
         moving
     }
 
@@ -980,238 +1213,329 @@ impl Organizer {
         self.clouds.iter().any(|cloud| path.starts_with(cloud))
     }
 
-    /// The place what is to go is gathered in. Whether it moves still.
+    /// Whether (`x`, `y`) is over the foot, where what is dragged may be let go of (as far as 8 DIPs above it).
+    pub(super) fn over_foot(&self, x: f32, y: f32) -> bool {
+        let foot = self.foot_at;
+        x >= foot.x && x <= foot.x + foot.w && y >= foot.y - 8.0 && y <= foot.y + foot.h
+    }
+
+    /// What the foot shows, told by a sum of it (see `foot_seen`).
+    fn foot_sum(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut sum = std::collections::hash_map::DefaultHasher::new();
+        for item in &self.gathered {
+            item.path.hash(&mut sum);
+        }
+        self.pending.as_ref().map(|pending| pending.items.len()).hash(&mut sum);
+        self.going.len().hash(&mut sum);
+        self.went.as_ref().map(|went| (went.count, went.bytes)).hash(&mut sum);
+        sum.finish()
+    }
+
+    /// The place what is to go is gathered in, as the mockup's collector: what it holds as chips (as many as fit, the
+    /// rest in a menu), how much it frees, its buttons; its going, undoable, a ring draining; that it went; or, holding
+    /// nothing, where to drag things. Drawn anew, it comes up from faint; something that may go held over it marks it
+    /// ready. Whether it moves still.
     fn paint_foot(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, hot: &Option<Target>) -> bool {
         let lang = self.lang;
         let foot = g.foot;
         self.foot_at = foot;
         self.spot(foot, Target::Foot);
-        let dragging_in = self.drag.as_ref().is_some_and(|drag| foot.contains(drag.at.0, drag.at.1));
-        let title_font = body(13.0, 600.0);
+        let seen = self.foot_sum();
+        if seen != self.foot_seen.0 {
+            self.foot_seen = (seen, now);
+        }
+        let since = now.saturating_duration_since(self.foot_seen.1).as_secs_f32();
+        let flash = if crate::panel::reduced_motion() { 1.0 } else { 0.3 + 0.7 * EASE_OUT.at(since / 0.18) };
+        let moving = flash < 1.0;
+        let ready_now = self.drag.as_ref().is_some_and(|drag| drag.why_not.is_none() && self.pending.is_none() && self.over_foot(drag.at.0, drag.at.1));
+        let ready = self.fade(&Target::Foot, Look::Hot, ready_now, 0.16);
+        let _faint = faint(frame, flash);
+        let title_font = body(13.0, 400.0);
         let sub_font = body(12.0, 400.0);
-        if let Some(pending) = &self.pending {
-            // About to go: its time to be undone draining.
-            card(frame, p, foot);
-            let left = (UNDO_FOR.as_secs_f32() - now.duration_since(pending.since).as_secs_f32()).max(0.0);
-            let centre = Point { x: foot.x + 16.0 + 14.0, y: foot.y + foot.h / 2.0 };
-            frame.arc(centre, 12.0, 0.0, TAU, p.meter, 2.5);
-            frame.arc(centre, 12.0, 0.0, TAU * left / UNDO_FOR.as_secs_f32(), p.accent, 2.5);
-            centred(frame, &format!("{}", left.ceil() as u32), body(11.0, 600.0), p.text, centre.x - 14.0, frame.line_in(body(11.0, 600.0), centre.y - 10.0, 20.0), 28.0);
+        let words_x = foot.x + 16.0 + 20.0 + 12.0;
+        let title_y = frame.line_in(title_font, foot.y + 11.0, 18.0);
+        let sub_y = frame.line_in(sub_font, foot.y + 29.0, 16.0);
+        let mark = Point { x: foot.x + 16.0 + 10.0, y: foot.y + foot.h / 2.0 };
+        let empty = self.pending.is_none() && self.gathered.is_empty() && self.going.is_empty() && self.went.is_none();
+        if empty {
+            fill(frame, p.chosen.alpha(ready), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS);
+            if ready < 1.0 {
+                frame.stroke_rounded_dashed(p.text3.alpha(1.0 - ready), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS, 1.0);
+            }
+            if ready > 0.0 {
+                Canvas::stroke_rounded(frame, Fill::Solid(p.accent.alpha(ready)), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS, 2.0);
+            }
+            frame.icon(Icon::Inbox, mark, 18.0, mix(p.text2, p.accent, ready));
+            frame.text(lang.pick("将文件或文件夹拖到这里，集中移至回收站", "Drag files or folders here to move them to the Recycle Bin together"), title_font, p.text, words_x, title_y, foot.w - 64.0, Align::Start);
+            frame.text(
+                lang.pick("也可以点方块或列表右侧的加号。删除以当前用户的权限执行，没有权限的项目会保留并列出。", "Or press the plus on a block or a row. They are deleted as you may: what you may not delete stays, and is listed."),
+                sub_font,
+                p.text2,
+                words_x,
+                sub_y,
+                foot.w - 64.0,
+                Align::Start,
+            );
+            return moving;
+        }
+        card(frame, p, foot);
+        if ready > 0.0 {
+            fill(frame, p.chosen.alpha(ready), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS);
+            Canvas::stroke_rounded(frame, Fill::Solid(p.accent.alpha(ready)), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS, 2.0);
+        }
+        let right = foot.x + foot.w - 12.0;
+        let top = foot.y + 12.0;
+        if let Some(pending) = self.pending.clone() {
+            // About to go: the button undoing it, what goes, its time to be undone draining from the ring's top, the
+            // seconds left in it, and what goes as it was gathered (faint: no way out of it now).
+            let undo = self.foot_button(frame, p, right, top, Some(Icon::Undo), lang.pick("撤销", "Undo"), Target::Undo, false, hot);
             let bytes: u64 = pending.items.iter().map(|item| item.bytes).sum();
-            let count = pending.items.len();
-            frame.text(lang.pick("即将移至回收站", "Moving to the Recycle Bin"), title_font, p.text, foot.x + 56.0, foot.y + 9.0, foot.w - 200.0, Align::Start);
+            let title = lang.pick("即将移至回收站", "Moving to the Recycle Bin");
             let sub = match lang {
-                Lang::Zh => format!("{} 项，共 {}", count, size_text(bytes, lang)),
-                Lang::En => format!("{} items, {}", count, size_text(bytes, lang)),
+                Lang::Zh => format!("{} 项，共 {}", pending.items.len(), size_text(bytes, lang)),
+                Lang::En => format!("{} items, {}", pending.items.len(), size_text(bytes, lang)),
             };
-            frame.text(&sub, sub_font, p.text2, foot.x + 56.0, foot.y + 29.0, foot.w - 200.0, Align::Start);
-            let label = lang.pick("撤销", "Undo");
-            let w = frame.measure(label, body(13.0, 400.0)) + 22.0 + 22.0;
-            let r = Rect { x: foot.x + foot.w - 12.0 - w, y: foot.y + 12.0, w, h: BUTTON_H };
-            button(frame, p, r, false, *hot == Some(Target::Undo));
-            frame.icon(Icon::Undo, Point { x: r.x + 11.0 + 7.0, y: r.y + 16.0 }, 14.0, p.text);
-            frame.text(label, body(13.0, 400.0), p.text, r.x + 33.0, frame.line_in(body(13.0, 400.0), r.y, r.h), w, Align::Start);
-            self.spot(r, Target::Undo);
+            let words_w = frame.measure(title, title_font).max(frame.measure(&sub, sub_font)) + 2.0;
+            let words_at = undo.x - 12.0 - words_w;
+            frame.text(title, title_font, p.text, words_at, title_y, words_w, Align::Start);
+            frame.text(&sub, sub_font, p.text2, words_at, sub_y, words_w, Align::Start);
+            let left = (UNDO_FOR.as_secs_f32() - now.saturating_duration_since(pending.since).as_secs_f32()).max(0.0);
+            let centre = Point { x: words_at - 12.0 - 14.0, y: foot.y + foot.h / 2.0 };
+            frame.arc(centre, 11.0, 0.0, TAU, p.rule, 2.5);
+            frame.arc(centre, 11.0, 0.0, TAU * left / UNDO_FOR.as_secs_f32(), p.accent, 2.5);
+            let number = body(12.0, 600.0);
+            centred(frame, &format!("{}", left.ceil() as u32), number, p.text, centre.x - 14.0, frame.line_in(number, centre.y - 10.0, 20.0), 28.0);
+            self.paint_chips(frame, p, &pending.items, (foot.x + 16.0, centre.x - 14.0 - 12.0), top, false, hot);
             return true;
         }
         if self.gathered.is_empty() && !self.going.is_empty() {
             // Going now: the shell moves it.
-            card(frame, p, foot);
             let bytes: u64 = self.going.iter().map(|item| item.bytes).sum();
-            frame.icon(Icon::Trash, Point { x: foot.x + 30.0, y: foot.y + foot.h / 2.0 }, 18.0, p.text2);
-            frame.text(lang.pick("正在移至回收站", "Moving to the Recycle Bin"), title_font, p.text, foot.x + 56.0, foot.y + 9.0, foot.w - 72.0, Align::Start);
+            frame.icon(Icon::Trash, mark, 18.0, p.text2);
+            frame.text(lang.pick("正在移至回收站", "Moving to the Recycle Bin"), title_font, p.text, words_x, title_y, foot.w - 64.0, Align::Start);
             let sub = match lang {
                 Lang::Zh => format!("{} 项，共 {}", self.going.len(), size_text(bytes, lang)),
                 Lang::En => format!("{} items, {}", self.going.len(), size_text(bytes, lang)),
             };
-            frame.text(&sub, sub_font, p.text2, foot.x + 56.0, foot.y + 29.0, foot.w - 72.0, Align::Start);
-            return false;
+            frame.text(&sub, sub_font, p.text2, words_x, sub_y, foot.w - 64.0, Align::Start);
+            return moving;
         }
         if self.gathered.is_empty() {
-            if let Some(went) = &self.went {
-                card(frame, p, foot);
-                frame.icon(Icon::CircleCheck, Point { x: foot.x + 30.0, y: foot.y + foot.h / 2.0 }, 20.0, p.accent);
+            if let Some(went) = self.went.as_ref().map(|went| (went.count, went.bytes)) {
+                let button = self.foot_button(frame, p, right, top, Some(Icon::Trash), lang.pick("清空回收站", "Empty Recycle Bin"), Target::EmptyNow, false, hot);
+                frame.icon(Icon::CircleCheck, mark, 18.0, p.accent);
                 let title = match lang {
-                    Lang::Zh => format!("已移至回收站：{} 项，{}", went.count, size_text(went.bytes, lang)),
-                    Lang::En => format!("Moved to the Recycle Bin: {} items, {}", went.count, size_text(went.bytes, lang)),
+                    Lang::Zh => format!("已移至回收站：{} 项，{}", went.0, size_text(went.1, lang)),
+                    Lang::En => format!("Moved to the Recycle Bin: {} items, {}", went.0, size_text(went.1, lang)),
                 };
-                frame.text(&title, title_font, p.text, foot.x + 56.0, foot.y + 9.0, foot.w - 220.0, Align::Start);
-                frame.text(lang.pick("回收站仍在这个盘上，清空后才释放空间", "The Recycle Bin is on this drive: emptied, its space is freed"), sub_font, p.text2, foot.x + 56.0, foot.y + 29.0, foot.w - 220.0, Align::Start);
-                let label = lang.pick("清空回收站", "Empty Recycle Bin");
-                let w = frame.measure(label, body(13.0, 400.0)) + 22.0 + 22.0;
-                let r = Rect { x: foot.x + foot.w - 12.0 - w, y: foot.y + 12.0, w, h: BUTTON_H };
-                button(frame, p, r, false, *hot == Some(Target::EmptyNow));
-                frame.icon(Icon::Trash, Point { x: r.x + 11.0 + 7.0, y: r.y + 16.0 }, 14.0, p.text);
-                frame.text(label, body(13.0, 400.0), p.text, r.x + 33.0, frame.line_in(body(13.0, 400.0), r.y, r.h), w, Align::Start);
-                self.spot(r, Target::EmptyNow);
-                return false;
+                frame.text(&title, title_font, p.text, words_x, title_y, button.x - 12.0 - words_x, Align::Start);
+                frame.text(lang.pick("回收站仍在这个盘上，清空后才释放空间", "The Recycle Bin is on this drive: emptied, its space is freed"), sub_font, p.text2, words_x, sub_y, button.x - 12.0 - words_x, Align::Start);
+                return moving;
             }
-            // Nothing gathered: where to put it.
-            let ink = if dragging_in { p.accent } else { p.text3 };
-            if dragging_in {
-                fill(frame, p.accent.alpha(0.08), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS);
-            }
-            frame.stroke_rounded_dashed(ink, foot.x, foot.y, foot.w, foot.h, CARD_RADIUS, 1.0);
-            frame.icon(Icon::Inbox, Point { x: foot.x + 30.0, y: foot.y + foot.h / 2.0 }, 18.0, ink);
-            frame.text(lang.pick("将文件或文件夹拖到这里，集中移至回收站", "Drag files or folders here to move them to the Recycle Bin together"), title_font, if dragging_in { p.accent } else { p.text2 }, foot.x + 56.0, foot.y + 9.0, foot.w - 72.0, Align::Start);
-            frame.text(
-                lang.pick("也可以点方块或列表右侧的加号。删除以当前用户的权限执行，没有权限的项目会保留并列出。", "Or press the plus on a block or a row. They are deleted as you may: what you may not delete stays, and is listed."),
-                sub_font,
-                p.text3,
-                foot.x + 56.0,
-                foot.y + 29.0,
-                foot.w - 72.0,
-                Align::Start,
-            );
-            return false;
         }
-        // What is gathered: as many as fit, the rest in a menu; how much it frees, and its going.
-        card(frame, p, foot);
-        if dragging_in {
-            stroke_inside(frame, foot, CARD_RADIUS, p.accent);
-        }
+        // What is gathered: its chips, how much it frees, all of it out, its going.
+        let commit = self.foot_button(frame, p, right, top, None, lang.pick("移至回收站", "Move to Recycle Bin"), Target::Commit, true, hot);
+        let clear = self.foot_button(frame, p, commit.x - 12.0, top, None, lang.pick("全部移出", "Remove all"), Target::UngatherAll, false, hot);
         let bytes: u64 = self.gathered.iter().map(|item| item.bytes).sum();
-        let button_font = body(13.0, 400.0);
-        let commit_label = lang.pick("移至回收站", "Move to Recycle Bin");
-        let clear_label = lang.pick("全部移出", "Remove all");
-        let commit_w = frame.measure(commit_label, button_font) + 22.0 + 22.0;
-        let clear_w = frame.measure(clear_label, button_font) + 22.0;
-        let commit = Rect { x: foot.x + foot.w - 12.0 - commit_w, y: foot.y + 12.0, w: commit_w, h: BUTTON_H };
-        let clear = Rect { x: commit.x - 8.0 - clear_w, y: foot.y + 12.0, w: clear_w, h: BUTTON_H };
-        button(frame, p, commit, true, *hot == Some(Target::Commit));
-        frame.icon(Icon::Trash, Point { x: commit.x + 11.0 + 7.0, y: commit.y + 16.0 }, 14.0, p.on_accent);
-        frame.text(commit_label, button_font, p.on_accent, commit.x + 33.0, frame.line_in(button_font, commit.y, commit.h), commit_w, Align::Start);
-        self.spot(commit, Target::Commit);
-        button(frame, p, clear, false, *hot == Some(Target::UngatherAll));
-        frame.text(clear_label, button_font, p.text, clear.x + 11.0, frame.line_in(button_font, clear.y, clear.h), clear_w, Align::Start);
-        self.spot(clear, Target::UngatherAll);
         let frees = format!("{} {}", lang.pick("将释放", "Frees"), size_text(bytes, lang));
         let later = lang.pick("清空回收站后生效", "once the Recycle Bin is emptied");
-        let summary_w = frame.measure(&frees, title_font).max(frame.measure(later, sub_font)) + 4.0;
-        let summary_x = clear.x - 16.0 - summary_w;
-        frame.text(&frees, title_font, p.text, summary_x, foot.y + 9.0, summary_w, Align::End);
-        frame.text(later, sub_font, p.text3, summary_x, foot.y + 29.0, summary_w, Align::End);
-        // The chips.
-        let chip_font = body(12.0, 400.0);
-        let room_right = summary_x - 12.0;
-        let mut x = foot.x + 12.0;
+        let total_font = body(14.0, 600.0);
+        let total_w = frame.measure(&frees, total_font).max(frame.measure(later, sub_font)) + 2.0;
+        let total_x = clear.x - 12.0 - total_w;
+        frame.text(&frees, total_font, p.text, total_x, frame.line_in(total_font, foot.y + 11.0, 18.0), total_w, Align::End);
+        frame.text(later, sub_font, p.text2, total_x, sub_y, total_w, Align::End);
         let items = self.gathered.clone();
-        let mut hidden: Vec<usize> = Vec::new();
-        for (at, item) in items.iter().enumerate() {
-            let name_w = frame.measure(&item.name, chip_font).min(140.0);
-            let size = size_text(item.bytes, lang);
-            let size_w = frame.measure(&size, chip_font);
-            let w = 10.0 + 14.0 + 6.0 + name_w + 6.0 + size_w + 4.0 + 20.0 + 4.0;
-            let more_room = if at + 1 < items.len() { 90.0 } else { 0.0 };
-            if !hidden.is_empty() || x + w + more_room > room_right {
-                hidden.push(at);
-                continue;
-            }
-            let r = Rect { x, y: foot.y + 12.0, w, h: 32.0 };
-            fill(frame, p.control, r.x, r.y, r.w, r.h, 6.0);
-            frame.icon(if item.folder { Icon::Folder } else { kind_icon(item.kind) }, Point { x: r.x + 10.0 + 7.0, y: r.y + 16.0 }, 14.0, if item.folder { p.text2 } else { p.hue[item.kind.at()] });
-            frame.text(&item.name, chip_font, p.text, r.x + 30.0, frame.line_in(chip_font, r.y, r.h), name_w + 2.0, Align::Start);
-            frame.text(&size, chip_font, p.text3, r.x + 30.0 + name_w + 6.0, frame.line_in(chip_font, r.y, r.h), size_w + 2.0, Align::Start);
-            let close = Rect { x: r.x + r.w - 24.0, y: r.y + 6.0, w: 20.0, h: 20.0 };
-            if *hot == Some(Target::Ungather(at)) {
-                fill(frame, p.hover, close.x, close.y, close.w, close.h, 4.0);
-            }
-            frame.icon(Icon::Close, Point { x: close.x + 10.0, y: close.y + 10.0 }, 12.0, p.text2);
-            self.spot(close, Target::Ungather(at));
-            x += w + 6.0;
-        }
-        if !hidden.is_empty() {
-            let label = match lang {
-                Lang::Zh => format!("另外 {} 项", hidden.len()),
-                Lang::En => format!("{} more", hidden.len()),
-            };
-            let w = frame.measure(&label, chip_font) + 20.0 + 16.0;
-            let r = Rect { x, y: foot.y + 12.0, w, h: 32.0 };
-            let target = Target::GatheredMore(hidden);
-            fill(frame, if *hot == Some(target.clone()) { p.chosen } else { p.control }, r.x, r.y, r.w, r.h, 6.0);
-            frame.text(&label, chip_font, p.text, r.x + 10.0, frame.line_in(chip_font, r.y, r.h), w, Align::Start);
-            frame.icon(Icon::ChevronDown, Point { x: r.x + r.w - 14.0, y: r.y + 16.0 }, 12.0, p.text2);
-            self.spot(r, target);
-        }
-        false
+        self.paint_chips(frame, p, &items, (foot.x + 16.0, total_x - 12.0), top, true, hot);
+        moving
     }
 
-    /// What is over the window: a dragged thing, a block's tag, a card, a menu, a word said.
-    fn paint_over(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, hot: &Option<Target>) {
+    /// A button of the foot's (Windows 11's, the accent's where `primary`) ending at `right`: as wide as its words (and
+    /// icon), 96 DIPs at the least.
+    #[allow(clippy::too_many_arguments)]
+    fn foot_button(&mut self, frame: &Frame, p: &Palette, right: f32, y: f32, icon: Option<Icon>, label: &str, target: Target, primary: bool, hot: &Option<Target>) -> Rect {
+        let font = body(14.0, 400.0);
+        let content = icon.map_or(0.0, |_| 14.0 + 8.0) + frame.measure(label, font);
+        let w = (content + 24.0).max(96.0);
+        let r = Rect { x: right - w, y, w, h: BUTTON_H };
+        let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+        button(frame, p, r, 6.0, if primary { 1.0 } else { 0.0 }, 1.08, lit);
+        let ink = if primary { p.on_accent } else { p.text };
+        let mut x = r.x + (w - content) / 2.0;
+        if let Some(icon) = icon {
+            frame.icon(icon, Point { x: x + 7.0, y: r.y + r.h / 2.0 }, 14.0, ink);
+            x += 14.0 + 8.0;
+        }
+        frame.text(label, font, ink, x, frame.line_in(font, r.y, r.h), content + 2.0, Align::Start);
+        self.spot(r, target);
+        r
+    }
+
+    /// The chips of what is gathered (or about to go, faint and with no way out, where not `live`) from `left` to
+    /// `right` at `y`: as many as fit whole, the rest under one more that lists them.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_chips(&mut self, frame: &Frame, p: &Palette, items: &[Gathered], (left, right): (f32, f32), y: f32, live: bool, hot: &Option<Target>) {
         let lang = self.lang;
-        if let Some(drag) = &self.drag {
-            let about = match drag.what {
-                Draggable::Block(at) => self.laid.get(at).map(|placed| self.about(&placed.shown, &placed.block.item)),
-                Draggable::Row(at) => self.shown.as_ref().and_then(|shown| shown.detail.rows.get(at)).map(|row| About {
-                    name: row.name.clone(),
-                    path: row.path.clone(),
-                    bytes: row.bytes,
-                    files: 1,
-                    cloud: 0,
-                    written: row.written,
-                    kind: row.kind,
-                    folder: false,
-                    what: Some(What::File { system: false }),
-                    info: None,
-                    onedrive: false,
-                    many_in: None,
-                    why_not: None,
-                }),
-            };
-            if let Some(about) = about {
-                let font = body(12.0, 600.0);
-                let text = format!("{}  {}", about.name, size_text(about.bytes, lang));
-                let w = (frame.measure(&text, font) + 40.0).min(300.0);
-                let (x, y) = (drag.at.0 + 12.0, drag.at.1 + 8.0);
-                let tall = if drag.why_not.is_some() { 50.0 } else { 30.0 };
-                frame.shadow(Color::hex(0, 0.18), x, y, w, tall, 6.0, 6.0, 2.0);
-                fill(frame, p.fly, x, y, w, tall, 6.0);
-                stroke_inside(frame, Rect { x, y, w, h: tall }, 6.0, p.fly_stroke);
-                frame.icon(if about.folder { Icon::Folder } else { kind_icon(about.kind) }, Point { x: x + 16.0, y: y + 15.0 }, 14.0, p.hue[about.kind.at()]);
-                frame.text(&text, font, p.text, x + 30.0, frame.line_in(font, y, 30.0), w - 38.0, Align::Start);
-                if let Some(why) = &drag.why_not {
-                    frame.text(why, body(12.0, 400.0), p.signal, x + 10.0, y + 28.0, w - 18.0, Align::Start);
-                }
-            }
-        } else if self.plate.is_none() && self.menu.is_none() && self.press.is_none() && self.anim.is_none() {
-            if let Some(at) = self.hover.filter(|_| matches!(hot, Some(Target::Map))) {
-                self.paint_tag(frame, p, g, at);
-            }
-            if let Some(Target::Drive(at)) = hot {
-                if let Some(drive) = self.drives.get(*at).filter(|drive| drive.low()) {
-                    let (title, sub) = match lang {
-                        Lang::Zh => (format!("{}: 可用空间不足", drive.letter()), format!("仅余 {}，约为总容量的 {:.0}%", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
-                        Lang::En => (format!("{}: is running out of space", drive.letter()), format!("Only {} free, about {:.0}% of it", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
-                    };
-                    let under = self.target_rect(&Target::Drive(*at));
-                    let r = Rect { x: under.x, y: under.y + under.h, w: 240.0, h: 52.0 };
-                    flyout(frame, p, r);
-                    frame.text(&title, body(13.0, 600.0), p.text, r.x + 12.0, r.y + 8.0, r.w - 24.0, Align::Start);
-                    frame.text(&sub, body(12.0, 400.0), p.text2, r.x + 12.0, r.y + 28.0, r.w - 24.0, Align::Start);
-                }
+        let name_font = body(13.0, 400.0);
+        let size_font = body(12.0, 400.0);
+        let more_label = |count: usize| match lang {
+            Lang::Zh => format!("另外 {} 项", count),
+            Lang::En => format!("{} more", count),
+        };
+        let more_w = |count: usize| 12.0 + frame.measure(&more_label(count), name_font) + 12.0;
+        // Each chip's name's width and its own (230 DIPs at the most, its name cut to fit).
+        let widths: Vec<(f32, f32)> = items
+            .iter()
+            .map(|item| {
+                let tail = if live { 8.0 + 24.0 + 4.0 } else { 8.0 + 6.0 + 4.0 };
+                let fixed = 10.0 + 14.0 + 8.0 + 8.0 + frame.measure(&size_text(item.bytes, lang), size_font) + tail;
+                let name_w = frame.measure(&item.name, name_font).min(230.0 - fixed).max(0.0);
+                (name_w, fixed + name_w)
+            })
+            .collect();
+        let taken = |count: usize| widths[..count].iter().map(|w| w.1).sum::<f32>() + 6.0 * count.saturating_sub(1) as f32;
+        let mut shown = items.len();
+        if taken(shown) > right - left {
+            while shown > 0 && taken(shown) + if shown > 0 { 6.0 } else { 0.0 } + more_w(items.len() - shown) > right - left {
+                shown -= 1;
             }
         }
-        self.paint_plate(frame, p, g, hot);
-        self.paint_menu(frame, p, g, hot);
-        if let Some(said) = &self.said {
+        let mut x = left;
+        for (at, item) in items.iter().enumerate().take(shown) {
+            let (name_w, w) = widths[at];
+            let r = Rect { x, y, w, h: 32.0 };
+            {
+                let _faint = faint(frame, if live { 1.0 } else { 0.55 });
+                fill(frame, p.control, r.x, r.y, r.w, r.h, 6.0);
+                frame.icon(if item.folder { Icon::Folder } else { kind_icon(item.kind) }, Point { x: r.x + 10.0 + 7.0, y: r.y + 16.0 }, 14.0, p.text2);
+                frame.text(&item.name, name_font, p.text, r.x + 32.0, frame.line_in(name_font, r.y, r.h), name_w, Align::Start);
+                let size = size_text(item.bytes, lang);
+                frame.text(&size, size_font, p.text2, r.x + 32.0 + name_w + 8.0, frame.line_in(size_font, r.y, r.h), frame.measure(&size, size_font) + 2.0, Align::Start);
+            }
+            if live {
+                let close = Rect { x: r.x + r.w - 4.0 - 24.0, y: r.y + 4.0, w: 24.0, h: 24.0 };
+                let target = Target::Ungather(at);
+                let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+                if lit > 0.0 {
+                    fill(frame, p.hover.alpha(lit), close.x, close.y, close.w, close.h, 4.0);
+                }
+                frame.icon(Icon::Close, Point { x: close.x + 12.0, y: close.y + 12.0 }, 12.0, mix(p.text2, p.text, lit));
+                self.spot(close, target);
+            }
+            x += w + 6.0;
+        }
+        let reopen = std::mem::take(&mut self.reopen_gathered);
+        if shown < items.len() {
+            let hidden: Vec<usize> = (shown..items.len()).collect();
+            let r = Rect { x, y, w: more_w(hidden.len()), h: 32.0 };
+            let label = more_label(hidden.len());
+            if live {
+                let target = Target::GatheredMore(hidden.clone());
+                let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+                fill(frame, mix(p.control, p.rule, lit), r.x, r.y, r.w, r.h, 6.0);
+                frame.text(&label, name_font, p.text, r.x + 12.0, frame.line_in(name_font, r.y, r.h), r.w, Align::Start);
+                self.spot(r, target);
+                // (One taken out of its menu: the menu again, of those not shown now.)
+                if reopen {
+                    self.menu = Some(Menu { of: MenuOf::Gathered(hidden), under: r, above: true });
+                }
+            } else {
+                let _faint = faint(frame, 0.55);
+                fill(frame, p.control, r.x, r.y, r.w, r.h, 6.0);
+                frame.text(&label, name_font, p.text, r.x + 12.0, frame.line_in(name_font, r.y, r.h), r.w, Align::Start);
+            }
+        }
+    }
+
+    /// What is dragged, as its ghost tells it.
+    fn ghost_of(&self, drag: &Drag) -> Option<Ghost> {
+        let about = match drag.what {
+            Draggable::Block(at) => self.laid.get(at).map(|placed| self.about(&placed.shown, &placed.block.item)),
+            Draggable::Row(at) => self.row_about(at),
+        }?;
+        let icon = if drag.why_not.is_some() {
+            Icon::Lock
+        } else if about.folder {
+            Icon::Folder
+        } else {
+            kind_icon(about.kind)
+        };
+        Some(Ghost { icon, name: about.name, size: size_text(about.bytes, self.lang), why_not: drag.why_not.clone(), at: drag.at })
+    }
+
+    /// What is over the window, each coming and going as the mockup's do: what is dragged, by the pointer; a block's
+    /// tag (or a drive's); a card, rising into place; a menu, dropping into it; a word said. Whether any moves still.
+    fn paint_over(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, hot: &Option<Target>) -> bool {
+        let mut moving = false;
+        let ghost = self.drag.as_ref().and_then(|drag| self.ghost_of(drag));
+        moving |= keep(&mut self.ghost, ghost.as_ref(), |_, _| true, now, 0.16);
+        if let Some(shown) = self.ghost.clone() {
+            paint_ghost(frame, p, &shown.what, shown.shown(now, 0.12, EASE), 0.92 + 0.08 * shown.shown(now, 0.16, SLIDE));
+        }
+        // A block's tag, while the map is still, nothing is held, and no card or menu is up.
+        let quiet = self.drag.is_none() && self.plate.is_none() && self.menu.is_none() && self.press.is_none() && self.anim.is_none();
+        let tag = self.hover.filter(|_| quiet && matches!(hot, Some(Target::Map | Target::AddTool(_) | Target::ReleaseTool(_)))).zip(self.pointer);
+        moving |= keep(&mut self.tag_shown, tag.as_ref(), |_, _| true, now, 0.1);
+        if let Some(shown) = self.tag_shown.clone() {
+            let _faint = faint(frame, shown.shown(now, 0.1, EASE));
+            self.paint_tag(frame, p, g, shown.what.0, shown.what.1);
+        }
+        // A drive's, nearly out of space, under its tab.
+        let drive_tag = match hot {
+            Some(Target::Drive(at)) if quiet && self.drives.get(*at).is_some_and(|drive| drive.low()) => Some(*at),
+            _ => None,
+        };
+        moving |= keep(&mut self.drive_tag, drive_tag.as_ref(), |_, _| true, now, 0.1);
+        if let Some(shown) = self.drive_tag.clone() {
+            let _faint = faint(frame, shown.shown(now, 0.1, EASE));
+            self.paint_drive_tag(frame, p, shown.what);
+        }
+        moving |= keep(&mut self.plate_shown, self.plate.as_ref(), |_, _| true, now, 0.22);
+        if let Some(shown) = self.plate_shown.clone() {
+            let _faint = faint(frame, shown.shown(now, 0.14, EASE));
+            let _moved = shifted(frame, 0.0, 6.0 * (1.0 - shown.shown(now, 0.22, SETTLE)), None);
+            self.paint_plate(frame, p, g, &shown.what, shown.went.is_none(), hot);
+        }
+        moving |= keep(&mut self.menu_shown, self.menu.as_ref(), |_, _| true, now, 0.2);
+        if let Some(shown) = self.menu_shown.clone() {
+            let _faint = faint(frame, shown.shown(now, 0.12, EASE));
+            let _moved = shifted(frame, 0.0, -6.0 * (1.0 - shown.shown(now, 0.2, SETTLE)), None);
+            self.paint_menu(frame, p, g, &shown.what, shown.went.is_none(), hot);
+        }
+        moving |= keep(&mut self.said_shown, self.said.as_ref(), |_, _| true, now, 0.22);
+        if let Some(shown) = self.said_shown.clone() {
+            let _faint = faint(frame, shown.shown(now, 0.16, EASE));
+            let _moved = shifted(frame, 0.0, 8.0 * (1.0 - shown.shown(now, 0.22, SETTLE)), None);
+            let said = &shown.what;
             let font = body(13.0, 400.0);
-            let w = frame.measure(&said.words, font) + 16.0 + 16.0 + 24.0;
+            let w = 12.0 + 16.0 + 10.0 + frame.measure(&said.words, font) + 16.0;
             let r = Rect { x: PAGE_X + (g.page_w - w) / 2.0, y: g.height - 96.0 - 40.0, w, h: 40.0 };
-            let t = now.duration_since(said.since).as_secs_f32();
-            let alpha = (t / 0.15).min(1.0).min((SAID_FOR.as_secs_f32() - t) / 0.25).clamp(0.0, 1.0);
-            frame.shadow(Color::hex(0, 0.16 * alpha), r.x, r.y, r.w, r.h, 8.0, 8.0, 3.0);
-            fill(frame, p.fly.alpha(alpha), r.x, r.y, r.w, r.h, 8.0);
-            stroke_inside(frame, r, 8.0, p.fly_stroke.alpha(alpha));
-            frame.icon(said.icon, Point { x: r.x + 16.0 + 8.0, y: r.y + 20.0 }, 16.0, p.accent.alpha(alpha));
-            frame.text(&said.words, font, p.text.alpha(alpha), r.x + 40.0, frame.line_in(font, r.y, r.h), r.w - 48.0, Align::Start);
+            flyout(frame, p, r);
+            frame.icon(said.icon, Point { x: r.x + 12.0 + 8.0, y: r.y + r.h / 2.0 }, 16.0, p.accent);
+            frame.text(&said.words, font, p.text, r.x + 12.0 + 16.0 + 10.0, frame.line_in(font, r.y, r.h), r.w - 38.0, Align::Start);
         }
+        moving
+    }
+
+    /// The tag of a drive nearly out of space (its place among the drives), under its tab.
+    fn paint_drive_tag(&mut self, frame: &Frame, p: &Palette, at: usize) {
+        let lang = self.lang;
+        let Some(drive) = self.drives.get(at) else { return };
+        let (title, sub) = match lang {
+            Lang::Zh => (format!("{}: 可用空间不足", drive.letter()), format!("仅余 {}，约为总容量的 {:.0}%", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
+            Lang::En => (format!("{}: is running out of space", drive.letter()), format!("Only {} free, about {:.0}% of it", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
+        };
+        let under = self.target_rect(&Target::Drive(at));
+        let r = Rect { x: under.x, y: under.y + under.h, w: 240.0, h: 52.0 };
+        flyout(frame, p, r);
+        frame.text(&title, body(13.0, 600.0), p.text, r.x + 12.0, r.y + 8.0, r.w - 24.0, Align::Start);
+        frame.text(&sub, body(12.0, 400.0), p.text2, r.x + 12.0, r.y + 28.0, r.w - 24.0, Align::Start);
     }
 
     /// The tag of the block at `at` (its place in the layout): what it is, and what can be done with it.
-    fn paint_tag(&mut self, frame: &Frame, p: &Palette, g: Geo, at: usize) {
+    fn paint_tag(&mut self, frame: &Frame, p: &Palette, g: Geo, at: usize, (x, y): (f32, f32)) {
         let lang = self.lang;
         let Some(placed) = self.laid.get(at).cloned() else { return };
-        let Some((x, y)) = self.pointer else { return };
         let about = self.about(&placed.shown, &placed.block.item);
         let label_font = body(12.0, 400.0);
         let mut lines: Vec<(String, Font, Color)> = Vec::new();
@@ -1265,13 +1589,15 @@ impl Organizer {
             tall += 6.0 + 18.0;
         }
         tall += 10.0;
-        let mut r = Rect { x: x + 16.0, y: y + 20.0, w: TAG_W, h: tall };
+        let mut r = Rect { x: x + 14.0, y: y + 20.0, w: TAG_W, h: tall };
         if r.x + r.w > g.width - 8.0 {
-            r.x = x - 16.0 - r.w;
+            r.x = x - 14.0 - r.w;
         }
         if r.y + r.h > g.height - 8.0 {
-            r.y = (y - 12.0 - r.h).max(8.0);
+            r.y = y - 12.0 - r.h;
         }
+        r.x = r.x.clamp(8.0, (g.width - 8.0 - r.w).max(8.0));
+        r.y = r.y.clamp(8.0, (g.height - 8.0 - r.h).max(8.0));
         flyout(frame, p, r);
         let mut at_y = r.y + 10.0;
         frame.text(&about.name, body(13.0, 600.0), p.text, r.x + 12.0, at_y, inner, Align::Start);
@@ -1297,10 +1623,11 @@ impl Organizer {
         }
     }
 
-    /// The card over the window, if there is one.
-    fn paint_plate(&mut self, frame: &Frame, p: &Palette, g: Geo, hot: &Option<Target>) {
+    /// A card over the window (its buttons and links pressable where `live`: not as it goes).
+    fn paint_plate(&mut self, frame: &Frame, p: &Palette, g: Geo, plate: &Plate, live: bool, hot: &Option<Target>) {
         let lang = self.lang;
-        let Some(plate) = &self.plate else { return };
+        let none = None;
+        let hot = if live { hot } else { &none };
         let inner = PLATE_W - 32.0;
         let body_font = body(13.0, 400.0);
         // Its title, its words, its links, its buttons.
@@ -1389,7 +1716,9 @@ impl Organizer {
         r.x = r.x.clamp(8.0, g.width - 8.0 - r.w);
         r.y = r.y.clamp(8.0, (g.height - 8.0 - r.h).max(8.0));
         flyout(frame, p, r);
-        self.spot(r, Target::Over);
+        if live {
+            self.spot(r, Target::Over);
+        }
         let mut y = r.y + 16.0;
         frame.text(&title, body(16.0, 600.0), p.text, r.x + 16.0, y, inner - 28.0, Align::Start);
         let close = Rect { x: r.x + r.w - 12.0 - 24.0, y: r.y + 12.0, w: 24.0, h: 24.0 };
@@ -1398,7 +1727,9 @@ impl Organizer {
             fill(frame, p.hover, close.x, close.y, close.w, close.h, 4.0);
         }
         frame.icon(Icon::Close, Point { x: close.x + 12.0, y: close.y + 12.0 }, 14.0, p.text2);
-        self.spot(close, close_target);
+        if live {
+            self.spot(close, close_target);
+        }
         y += 24.0 + 8.0;
         frame.text_wrapped(&words, body_font, p.text2, r.x + 16.0, y, inner);
         y += words_h;
@@ -1421,7 +1752,9 @@ impl Organizer {
             // (A page of Windows' opens; hibernation's turning off is told of in a card of its own.)
             let icon = if act == PlateAct::Hibernation { Icon::ChevronRight } else { Icon::ExternalLink };
             frame.icon(icon, Point { x: lr.x + w - 8.0, y: lr.y + 14.0 }, 12.0, ink);
-            self.spot(lr, target);
+            if live {
+                self.spot(lr, target);
+            }
             y += 28.0;
         }
         if !buttons.is_empty() {
@@ -1432,18 +1765,22 @@ impl Organizer {
                 x -= w;
                 let br = Rect { x, y, w, h: BUTTON_H };
                 let target = Target::PlateAct(act);
-                button(frame, p, br, primary, *hot == Some(target.clone()));
+                let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+                button(frame, p, br, 6.0, if primary { 1.0 } else { 0.0 }, 1.08, lit);
                 centred(frame, &label, body_font, if primary { p.on_accent } else { p.text }, br.x, frame.line_in(body_font, br.y, br.h), br.w);
-                self.spot(br, target);
+                if live {
+                    self.spot(br, target);
+                }
                 x -= 8.0;
             }
         }
     }
 
-    /// The menu over the window, if there is one.
-    fn paint_menu(&mut self, frame: &Frame, p: &Palette, g: Geo, hot: &Option<Target>) {
+    /// A menu over the window (its items pressable where `live`: not as it goes).
+    fn paint_menu(&mut self, frame: &Frame, p: &Palette, g: Geo, menu: &Menu, live: bool, hot: &Option<Target>) {
         let lang = self.lang;
-        let Some(menu) = &self.menu else { return };
+        let none = None;
+        let hot = if live { hot } else { &none };
         let font = body(13.0, 400.0);
         let items: Vec<(Option<Icon>, String, Option<String>, Target, bool)> = match &menu.of {
             MenuOf::Sizes => [0u64, 100 << 20, 1 << 30, 10 << 30]
@@ -1472,7 +1809,9 @@ impl Organizer {
         r.x = r.x.clamp(8.0, g.width - 8.0 - r.w);
         r.y = r.y.clamp(8.0, (g.height - 8.0 - r.h).max(8.0));
         flyout(frame, p, r);
-        self.spot(r, Target::Over);
+        if live {
+            self.spot(r, Target::Over);
+        }
         for (n, (icon, label, size, target, on)) in items.into_iter().enumerate() {
             let ir = Rect { x: r.x + 4.0, y: r.y + 4.0 + n as f32 * 32.0, w: r.w - 8.0, h: 32.0 };
             if *hot == Some(target.clone()) {
@@ -1499,7 +1838,9 @@ impl Organizer {
             if gathered {
                 frame.icon(Icon::Close, Point { x: ir.x + ir.w - 16.0, y: ir.y + 16.0 }, 12.0, p.text2);
             }
-            self.spot(ir, target);
+            if live {
+                self.spot(ir, target);
+            }
         }
     }
 }
@@ -1549,15 +1890,134 @@ fn flyout(frame: &Frame, p: &Palette, r: Rect) {
     stroke_inside(frame, r, 8.0, p.fly_stroke);
 }
 
-/// Windows 11's button: standard, or the accent's (`on`).
-fn button(frame: &Frame, p: &Palette, r: Rect, on: bool, hovered: bool) {
-    if on {
-        fill(frame, if hovered { p.accent.alpha(0.9) } else { p.accent }, r.x, r.y, r.w, r.h, 6.0);
+/// Windows 11's button, its corners rounded by `radius`: standard, or as much the accent's as `pressed` says (0 to 1),
+/// as much under the pointer as `hover` says (the accent's then lifted `lift` times as bright).
+fn button(frame: &Frame, p: &Palette, r: Rect, radius: f32, pressed: f32, lift: f32, hover: f32) {
+    let standard = mix(p.button, p.button_hover, hover);
+    let accent = bright(p.accent, 1.0 + (lift - 1.0) * hover);
+    fill(frame, mix(standard, accent, pressed), r.x, r.y, r.w, r.h, radius);
+    if pressed < 1.0 {
+        stroke_inside(frame, r, radius, p.button_stroke.alpha(1.0 - pressed));
+        within(frame, r, radius, 1.0 - pressed, || fill(frame, p.button_edge, r.x, r.y + r.h - 1.0, r.w, 1.0, 0.0));
+    }
+}
+
+/// A row's tool: a standard button, the accent's under the pointer.
+fn row_button(frame: &Frame, p: &Palette, r: Rect, icon: Icon, hot: bool) {
+    button(frame, p, r, 4.0, if hot { 1.0 } else { 0.0 }, 1.0, 0.0);
+    frame.icon(icon, Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 14.0, if hot { p.on_accent } else { p.text });
+}
+
+/// How wide a block's button freeing it to the cloud is: its icon and words.
+fn release_width(frame: &Frame, lang: Lang) -> f32 {
+    6.0 + 14.0 + 6.0 + frame.measure(lang.pick("释放空间", "Free up space"), body(12.0, 400.0)) + 8.0
+}
+
+/// `a` going to `b`, as far as `t` says (0 to 1).
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+}
+
+/// `c` `k` times as bright, as CSS's brightness() makes it.
+fn bright(c: Color, k: f32) -> Color {
+    Color { r: (c.r * k).min(1.0), g: (c.g * k).min(1.0), b: (c.b * k).min(1.0), a: c.a }
+}
+
+/// What is drawn while it is held seen through as much as its opacity says (see `faint`).
+struct Layer<'f>(&'f Frame<'f>);
+
+impl Drop for Layer<'_> {
+    fn drop(&mut self) {
+        unsafe { self.0.dc.PopLayer() };
+    }
+}
+
+/// What is drawn till what this gives is dropped seen through as much as `opacity` says (1: as it is).
+fn faint<'f>(frame: &'f Frame<'f>, opacity: f32) -> Option<Layer<'f>> {
+    if opacity >= 1.0 {
+        return None;
+    }
+    let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+    let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: opacity.max(0.0), ..Default::default() };
+    unsafe { frame.dc.PushLayer(&layer, None) };
+    Some(Layer(frame))
+}
+
+/// The transform drawn through before (see `shifted`), put back as what this holds is dropped.
+struct Moved<'f>(&'f Frame<'f>, Matrix3x2);
+
+impl Drop for Moved<'_> {
+    fn drop(&mut self) {
+        unsafe { self.0.dc.SetTransform(&self.1) };
+    }
+}
+
+/// What is drawn till what this gives is dropped put `dx`, `dy` further, and (with `scaled`) that many times as large
+/// about its point.
+fn shifted<'f>(frame: &'f Frame<'f>, dx: f32, dy: f32, scaled: Option<(f32, f32, f32)>) -> Moved<'f> {
+    let mut was = Matrix3x2::default();
+    unsafe { frame.dc.GetTransform(&mut was) };
+    let mut about = Matrix3x2::translation(dx, dy);
+    if let Some((x, y, scale)) = scaled {
+        about = Matrix3x2::translation(-x, -y) * Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: 0.0, M32: 0.0 } * Matrix3x2::translation(x + dx, y + dy);
+    }
+    unsafe { frame.dc.SetTransform(&(about * was)) };
+    Moved(frame, was)
+}
+
+/// An outline `width` DIPs wide round `e` (inside it), a block's corners or a piece's (all but square), a ring of
+/// `inner` inside it; round a block too small for one, a circle about its middle.
+fn outline(frame: &Frame, e: Rect, piece: bool, color: Color, width: f32, inner: Option<Color>) {
+    let radius = crate::disk::map::RADIUS;
+    if e.w < 8.0 || e.h < 8.0 {
+        frame.arc(Point { x: e.x + e.w / 2.0, y: e.y + e.h / 2.0 }, 7.0, 0.0, TAU, color, width);
         return;
     }
-    fill(frame, if hovered { p.button_hover } else { p.button }, r.x, r.y, r.w, r.h, 6.0);
-    stroke_inside(frame, r, 6.0, p.button_stroke);
-    within(frame, r, 6.0, 1.0, || fill(frame, p.button_edge, r.x, r.y + r.h - 1.0, r.w, 1.0, 0.0));
+    Canvas::stroke_rounded(frame, Fill::Solid(color), e.x, e.y, e.w, e.h, if piece { 1.0 } else { radius }, width);
+    if let Some(inner) = inner {
+        if e.w > 2.0 * width + 4.0 && e.h > 2.0 * width + 4.0 {
+            Canvas::stroke_rounded(frame, Fill::Solid(inner), e.x + width, e.y + width, e.w - 2.0 * width, e.h - 2.0 * width, if piece { 0.0 } else { radius - width }, 1.0);
+        }
+    }
+}
+
+/// The dim of what is known as `key` eased toward `to` by `k` (where it had none, at it at once); whether it moves
+/// still told in `moving`.
+fn eased(dims: &mut HashMap<Key, f32>, key: Key, to: f32, k: f32, moving: &mut bool) -> f32 {
+    let dim = dims.entry(key).or_insert(to);
+    if (to - *dim).abs() > 0.004 {
+        *dim += (to - *dim) * k;
+        *moving = true;
+    } else {
+        *dim = to;
+    }
+    *dim
+}
+
+/// What is dragged, by the pointer (above it, to its right): its icon, its name and size, or the reason it may not
+/// go; seen as much as `opacity` says, `scale` times as large.
+fn paint_ghost(frame: &Frame, p: &Palette, ghost: &Ghost, opacity: f32, scale: f32) {
+    let font = body(13.0, 400.0);
+    let size_font = body(12.0, 400.0);
+    let (words, size) = match &ghost.why_not {
+        Some(why) => (why.as_str(), None),
+        None => (ghost.name.as_str(), Some(ghost.size.as_str())),
+    };
+    let words_w = frame.measure(words, font).min(360.0);
+    let size_w = size.map_or(0.0, |size| 8.0 + frame.measure(size, size_font));
+    let r = Rect { x: ghost.at.0 + 14.0, y: ghost.at.1 - 40.0, w: 10.0 + 14.0 + 8.0 + words_w + size_w + 12.0, h: 32.0 };
+    let _faint = faint(frame, opacity);
+    let _moved = shifted(frame, 0.0, 0.0, Some((r.x + r.w / 2.0, r.y + r.h / 2.0, scale)));
+    frame.shadow(Color::hex(0, 0.2), r.x, r.y, r.w, r.h, 6.0, 8.0, 8.0);
+    fill(frame, p.fly, r.x, r.y, r.w, r.h, 6.0);
+    Canvas::stroke_rounded(frame, Fill::Solid(p.fly_stroke), r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, 7.0, 1.0);
+    frame.icon(ghost.icon, Point { x: r.x + 10.0 + 7.0, y: r.y + r.h / 2.0 }, 14.0, p.text2);
+    let ink = if ghost.why_not.is_some() { p.text2 } else { p.text };
+    frame.text(words, font, ink, r.x + 32.0, frame.line_in(font, r.y, r.h), words_w + 2.0, Align::Start);
+    if let Some(size) = size {
+        frame.text(size, size_font, p.text2, r.x + 32.0 + words_w + 8.0, frame.line_in(size_font, r.y, r.h), size_w, Align::Start);
+    }
 }
 
 /// Stripes across `r`, at 45°, every 6 DIPs (cut to what they are drawn within): on the same lines wherever they are

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::paint::{list_area, About, ROW_H};
+use super::paint::{list_area, row_height, About};
 use super::*;
 
 /// How far a press moves before it is a drag (DIPs).
@@ -16,6 +16,16 @@ impl Organizer {
         self.next_frame = Instant::now();
         if let Some(drag) = &mut self.drag {
             drag.at = (x, y);
+            return;
+        }
+        // The list's thumb held: the list scrolled as far as it is dragged.
+        if let Some(Press { on: Pressed::Thumb(held), .. }) = self.press {
+            let area = self.list_area();
+            if let Some((thumb, most)) = self.thumb(area, self.list_count()) {
+                let scrolled = ((y - held - area.y) / (area.h - thumb.h).max(1.0)).clamp(0.0, 1.0) * most;
+                self.scroll = scrolled;
+                self.scroll_to = scrolled;
+            }
             return;
         }
         if let Some(press) = self.press.clone() {
@@ -31,7 +41,6 @@ impl Organizer {
     pub fn left(&mut self) {
         self.pointer = None;
         self.hover = None;
-        self.row_hover = None;
         self.next_frame = Instant::now();
     }
 
@@ -66,7 +75,12 @@ impl Organizer {
                     return;
                 }
                 self.clicked = None;
-                let Some(at) = self.hover else { return };
+                // (A press on the map off every block: the file chosen let go of.)
+                let Some(at) = self.hover else {
+                    self.chosen = None;
+                    self.press = None;
+                    return;
+                };
                 self.press = Some(Press { at: (x, y), on: Pressed::Block(at) });
             }
             Some(Target::Row(at)) => {
@@ -79,6 +93,11 @@ impl Organizer {
                 }
                 self.press = Some(Press { at: (x, y), on: Pressed::Row(at) });
             }
+            Some(Target::Thumb) => {
+                let area = self.list_area();
+                let held = self.thumb(area, self.list_count()).map_or(0.0, |(thumb, _)| y - thumb.y);
+                self.press = Some(Press { at: (x, y), on: Pressed::Thumb(held) });
+            }
             Some(target) => self.press = Some(Press { at: (x, y), on: Pressed::Spot(target) }),
             None => self.press = None,
         }
@@ -88,7 +107,7 @@ impl Organizer {
         self.pointer = Some((x, y));
         self.next_frame = Instant::now();
         if let Some(drag) = self.drag.take() {
-            if self.foot_at.contains(x, y) && drag.why_not.is_none() && self.pending.is_none() {
+            if self.over_foot(x, y) && drag.why_not.is_none() && self.pending.is_none() {
                 let about = match drag.what {
                     Draggable::Block(at) => self.laid.get(at).map(|placed| self.about(&placed.shown, &placed.block.item)),
                     Draggable::Row(at) => self.row_about(at),
@@ -109,24 +128,32 @@ impl Organizer {
                     self.act(target);
                 }
             }
+            Pressed::Thumb(_) => {}
         }
     }
 
     pub fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
-        let (width, height) = self.client();
-        let area = list_area(super::paint::geo(width, height).side);
+        let area = self.list_area();
         if area.contains(x, y) {
-            self.scroll_to = (self.scroll_to - delta as f32 / 120.0 * ROW_H * 2.0).max(0.0);
+            self.scroll_to = (self.scroll_to - delta as f32 / 120.0 * row_height(self.tab) * 2.0).max(0.0);
             self.next_frame = Instant::now();
         }
     }
 
+    /// Where the list's rows are drawn, for the window's size now.
+    fn list_area(&self) -> Rect {
+        let (width, height) = self.client();
+        list_area(super::paint::geo(width, height).side)
+    }
+
     fn start_drag(&mut self, press: &Press, at: (f32, f32)) {
+        // (Nothing is dragged while what was gathered waits to go.)
         let about = match press.on {
+            _ if self.pending.is_some() => None,
             Pressed::Block(block) => self.laid.get(block).map(|placed| (Draggable::Block(block), self.about(&placed.shown, &placed.block.item))),
             Pressed::Row(row) => self.row_about(row).map(|about| (Draggable::Row(row), about)),
-            Pressed::Spot(_) => None,
+            Pressed::Spot(_) | Pressed::Thumb(_) => None,
         };
         self.press = None;
         if let Some((what, about)) = about {
@@ -136,7 +163,7 @@ impl Organizer {
     }
 
     /// What a row of the largest files is, as a block of it would be.
-    fn row_about(&self, at: usize) -> Option<About> {
+    pub(super) fn row_about(&self, at: usize) -> Option<About> {
         let row = self.shown.as_ref()?.detail.rows.get(at)?;
         let mut about = About {
             name: row.name.clone(),
@@ -178,7 +205,8 @@ impl Organizer {
         self.next_frame = Instant::now();
     }
 
-    /// A block clicked: a folder opened, a file chosen (and found in the list), a system item told of.
+    /// A block clicked: a folder opened, a file chosen (and found in the list) or let go of again, a system item told
+    /// of.
     fn click_block(&mut self, at: usize) {
         let Some(placed) = self.laid.get(at).cloned() else { return };
         let about = self.about(&placed.shown, &placed.block.item);
@@ -201,32 +229,40 @@ impl Organizer {
                 }
             }
             Some(What::File { .. }) => {
-                self.chosen = Some(about.path.clone());
-                self.find_in_list(&about.path);
+                if self.chosen.as_ref() == Some(&about.path) {
+                    self.chosen = None;
+                } else {
+                    self.chosen = Some(about.path.clone());
+                    self.find_in_list(&about.path);
+                }
             }
             _ => {}
         }
     }
 
-    /// The row of the file at `path` shown in the list of the largest, where it is in it.
+    /// The row of the file at `path` scrolled into view (to the nearer edge) where the largest files are listed.
     fn find_in_list(&mut self, path: &std::path::Path) {
+        if self.tab != Tab::Largest {
+            return;
+        }
         let Some(at) = self.shown.as_ref().and_then(|shown| shown.detail.rows.iter().position(|row| row.path == path)) else { return };
-        self.tab = Tab::Largest;
-        let (width, height) = self.client();
-        let area = list_area(super::paint::geo(width, height).side);
-        let top = at as f32 * ROW_H;
-        if top < self.scroll_to || top + ROW_H > self.scroll_to + area.h {
-            self.scroll_to = (top - area.h / 2.0 + ROW_H / 2.0).max(0.0);
+        let area = self.list_area();
+        let row_h = row_height(self.tab);
+        let top = at as f32 * row_h;
+        if top < self.scroll_to {
+            self.scroll_to = top;
+        } else if top + row_h > self.scroll_to + area.h {
+            self.scroll_to = top + row_h - area.h;
         }
     }
 
-    /// A row of the largest files chosen: the file chosen on the map too.
+    /// A row of the largest files chosen (the file chosen on the map too), or let go of again.
     fn choose_row(&mut self, at: usize) {
         if self.hot() != Some(Target::Row(at)) {
             return;
         }
-        if let Some(row) = self.shown.as_ref().and_then(|shown| shown.detail.rows.get(at)) {
-            self.chosen = Some(row.path.clone());
+        if let Some(path) = self.shown.as_ref().and_then(|shown| shown.detail.rows.get(at)).map(|row| row.path.clone()) {
+            self.chosen = if self.chosen.as_ref() == Some(&path) { None } else { Some(path) };
         }
     }
 
@@ -287,12 +323,7 @@ impl Organizer {
                 self.menu = Some(Menu { of: MenuOf::Crumbs(hidden), under, above: false });
             }
             Target::FilterOld => {
-                let preset = self.filter.old && self.filter.least == 1 << 30;
-                if preset {
-                    self.filter.least = 0;
-                } else {
-                    self.filter.old = !self.filter.old;
-                }
+                self.filter.old = !self.filter.old;
                 self.ask();
             }
             Target::FilterSize => {
@@ -306,10 +337,6 @@ impl Organizer {
             }
             Target::MenuSize(least) => {
                 self.menu = None;
-                // (Of the preset's two, the one asked for kept alone.)
-                if self.filter.old && self.filter.least == 1 << 30 {
-                    self.filter.old = false;
-                }
                 self.filter.least = least;
                 self.ask();
             }
@@ -322,6 +349,11 @@ impl Organizer {
                     self.tab = tab;
                     self.scroll = 0.0;
                     self.scroll_to = 0.0;
+                    // (A type or a time lit by the list left: the map lit by them no longer.)
+                    if matches!(self.light, Some(Light::Extension(_) | Light::Age(_))) {
+                        self.light = None;
+                        self.ask();
+                    }
                 }
             }
             Target::TypeRow(extension) => {
@@ -370,7 +402,9 @@ impl Organizer {
                 if at < self.gathered.len() {
                     self.gathered.remove(at);
                 }
-                // (The menu's places are the gathered's: it closes as they move.)
+                // (The menu's places are the gathered's: taken out of it, it is opened again as the foot is drawn anew,
+                // of those not shown then.)
+                self.reopen_gathered = matches!(target, Target::MenuUngather(_));
                 self.menu = None;
             }
             Target::GatheredMore(hidden) => {
@@ -385,7 +419,7 @@ impl Organizer {
                 self.plate = Some(Plate { of: PlateOf::Empty, at: (foot.x + foot.w - PLATE_W_OVER, foot.y - 8.0), above: true });
             }
             Target::PlateAct(act) => self.plate_act(act),
-            Target::Row(_) | Target::Map | Target::Foot | Target::Over => {}
+            Target::Row(_) | Target::Map | Target::Foot | Target::Over | Target::Thumb => {}
         }
     }
 

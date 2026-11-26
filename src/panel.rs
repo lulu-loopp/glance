@@ -5275,7 +5275,7 @@ impl<'a> Panel<'a> {
                 crate::ui::music::play_line(index);
                 self.music.back_to_now();
             }
-            Some(Hit::Drive(letter)) => open_drive(letter, self.hit_on_screen(Hit::Drive(letter))),
+            Some(Hit::Drive(letter)) => open_drive(letter),
             Some(Hit::Folder(number)) => open_folder(number),
             Some(Hit::Address(address)) => {
                 copy_address(address, self.window.hwnd);
@@ -5691,15 +5691,11 @@ fn exclusive_fullscreen() -> bool {
     unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
 }
 
-/// What a press on the row of the drive `letter` does, said: shown in the disk organizer, where search knows its every
-/// file, else opened.
-pub(crate) fn opens_drive(letter: char, lang: Lang) -> String {
-    let organized = crate::ui::disk::shows(&format!("{letter}:\\"));
-    match (lang, organized) {
-        (Lang::Zh, true) => format!("在磁盘整理中查看 {letter}:"),
-        (Lang::En, true) => format!("Show {letter}: in Disk Organizer"),
-        (Lang::Zh, false) => format!("打开 {letter}:"),
-        (Lang::En, false) => format!("Open {letter}:"),
+/// What a press on the row of the drive `name` does, said.
+pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Zh => format!("打开 {name}"),
+        Lang::En => format!("Open {name}"),
     }
 }
 
@@ -5722,7 +5718,7 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
         return Some(name);
     }
     match hit {
-        Hit::Drive(letter) => Some(opens_drive(letter, lang)),
+        Hit::Drive(letter) => Some(opens_drive(&format!("{letter}:"), lang)),
         // (The address whole: a long one shows shortened.)
         Hit::Address(address) => {
             let latest = crate::app().controller.history.latest()?;
@@ -5746,15 +5742,9 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
     }
 }
 
-/// The drive `letter` (see `Hit::Drive`) shown in the disk organizer, poured out of its row at `place` (physical px),
-/// where search knows its every file; else opened where the user browses files, on another thread (the shell may take
-/// a while).
-pub(crate) fn open_drive(letter: char, place: Option<RECT>) {
-    let root = format!("{letter}:\\");
-    if crate::ui::disk::shows(&root) {
-        crate::ui::disk::open_drive(&root, place);
-        return;
-    }
+/// Opens the drive seen at `place` (see `Hit::Drive`) where the user browses files, on another thread (the shell may
+/// take a while).
+pub(crate) fn open_drive(letter: char) {
     std::thread::spawn(move || {
         let root = windows::core::HSTRING::from(format!("{letter}:\\"));
         unsafe {

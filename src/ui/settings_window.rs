@@ -6879,8 +6879,9 @@ It can be disconnected here at any time, and the status line command put back.",
         self.next_frame = if moving {
             now
         } else if self.page == Page::Disk {
-            // (The organizer's page: when it asks, see `tick`, or now and then for the pages' list.)
-            now + Duration::from_secs(1)
+            // (The organizer's page: when it asks for its next frame, just drawn, else now and then for the pages'
+            // list.)
+            self.disk.as_ref().map_or(now + Duration::from_secs(1), |disk| disk.next_frame().min(now + Duration::from_secs(1)))
         } else {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))

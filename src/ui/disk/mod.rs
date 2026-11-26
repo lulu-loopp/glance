@@ -1,9 +1,9 @@
 //! The disk organizer: a page of the settings window (see `settings_window`, `Page::Disk`) showing what a drive holds
 //! as a map of blocks, each file its kind's colour, each folder what it holds, two levels at a time (see `disk::map`);
 //! beside it the largest files, the files by type and by time; under them a place to gather what is to go, moved to
-//! the Recycle Bin together. The drives are its tabs. Opened from a drive's row in the panel's Storage, from a folder
-//! found in search, or by its name in search. Everything it shows is read from the drive's search index (see
-//! `worker`): no drive is scanned.
+//! the Recycle Bin together. The drives are its tabs. Opened from the settings' pages, from a folder found in search,
+//! or by its name in search (a drive's row in the panel opens the drive in Explorer). Everything it shows is read from
+//! the drive's search index (see `worker`): no drive is scanned.
 
 mod input;
 mod paint;
@@ -22,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW, WM_AP
 use crate::disk::map::{Block, Item, Rect};
 use crate::disk::{Filter, Kind, Light, What};
 use crate::ui::gfx::Frame;
+use crate::ui::motion::Easing;
 use crate::ui::text::Lang;
 use worker::{Ask, Info, Shown, Told, Worker};
 
@@ -41,6 +42,116 @@ const ZOOM: Duration = Duration::from_millis(380);
 const FOLD: Duration = Duration::from_millis(420);
 const FADE: Duration = Duration::from_millis(260);
 
+/// The curves things move on, as the mockup's: CSS's own ease (a hover's fade), Windows 11's for what comes into
+/// place, the one things slide and pop on, and what eases out alone.
+const EASE: Easing = Easing(0.25, 0.1, 0.25, 1.0);
+const SETTLE: Easing = Easing(0.1, 0.9, 0.2, 1.0);
+const SLIDE: Easing = Easing(0.2, 0.8, 0.3, 1.0);
+const EASE_OUT: Easing = Easing(0.0, 0.0, 0.58, 1.0);
+
+/// A value going to another over `lasts` seconds on `curve`, from where it was when told where to go.
+#[derive(Clone, Copy)]
+struct Tween {
+    from: f64,
+    to: f64,
+    since: Instant,
+    lasts: f32,
+    curve: Easing,
+}
+
+impl Tween {
+    fn new(at: f64, lasts: f32, curve: Easing) -> Tween {
+        Tween { from: at, to: at, since: Instant::now(), lasts, curve }
+    }
+
+    fn at(&self, now: Instant) -> f64 {
+        let t = (now.saturating_duration_since(self.since).as_secs_f32() / self.lasts).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * self.curve.at(t) as f64
+    }
+
+    /// Going to `to` from where it is now (as it was going, if it was told so before).
+    fn go(&mut self, to: f64, now: Instant) {
+        if to != self.to {
+            self.from = self.at(now);
+            self.to = to;
+            self.since = now;
+        }
+    }
+
+    /// At `to` at once.
+    fn set(&mut self, to: f64) {
+        self.from = to;
+        self.to = to;
+    }
+
+    fn moving(&self, now: Instant) -> bool {
+        self.from != self.to && now < self.since + Duration::from_secs_f32(self.lasts)
+    }
+}
+
+/// Something over the page as it comes and goes (a tag, a card, a menu, what is dragged): what it is, when it came,
+/// when it went (drawn going till it has faded).
+#[derive(Clone, Debug)]
+struct Coming<T> {
+    what: T,
+    came: Instant,
+    went: Option<Instant>,
+}
+
+impl<T> Coming<T> {
+    fn new(what: T, now: Instant) -> Coming<T> {
+        Coming { what, came: now, went: None }
+    }
+
+    /// How far it has come over `lasts` seconds (0 to 1, on `curve`), and gone again since it went.
+    fn shown(&self, now: Instant, lasts: f32, curve: Easing) -> f32 {
+        let part = |from: Instant, to: Instant| (to.saturating_duration_since(from).as_secs_f32() / lasts).clamp(0.0, 1.0);
+        match self.went {
+            None => curve.at(part(self.came, now)),
+            Some(went) => {
+                let had = part(self.came, went);
+                curve.at((had - part(went, now)).max(0.0))
+            }
+        }
+    }
+
+    /// Whether it is done going (or coming) over `lasts` seconds.
+    fn settled(&self, now: Instant, lasts: f32) -> bool {
+        let since = self.went.unwrap_or(self.came);
+        now.saturating_duration_since(since).as_secs_f32() >= lasts
+    }
+}
+
+/// `coming` kept in step with what is to be shown (`now_is`): come anew where that is new (or another), gone where
+/// there is none, let go of once gone; `same` telling whether two are the one shown still (else what it is now is
+/// taken in as it stays). Whether it moves still over `lasts` seconds.
+fn keep<T: Clone>(coming: &mut Option<Coming<T>>, now_is: Option<&T>, same: impl Fn(&T, &T) -> bool, now: Instant, lasts: f32) -> bool {
+    match (coming.as_mut(), now_is) {
+        (Some(shown), Some(is)) if shown.went.is_none() && same(&shown.what, is) => shown.what = is.clone(),
+        (_, Some(is)) => *coming = Some(Coming::new(is.clone(), now)),
+        (Some(shown), None) => {
+            if shown.went.is_none() {
+                shown.went = Some(now);
+            } else if shown.settled(now, lasts) {
+                *coming = None;
+            }
+        }
+        (None, None) => {}
+    }
+    coming.as_ref().is_some_and(|shown| !shown.settled(now, lasts))
+}
+
+/// What is dragged, drawn by the pointer: its icon, its name and size, or the reason it may not go; where the pointer
+/// is.
+#[derive(Clone, Debug, PartialEq)]
+struct Ghost {
+    icon: crate::ui::icons::Icon,
+    name: String,
+    size: String,
+    why_not: Option<String>,
+    at: (f32, f32),
+}
+
 /// What the organizer was last asked to show, till the settings window takes it (see `take_asked`).
 static ASKED: Mutex<Option<Asked>> = Mutex::new(None);
 /// What a shell thread did (see `act`), for the organizer to take in as its window is told (`ACTED`).
@@ -53,11 +164,6 @@ pub struct Asked {
     pub root: Option<String>,
     pub folder: Option<PathBuf>,
     pub place: Option<RECT>,
-}
-
-/// The organizer opened (or, open, turned) to the drive `root`'s root.
-pub fn open_drive(root: &str, place: Option<RECT>) {
-    open(Asked { root: Some(root.to_string()), folder: None, place });
 }
 
 /// The organizer opened (or, open, turned) to the folder at `path`, on its drive.
@@ -98,6 +204,8 @@ struct Palette {
     text3: crate::ui::canvas::Color,
     hover: crate::ui::canvas::Color,
     control: crate::ui::canvas::Color,
+    /// A hairline's (a share's track, the list's scroll thumb).
+    rule: crate::ui::canvas::Color,
     card: crate::ui::canvas::Color,
     card_stroke: crate::ui::canvas::Color,
     /// A first-level folder's ground; a chosen row's; a meter's track.
@@ -153,6 +261,7 @@ impl Palette {
                 text3: white(0.5),
                 hover: white(0.06),
                 control: white(0.06),
+                rule: white(0.08),
                 card: white(0.05),
                 card_stroke: black(0.2),
                 ground: white(0.035),
@@ -182,6 +291,7 @@ impl Palette {
                 text3: black(0.44),
                 hover: black(0.04),
                 control: black(0.05),
+                rule: black(0.08),
                 card: white(0.7),
                 card_stroke: black(0.06),
                 ground: black(0.035),
@@ -225,8 +335,9 @@ struct Placed {
     shown: Rc<Shown>,
 }
 
-/// A block moving from one layout to the next (see `Anim`): from where, how seen, to where; going (not in the next
-/// layout).
+/// A block moving from one layout to the next (see `Anim`): from where, how seen, to where; how much a ground it is
+/// from and to (a block becoming a folder's ground going in, or a ground a block going out, crosses from one look to
+/// the other), and what it was before (drawn as its pieces as it crosses); going (not in the next layout).
 #[derive(Clone)]
 struct Moving {
     placed: Placed,
@@ -234,7 +345,21 @@ struct Moving {
     to: Rect,
     from_alpha: f32,
     to_alpha: f32,
+    from_ground: f32,
+    to_ground: f32,
+    was: Option<Placed>,
     gone: bool,
+}
+
+/// A block as it is seen now (moving, as far as it has): its layout, where it is, how clear, how much a ground it is
+/// (0 to 1), and what it was before it moved.
+#[derive(Clone)]
+struct Seen {
+    placed: Placed,
+    at: Rect,
+    alpha: f32,
+    ground: f32,
+    was: Option<Placed>,
 }
 
 struct Anim {
@@ -273,6 +398,7 @@ struct Gathered {
 }
 
 /// What was gathered, about to go to the Recycle Bin: its going undoable till `UNDO_FOR` has passed.
+#[derive(Clone)]
 struct Pending {
     items: Vec<Gathered>,
     since: Instant,
@@ -286,6 +412,7 @@ struct Went {
 }
 
 /// A word said over the foot for a while (see `SAID_FOR`), with its icon.
+#[derive(Clone, Debug, PartialEq)]
 struct Said {
     words: String,
     icon: crate::ui::icons::Icon,
@@ -304,6 +431,7 @@ enum PlateOf {
 }
 
 /// A card over the window telling of a system item, its acts on it, at a point (above it, where `above`).
+#[derive(Clone, Debug, PartialEq)]
 struct Plate {
     of: PlateOf,
     at: (f32, f32),
@@ -323,6 +451,7 @@ enum MenuOf {
     Gathered(Vec<usize>),
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct Menu {
     of: MenuOf,
     under: Rect,
@@ -344,6 +473,17 @@ enum Pressed {
     Row(usize),
     /// Any other spot (see `Target`): what it does, done as it is let go of over it.
     Spot(Target),
+    /// The list's scroll thumb, held this far down from its top.
+    Thumb(f32),
+}
+
+/// Which look of a spot fades (see `paint::fade`): under the pointer; on (pressed, lit, there to be used); its tools
+/// shown (a row's, under the pointer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Look {
+    Hot,
+    On,
+    Tools,
 }
 
 /// Something dragged to the foot: what it is, the reason it may not go (none: it may), where the pointer is.
@@ -399,6 +539,8 @@ enum Target {
     PlateAct(PlateAct),
     /// A card or menu, over what is under it.
     Over,
+    /// The list's scroll thumb.
+    Thumb,
 }
 
 /// What a card's buttons and links do.
@@ -447,17 +589,17 @@ pub struct Organizer {
     anim: Option<Anim>,
     change: Option<Change>,
     dims: HashMap<Key, f32>,
-    /// The block under the pointer (its place in the layout), the row; the file chosen (by its path).
+    /// The block under the pointer (its place in the layout); the file chosen (by its path).
     hover: Option<usize>,
-    row_hover: Option<Target>,
     chosen: Option<PathBuf>,
     filter: Filter,
     light: Option<Light>,
     peek: Option<Light>,
     tab: Tab,
-    tab_mark: (f32, f32),
-    /// Where the mark under the drive shown's tab is (its left, eased toward it).
-    drive_mark: Option<f32>,
+    /// Where the mark under the list's tab shown is (its left, sliding to it), and the drive whose tab is shown and
+    /// since when (its mark growing in under it).
+    tab_mark: Option<Tween>,
+    drive_mark: Option<(String, Instant)>,
     scroll: f32,
     scroll_to: f32,
     gathered: Vec<Gathered>,
@@ -474,8 +616,29 @@ pub struct Organizer {
     drag: Option<Drag>,
     pointer: Option<(f32, f32)>,
     targets: Vec<(Rect, Target)>,
-    /// What the used part of the drive's meter shows, eased toward what it is (bytes), and for which drive.
-    used_shown: (String, f64),
+    /// The drive's use as its words tell it (what is used, counted to what it is) and as its meter shows it (what is
+    /// used but for the Recycle Bin, what is gathered at its end, the Recycle Bin's after it), for which drive.
+    used_told: Tween,
+    meter: [Tween; 3],
+    meter_of: String,
+    /// The time this frame is drawn at; each spot's look under the pointer (or pressed, or shown) as it fades to it,
+    /// and whether any fades still.
+    now: Instant,
+    fades: Vec<(Target, Look, Tween, bool)>,
+    fading: bool,
+    /// What is over the page as it comes and goes: the tag of the block under the pointer (its place in the layout,
+    /// where the pointer is), the tools on it, a card, a menu, what is dragged.
+    tag_shown: Option<Coming<(usize, (f32, f32))>>,
+    drive_tag: Option<Coming<usize>>,
+    tools_shown: Option<Coming<paint::BlockTools>>,
+    plate_shown: Option<Coming<Plate>>,
+    menu_shown: Option<Coming<Menu>>,
+    ghost: Option<Coming<Ghost>>,
+    said_shown: Option<Coming<Said>>,
+    /// What the foot shows (told by a sum of it), and since when: it comes up anew as that changes. And whether the
+    /// menu of what is gathered and not shown is to open again once the foot is drawn anew (one taken out of it).
+    foot_seen: (u64, Instant),
+    reopen_gathered: bool,
     /// Where the map was last drawn (DIPs in the window), and the foot.
     map_at: Rect,
     foot_at: Rect,
@@ -526,13 +689,12 @@ impl Organizer {
             change: None,
             dims: HashMap::new(),
             hover: None,
-            row_hover: None,
             chosen: None,
             filter: Filter::default(),
             light: None,
             peek: None,
             tab: Tab::Largest,
-            tab_mark: (0.0, 0.0),
+            tab_mark: None,
             drive_mark: None,
             scroll: 0.0,
             scroll_to: 0.0,
@@ -548,7 +710,21 @@ impl Organizer {
             drag: None,
             pointer: None,
             targets: Vec::new(),
-            used_shown: (String::new(), 0.0),
+            used_told: Tween::new(0.0, 0.6, SETTLE),
+            meter: [Tween::new(0.0, 0.5, SLIDE); 3],
+            meter_of: String::new(),
+            now: Instant::now(),
+            fades: Vec::new(),
+            fading: false,
+            tag_shown: None,
+            drive_tag: None,
+            tools_shown: None,
+            plate_shown: None,
+            menu_shown: None,
+            ghost: None,
+            said_shown: None,
+            foot_seen: (0, Instant::now()),
+            reopen_gathered: false,
             map_at: Rect::default(),
             foot_at: Rect::default(),
             clouds: crate::disk::Places::of_this_pc().onedrive,
@@ -758,13 +934,15 @@ impl Organizer {
         match change {
             Some(change) if !self.laid.is_empty() && !crate::panel::reduced_motion() => {
                 let now = self.now_rects(Instant::now());
-                self.anim = Some(moving(now, &next, change));
+                self.anim = Some(moving(now, &next, change, width, height));
             }
             _ => self.anim = None,
         }
         self.laid = next;
-        // The block under the pointer, as laid out now.
+        // The block under the pointer, as laid out now (its tag and tools gone: they come again once the map is still).
         self.hover = self.pointer.and_then(|(x, y)| self.block_at(x, y));
+        self.tag_shown = None;
+        self.tools_shown = None;
     }
 
     /// The block of the map at (`x`, `y`) in the window, the deepest there: its place in the layout.
@@ -782,15 +960,40 @@ impl Organizer {
         found
     }
 
-    /// The blocks as they are seen now: each's layout and where it is and how seen (moving, as far as it has).
-    fn now_rects(&self, now: Instant) -> Vec<(Placed, Rect, f32, bool)> {
+    /// The blocks as they are seen now (moving, as far as they have).
+    fn now_rects(&self, now: Instant) -> Vec<Seen> {
         match &self.anim {
             Some(anim) => {
                 let t = anim_t(anim, now);
-                anim.moving.iter().map(|moving| (moving.placed.clone(), lerp_rect(moving.from, moving.to, t), moving.from_alpha + (moving.to_alpha - moving.from_alpha) * t, moving.placed.block.group)).collect()
+                anim.moving
+                    .iter()
+                    .map(|moving| Seen {
+                        placed: moving.placed.clone(),
+                        at: lerp_rect(moving.from, moving.to, t),
+                        alpha: moving.from_alpha + (moving.to_alpha - moving.from_alpha) * t,
+                        ground: moving.from_ground + (moving.to_ground - moving.from_ground) * t,
+                        was: moving.was.clone(),
+                    })
+                    .collect()
             }
-            None => self.laid.iter().map(|placed| (placed.clone(), placed.block.at, 1.0, placed.block.group)).collect(),
+            None => self.laid.iter().map(|placed| Seen { placed: placed.clone(), at: placed.block.at, alpha: 1.0, ground: if placed.block.group { 1.0 } else { 0.0 }, was: None }).collect(),
         }
+    }
+
+    /// Where the file at `path` itself is drawn on the map now: its block, or the piece of a block it is (told so).
+    fn exact_rect(&self, path: &Path) -> Option<(Rect, bool)> {
+        for placed in &self.laid {
+            let shown = &placed.shown;
+            let is = |item: &Item| matches!(item, Item::Node(node) if matches!(shown.tree.nodes[*node].what, What::File { .. }) && shown.paths[*node] == path);
+            if is(&placed.block.item) {
+                return Some((placed.block.at, false));
+            }
+            let at = placed.block.at;
+            if let Some(piece) = placed.block.pieces.iter().find(|piece| is(&piece.item)) {
+                return Some((Rect { x: at.x + piece.at.x * at.w, y: at.y + piece.at.y * at.h, w: piece.at.w * at.w, h: piece.at.h * at.h }, true));
+            }
+        }
+        None
     }
 
     /// Where the file or folder at `path` is drawn on the map now: its block, or the piece of a block it is, or the
@@ -1002,12 +1205,10 @@ fn centre(r: Rect) -> Rect {
     Rect { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0, w: 0.0, h: 0.0 }
 }
 
-/// The blocks moving from how they are seen now (`now`) to the layout `next`, as `change` says.
-fn moving(now: Vec<(Placed, Rect, f32, bool)>, next: &[Placed], change: Change) -> Anim {
-    let map = next.iter().fold(Rect::default(), |all, placed| {
-        let r = placed.block.at;
-        Rect { x: 0.0, y: 0.0, w: all.w.max(r.x + r.w), h: all.h.max(r.y + r.h) }
-    });
+/// The blocks moving from how they are seen now (`now`) to the layout `next` (a map `width` × `height`), as `change`
+/// says.
+fn moving(now: Vec<Seen>, next: &[Placed], change: Change, width: f32, height: f32) -> Anim {
+    let map = Rect { x: 0.0, y: 0.0, w: width, h: height };
     let (enter, exit): (Box<dyn Fn(Rect) -> (Rect, f32)>, Box<dyn Fn(Rect) -> (Rect, f32)>) = match change {
         Change::In(at) => (Box::new(move |r| (mapped(map, at, r), 0.0)), Box::new(move |r| (mapped(at, map, r), 0.0))),
         // (Into the block the folder shown before is drawn as now: what comes grows out of it as what goes shrinks in.)
@@ -1021,21 +1222,32 @@ fn moving(now: Vec<(Placed, Rect, f32, bool)>, next: &[Placed], change: Change) 
         Change::Fade => FADE,
     };
     let fading = matches!(change, Change::Fade);
+    let ground_of = |placed: &Placed| if placed.block.group { 1.0 } else { 0.0 };
     let mut moves = Vec::new();
     for placed in next {
-        let from = now.iter().find(|(was, _, alpha, _)| !fading && was.key == placed.key && *alpha > 0.01);
+        let from = now.iter().find(|seen| !fading && seen.placed.key == placed.key && seen.alpha > 0.01);
         match from {
-            Some((_, at, alpha, _)) => moves.push(Moving { placed: placed.clone(), from: *at, to: placed.block.at, from_alpha: *alpha, to_alpha: 1.0, gone: false }),
+            Some(seen) => moves.push(Moving {
+                placed: placed.clone(),
+                from: seen.at,
+                to: placed.block.at,
+                from_alpha: seen.alpha,
+                to_alpha: 1.0,
+                from_ground: seen.ground,
+                to_ground: ground_of(placed),
+                was: Some(seen.placed.clone()),
+                gone: false,
+            }),
             None => {
                 let (at, alpha) = enter(placed.block.at);
-                moves.push(Moving { placed: placed.clone(), from: at, to: placed.block.at, from_alpha: alpha, to_alpha: 1.0, gone: false });
+                moves.push(Moving { placed: placed.clone(), from: at, to: placed.block.at, from_alpha: alpha, to_alpha: 1.0, from_ground: ground_of(placed), to_ground: ground_of(placed), was: None, gone: false });
             }
         }
     }
-    for (was, at, alpha, _) in now {
-        if alpha > 0.01 && (fading || !next.iter().any(|placed| placed.key == was.key)) {
-            let (to, to_alpha) = exit(at);
-            moves.push(Moving { placed: was, from: at, to, from_alpha: alpha, to_alpha, gone: true });
+    for seen in now {
+        if seen.alpha > 0.01 && (fading || !next.iter().any(|placed| placed.key == seen.placed.key)) {
+            let (to, to_alpha) = exit(seen.at);
+            moves.push(Moving { placed: seen.placed, from: seen.at, to, from_alpha: seen.alpha, to_alpha, from_ground: seen.ground, to_ground: seen.ground, was: seen.was, gone: true });
         }
     }
     // (What goes drawn under what comes, as deep as each is.)
