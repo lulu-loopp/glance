@@ -5802,8 +5802,8 @@ It can be disconnected here at any time, and the status line command put back.",
         // (A space between Chinese and a Latin name, none before a Chinese one.)
         let to = if provider.starts_with(|c: char| c.is_ascii()) { format!(" {provider}") } else { provider.to_string() };
         let words = match (kept, lang) {
-            (crate::ai::keys::Kept::Env(variable), Lang::Zh) => format!("取自环境变量 {variable}，仅发送给{to}"),
-            (crate::ai::keys::Kept::Env(variable), Lang::En) => format!("Taken from the variable {variable}, sent to {provider} alone"),
+            (crate::ai::keys::Kept::Env(variable), Lang::Zh) => format!("取自环境变量 {variable}，粘贴的密钥优先，仅发送给{to}"),
+            (crate::ai::keys::Kept::Env(variable), Lang::En) => format!("Taken from the variable {variable} unless a key is pasted, sent to {provider} alone"),
             (_, Lang::Zh) => format!("加密保存在本机，仅发送给{to}"),
             (_, Lang::En) => format!("Kept encrypted on this PC, sent to {provider} alone"),
         };
@@ -6429,8 +6429,8 @@ It can be disconnected here at any time, and the status line command put back.",
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::AiKey(id, field) if self.expanded.contains(&id) => match self.ai_key(&id, field).map(|(_, kept)| kept) {
                     Some(crate::ai::keys::Kept::Given) => vec![Target::AiKeyRemove(id.clone(), field), Target::AiKey(id, field)],
-                    Some(crate::ai::keys::Kept::None) => vec![Target::AiKey(id, field)],
-                    _ => vec![],
+                    Some(crate::ai::keys::Kept::None | crate::ai::keys::Kept::Env(_)) => vec![Target::AiKey(id, field)],
+                    None => vec![],
                 },
                 Row::AiKey(..) => vec![],
                 Row::AddFolder if self.may_add_folder() && self.expanded.contains(STORAGE) => vec![Target::AddFolder],
@@ -7701,10 +7701,9 @@ It can be disconnected here at any time, and the status line command put back.",
                     if writing {
                         self.paint_rename(frame, palette, label, boxed.x + 8.0, cy, boxed.w - 8.0, now);
                     } else {
-                        // (Taken from a variable: written there, not here.)
-                        let from_env = matches!(kept, crate::ai::keys::Kept::Env(_));
+                        // (Taken from a variable: one pasted here is taken before it.)
                         let target = Target::AiKey(id.clone(), field);
-                        let lit = !from_env && hovered.as_ref() == Some(&target);
+                        let lit = hovered.as_ref() == Some(&target);
                         fill(frame, if lit { palette.hover } else { palette.control }, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
                         stroke_inside(frame, boxed, 6.0, palette.rule);
                         let (shown, color) = match kept {
@@ -7715,9 +7714,7 @@ It can be disconnected here at any time, and the status line command put back.",
                         frame.clip(boxed.x + 8.0, boxed.y, boxed.w - 16.0, boxed.h);
                         text_centred(frame, shown, label, color, boxed.x + 8.0, cy, boxed.w - 16.0, Align::Start);
                         frame.unclip();
-                        if !from_env {
-                            self.targets.push((boxed, target));
-                        }
+                        self.targets.push((boxed, target));
                     }
                 }
                 Row::ModuleChoice(id, field) => {

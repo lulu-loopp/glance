@@ -24,25 +24,29 @@ pub enum Kept {
     None,
 }
 
-/// Where the key of provider `id` (whose tools read it from the variables `env`) is taken from.
+/// Where the key of provider `id` (whose tools read it from the variables `env`) is taken from: the one given here,
+/// where one is (given in Glance, it is what is meant), else the first of `env` set.
 pub fn kept(id: &str, env: &[&'static str]) -> Kept {
     kept_in(&crate::settings::local_dir(), id, env)
 }
 
 fn kept_in(dir: &Path, id: &str, env: &[&'static str]) -> Kept {
-    if let Some(name) = env.iter().find(|name| from_env(name).is_some()) {
-        return Kept::Env(name);
+    if read(dir).contains_key(id) {
+        return Kept::Given;
     }
-    if read(dir).contains_key(id) { Kept::Given } else { Kept::None }
+    env.iter().find(|name| from_env(name).is_some()).map_or(Kept::None, |name| Kept::Env(name))
 }
 
-/// The key of provider `id`, from the first of `env` set, else as given (none where neither is).
+/// The key of provider `id`, as given, else from the first of `env` set (none where neither is: see `kept`).
 pub fn key(id: &str, env: &[&'static str]) -> Option<String> {
     key_in(&crate::settings::local_dir(), id, env)
 }
 
 fn key_in(dir: &Path, id: &str, env: &[&'static str]) -> Option<String> {
-    env.iter().find_map(|name| from_env(name)).or_else(|| unprotect(&hex_bytes(read(dir).get(id)?)?).and_then(|bytes| String::from_utf8(bytes).ok()))
+    match read(dir).get(id) {
+        Some(given) => unprotect(&hex_bytes(given)?).and_then(|bytes| String::from_utf8(bytes).ok()),
+        None => env.iter().find_map(|name| from_env(name)),
+    }
 }
 
 /// The variable `name`, where it is set to something (spaces round it taken away).
@@ -109,9 +113,9 @@ mod tests {
     use super::*;
 
     /// A key given is kept protected (not as it was given) and read back as it was; given empty, it is none; a
-    /// variable set is taken before it.
+    /// variable set is taken where none is given, and the one given before it.
     #[test]
-    fn keeps_a_key_given_protected_and_reads_the_variable_first() {
+    fn keeps_a_key_given_protected_and_before_the_variable() {
         let dir = crate::settings::local_dir().join("keys");
         let made_up = "sk-made-up-0123456789";
         give_in(&dir, "deepseek", &format!(" {made_up} ")).unwrap();
@@ -122,10 +126,12 @@ mod tests {
         // (A variable only this test sets.)
         const VARIABLE: &str = "GLANCE_TEST_AI_KEY_VARIABLE";
         unsafe { std::env::set_var(VARIABLE, "sk-from-the-variable") };
+        assert_eq!(key_in(&dir, "deepseek", &[VARIABLE]).as_deref(), Some(made_up));
+        assert_eq!(kept_in(&dir, "deepseek", &[VARIABLE]), Kept::Given);
+        give_in(&dir, "deepseek", "  ").unwrap();
         assert_eq!(key_in(&dir, "deepseek", &[VARIABLE]).as_deref(), Some("sk-from-the-variable"));
         assert_eq!(kept_in(&dir, "deepseek", &[VARIABLE]), Kept::Env(VARIABLE));
         unsafe { std::env::remove_var(VARIABLE) };
-        give_in(&dir, "deepseek", "  ").unwrap();
         assert_eq!((key_in(&dir, "deepseek", &[]), kept_in(&dir, "deepseek", &[])), (None, Kept::None));
         // Protected data that is not Glance's reads as none.
         assert!(unprotect(b"not protected").is_none() && hex_bytes("abc").is_none());
