@@ -2688,7 +2688,7 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         match written {
             Some(written) => {
                 let field = naming::field_round_words(frame, theme.small, x + naming::FIELD_OUT, y + APP_SIDE + 4.0, cell_w - 2.0 * naming::FIELD_OUT);
-                naming::paint_written(frame, scene.theme, written, theme.small, field, naming::FIELD_OUT, true, view, hits);
+                naming::paint_written(frame, scene.theme, written, theme.small, field, naming::FIELD_OUT, true, true, view, hits);
             }
             None if named => centred(frame, &shown, theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w),
             None => {}
@@ -2815,7 +2815,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         match written {
             Some(written) => {
                 let field = naming::field_round_words(frame, name_font, x + 2.0 + naming::FIELD_OUT, y + picture_y + RAIL_SIDE + RAIL_NAME_GAP, room - 2.0 * naming::FIELD_OUT);
-                naming::paint_written(frame, scene.theme, written, name_font, field, naming::FIELD_OUT, true, (view_x, view_y, view_w, view_h), hits);
+                naming::paint_written(frame, scene.theme, written, name_font, field, naming::FIELD_OUT, true, true, (view_x, view_y, view_w, view_h), hits);
             }
             None if named => centred(frame, &shown, name_font, theme.text2, x + 2.0, y + picture_y + RAIL_SIDE + RAIL_NAME_GAP, room),
             None => {}
@@ -6595,7 +6595,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     Some(written) => {
                         // (Its field as wide as its picture, nothing of it out past the card.)
                         let field = naming::field_round_words(frame, theme.small, x + naming::FIELD_OUT, y + plate + 5.0, place.w - 2.0 * naming::FIELD_OUT);
-                        naming::paint_written(frame, scene.theme, written, theme.small, field, naming::FIELD_OUT, false, room, hits);
+                        naming::paint_written(frame, scene.theme, written, theme.small, field, naming::FIELD_OUT, false, true, room, hits);
                     }
                     None => frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start),
                 }
@@ -6619,7 +6619,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                         // (Its field as wide as the thing, its foot the thing's: nothing of it out past it, in a row as
                         // tall as the things are.)
                         let (fx, fy, fw, fh) = naming::field_round_words(frame, theme.small, x + naming::FIELD_OUT, y + TILE_PICTURE + 4.0, TILE_W - 2.0 * naming::FIELD_OUT);
-                        naming::paint_written(frame, scene.theme, written, theme.small, (fx, fy.min(y + place.h - fh), fw, fh), naming::FIELD_OUT, true, room, hits);
+                        naming::paint_written(frame, scene.theme, written, theme.small, (fx, fy.min(y + place.h - fh), fw, fh), naming::FIELD_OUT, true, true, room, hits);
                     }
                     None => centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W),
                 }
@@ -6672,7 +6672,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 match written {
                     Some(written) => {
                         let field = naming::field_round_words(frame, theme.body, x + LIST_PICTURE + 10.0, y + 4.0, words_room);
-                        naming::paint_written(frame, scene.theme, written, theme.body, field, naming::FIELD_OUT, false, room, hits);
+                        naming::paint_written(frame, scene.theme, written, theme.body, field, naming::FIELD_OUT, false, true, room, hits);
                     }
                     None => frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, words_room, Align::Start),
                 }
@@ -6809,7 +6809,7 @@ fn paint_choices(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f3
             Some(written) => {
                 let out = naming::FIELD_OUT.min(pad);
                 let field = (x + pad + mark - out, top + 1.0, name_w + 2.0 * out, CHIP_H - 2.0);
-                naming::paint_written(frame, scene.theme, written, theme.small, field, out, false, room, hits);
+                naming::paint_written(frame, scene.theme, written, theme.small, field, out, false, false, room, hits);
             }
             None => frame.text(&names[one], theme.small, words, x + pad + mark, frame.line_in(theme.small, top, CHIP_H), name_w + 1.0, Align::Start),
         }
@@ -7632,7 +7632,7 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
         // (A name written in where it says it: in its stead, as wide as it.)
         if let Some(written) = foot.written {
             let field = naming::field_round_words(frame, theme.small, x + naming::FIELD_OUT, frame.line_top(theme.small, middle), w - 2.0 * naming::FIELD_OUT);
-            naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, room, hits);
+            naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, true, room, hits);
         }
         match foot.hovered.filter(|_| foot.written.is_none()) {
             Some(said) => centred(frame, &fitted(frame, said, theme.small, w), theme.small, theme.text2, x, frame.line_top(theme.small, middle), w),
@@ -7782,7 +7782,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 match written {
                     Some(written) => {
                         let field = naming::field_round_words(frame, theme.small, cx - GRID_GAP / 2.0 + naming::FIELD_OUT, cy + side + 2.0, side + GRID_GAP - 2.0 * naming::FIELD_OUT);
-                        naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, room, hits);
+                        naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, true, room, hits);
                     }
                     None if named => centred(frame, &shown, theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + side + 2.0, side + GRID_GAP),
                     None => {}
@@ -7834,7 +7834,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 match written {
                     Some(written) => {
                         let field = naming::field_round_words(frame, theme.small, cx - GRID_GAP / 2.0 + naming::FIELD_OUT, cy + side + 2.0, side + GRID_GAP - 2.0 * naming::FIELD_OUT);
-                        naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, (x, y, w, h), hits);
+                        naming::paint_written(frame, theme, written, theme.small, field, naming::FIELD_OUT, true, true, (x, y, w, h), hits);
                     }
                     None if named => centred(frame, &shown, theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + side + 2.0, side + GRID_GAP),
                     None => {}
@@ -11017,6 +11017,14 @@ otepad.exe", "Notepad"),
         assert!(wide(&longer) > wide(&hits), "as wide as what is written");
         let (_, empty) = drawn("");
         assert!(wide(&empty) >= CHIP_WRITTEN_LEAST);
+        // (On the choice's own ground: no field's ground under the words, over the choice's.)
+        use crate::ui::morph::{Op, Recorder};
+        let written = NameWritten { of: Named::Tag(1), text: "工作".encode_utf16().collect(), caret: 0, anchor: 2, caret_on: true, said: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false, naming: Some(&written) };
+        let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+        paint_choices(&recorder, &scene, (0.0, 0.0, 324.0), &page, &mut Vec::new());
+        let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
+        assert!(!ops.iter().any(|op| matches!(op, Op::Rounded { color, .. } if *color == theme.track)), "a field's ground over the choice's");
     }
 
     /// The name of what is kept at hand written in where it shows is drawn under its picture in its stead, a press there

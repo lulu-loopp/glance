@@ -67,11 +67,14 @@ fn field_round(theme: &Theme, tall: f32) -> f32 {
 }
 
 /// `written` drawn in `font` in the field (x, y, w, h), its words `inset` in from its left (in its middle where
-/// `centred`, while they fit): on the ground of a field, scrolled for the caret to show, what is chosen marked, the
-/// caret in the accent while it shows. A press there is its own (see `Hit::Naming`), as much of it as shows in `view`.
+/// `centred`, while they fit): on the ground of a field where `grounded` (not where what it is on is that ground
+/// already: a chip, a plate of its own), scrolled for the caret to show, what is chosen marked, the caret in the
+/// accent while it shows. A press there is its own (see `Hit::Naming`), as much of it as shows in `view`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_written(frame: &dyn Canvas, theme: &Theme, written: &NameWritten, font: Font, (x, y, w, h): (f32, f32, f32, f32), inset: f32, centred: bool, view: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
-    frame.fill_rounded(theme.track, x, y, w, h, field_round(theme, h));
+pub(crate) fn paint_written(frame: &dyn Canvas, theme: &Theme, written: &NameWritten, font: Font, (x, y, w, h): (f32, f32, f32, f32), inset: f32, centred: bool, grounded: bool, view: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    if grounded {
+        frame.fill_rounded(theme.track, x, y, w, h, field_round(theme, h));
+    }
     let room = (w - 2.0 * inset).max(0.0);
     let text = String::from_utf16_lossy(&written.text);
     let before = |at: usize| frame.measure(&String::from_utf16_lossy(&written.text[..at.min(written.text.len())]), font);

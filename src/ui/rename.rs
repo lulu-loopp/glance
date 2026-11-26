@@ -316,7 +316,7 @@ impl Renaming {
         let tall = height(says);
         let drawn = surface.draw(&self.gfx.clone(), size, self.scale, self.look, self.room, (WIDTH, tall), menu::sheet_radius(self.look, true, tall), &mut words, self.drawn, |_, _| {}, |frame, _| {
             let field = (PAD, PAD, FIELD_W, FIELD_H);
-            crate::ui::view::naming::paint_written(frame, theme, &written, font, field, INSET, false, (0.0, 0.0, WIDTH, tall), &mut Vec::new());
+            crate::ui::view::naming::paint_written(frame, theme, &written, font, field, INSET, false, false, (0.0, 0.0, WIDTH, tall), &mut Vec::new());
             if let Some(said) = written.said.as_deref() {
                 crate::ui::view::naming::paint_said(frame, theme, said, PAD + INSET, PAD + FIELD_H + 3.0, FIELD_W - INSET);
             }
