@@ -440,7 +440,7 @@ mod tests {
         let seen = Seen::of(&history);
         let lanes = [view::Lane::empty("station", &theme)];
         let layout = Layout::with_columns(vec![200.0], 1, &theme);
-        let at_rest = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: super::super::text::Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(1)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let at_rest = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: super::super::text::Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(1)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false, naming: None };
         let key = |scene: &Scene| super::content_key(&Picture { scene, lanes: &lanes, layout: &layout, small: None, size: (300.0, 200.0), at: (0.0, 0.0), edge: None, backdrop: None, frost: 1.0, rough: false }, 1.0);
         let rest = key(&at_rest);
         assert_eq!(key(&Scene { pen_ms: 500.0, ..at_rest }), rest, "only the charts follow the pen: kept");

@@ -233,12 +233,20 @@ pub fn tags_menu(thing: Thing, at: windows::Win32::Foundation::POINT, over_the_p
     Some((crate::ui::menu::Menu::open_at(rows, look, at, false, over_the_panel)?, chosen))
 }
 
-/// The box a new tag is named in (see `ui::rename`), `things` of it as it is made.
-pub fn naming_tag(things: Vec<Thing>) -> crate::ui::rename::Naming {
-    crate::ui::rename::Naming::tag(String::new(), crate::update::language(), move |written| {
-        let (ids, keys) = apart(&things);
-        run::ask(run::Ask::NewTag(written.to_string(), ids, keys))
-    })
+/// A new tag made at once, `things` of it, named as Windows names a new folder (see `new_tag_name`): its name to be
+/// written in where it shows (see `ui::naming`).
+pub fn new_tag(things: &[Thing]) -> crate::ui::naming::Naming {
+    let name = new_tag_name(&run::shown().tags, crate::update::language());
+    let (ids, keys) = apart(things);
+    run::ask(run::Ask::NewTag(name.clone(), ids.clone(), keys.clone()));
+    crate::ui::naming::Naming::new_tag(name, ids, keys)
+}
+
+/// What a new tag is named among `tags`: "新建标签", or where a tag has that name, "新建标签 2", and so on, the first no
+/// tag has.
+fn new_tag_name(tags: &[shelf::Tag], lang: crate::ui::text::Lang) -> String {
+    let base = lang.pick("新建标签", "New tag");
+    (1..).map(|n| if n == 1 { base.to_string() } else { format!("{base} {n}") }).find(|name| !tags.iter().any(|tag| tag.name == *name)).unwrap()
 }
 
 /// What a tag's menu does (see `tag_menu`).
@@ -259,21 +267,22 @@ pub fn tag_menu(id: u32, at: windows::Win32::Foundation::POINT, over_the_panel: 
     Some((Menu::open_at(items, look, at, false, over_the_panel)?, vec![TagChoice::Rename, TagChoice::Remove], name))
 }
 
-/// The box the tag `id`, named `name` now, is renamed in (see `ui::rename`).
-pub fn renaming_tag(id: u32, name: String) -> crate::ui::rename::Naming {
-    crate::ui::rename::Naming::tag(name, crate::update::language(), move |written| run::ask(run::Ask::RenameTag(id, written.to_string())))
-}
-
-/// The box `thing` is renamed in (see `ui::rename`), where it has a name to rename (see `shelf::What::renamed_by`; a
-/// file come lately alone): a file or folder where it is renamed there (see `rename_there`), one the station keeps
-/// itself given out by the name written from now on (a picture never renamed opened as what it is, of its kind).
-pub fn renaming(thing: Thing) -> Option<crate::ui::rename::Naming> {
-    use crate::ui::rename::Naming;
+/// How `thing` is renamed where it shows (see `ui::naming`), where it has a name to rename (see
+/// `shelf::What::renamed_by`; a file come lately alone): a file or folder where it is renamed there (see
+/// `rename_there`), one the station keeps itself given out by the name written from now on (a picture never renamed
+/// written in as what it is, of its kind).
+pub fn renaming(thing: Thing) -> Option<crate::ui::naming::Naming> {
+    use crate::ui::naming::Naming;
+    use crate::ui::view::naming::Named;
     let lang = crate::update::language();
+    let of = match thing {
+        Thing::Item(id) => Named::Item(id),
+        Thing::Recent(entry) => Named::Recent(entry),
+    };
     let there = |path: std::path::PathBuf| {
         let folder = thumbs::looked(&path) == Some(thumbs::Looked::Folder);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Naming::file(name, folder, lang, move |written| rename_there(&path, written, lang)))
+        Some(Naming::file(of, name, folder, lang, move |written| rename_there(&path, written, lang)))
     };
     match thing {
         Thing::Item(id) => {
@@ -289,7 +298,7 @@ pub fn renaming(thing: Thing) -> Option<crate::ui::rename::Naming> {
                         }
                         _ => name,
                     };
-                    Some(Naming::file(name, folder, lang, move |written| {
+                    Some(Naming::file(of, name, folder, lang, move |written| {
                         run::ask(run::Ask::Rename(id, written.to_string()));
                         Ok(())
                     }))
@@ -786,6 +795,19 @@ pub fn pretend_now(ms: u64) {
 mod tests {
     use super::*;
     use crate::ui::view::Hit;
+
+    /// A new tag is named as Windows names a new folder: "新建标签", or where a tag has that name, the first of
+    /// "新建标签 2", "新建标签 3" and on that none has.
+    #[test]
+    fn a_new_tag_is_named_as_a_new_folder_is() {
+        let tags = |names: &[&str]| names.iter().enumerate().map(|(at, name)| shelf::Tag { id: at as u32, name: (*name).into() }).collect::<Vec<_>>();
+        let zh = crate::ui::text::Lang::Zh;
+        assert_eq!(new_tag_name(&tags(&[]), zh), "新建标签");
+        assert_eq!(new_tag_name(&tags(&["工作"]), zh), "新建标签");
+        assert_eq!(new_tag_name(&tags(&["新建标签"]), zh), "新建标签 2");
+        assert_eq!(new_tag_name(&tags(&["新建标签", "新建标签 2", "新建标签 4"]), zh), "新建标签 3");
+        assert_eq!(new_tag_name(&tags(&["New tag"]), crate::ui::text::Lang::En), "New tag 2");
+    }
 
     /// The menu of a thing kept at hand offers to rename it, and to give it its own name again only where it was given
     /// another. (It offered neither.)

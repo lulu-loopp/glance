@@ -35,6 +35,9 @@ pub enum Ask {
     Tag(Vec<u64>, u32, bool),
     NewTag(String, Vec<u64>, Vec<super::recent::Key>),
     RenameTag(u32, String),
+    /// The tag named the first (one just asked to be made, these of it: its number not known to who asked) named the
+    /// second; where another has that name, these of that one instead (as a tag asked to be made by it would be).
+    RenameNewTag(String, String, Vec<u64>, Vec<super::recent::Key>),
     RemoveTag(u32),
     /// The files come lately that stay are others now (see `shelf::Item::held`).
     Held,
@@ -740,6 +743,16 @@ impl Station {
                     }
                 }
                 Ask::RenameTag(tag, name) => self.keep.tags(|shelf| shelf.rename_tag(tag, &name)),
+                Ask::RenameNewTag(was, name, ids, files) => {
+                    let mut joined = None;
+                    self.keep.tags(|shelf| joined = shelf.rename_new_tag(&was, &name, &ids, super::now_ms()));
+                    if let Some(other) = joined {
+                        super::recent::tags_are(&self.keep.shelf.tags);
+                        if !files.is_empty() {
+                            super::recent::mark(files, super::recent::Mark::Tag(other, true));
+                        }
+                    }
+                }
                 Ask::RemoveTag(tag) => {
                     self.keep.tags(|shelf| shelf.remove_tag(tag, super::now_ms()));
                     super::recent::tags_are(&self.keep.shelf.tags);

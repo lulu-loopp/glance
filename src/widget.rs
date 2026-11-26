@@ -2599,11 +2599,33 @@ impl Widgets {
     pub fn keys_left(&mut self, hwnd: HWND, escaped: bool) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
         // (A to-do written on it gives them back to any window come in front: the picker of its time among them, which
-        // writes it in again as it goes.)
+        // writes it in again as it goes. A name written in where it shows, as well: kept, or with Esc left as it was.)
         widget.stop_todo(escaped);
+        widget.stop_naming(escaped);
         if escaped || !front_is_ours() {
             widget.stop_writing(escaped);
         }
+    }
+
+    /// `naming` written in where it shows on the widget at `hwnd` (see `ui::naming::begin`).
+    pub fn name(&mut self, hwnd: HWND, naming: crate::ui::naming::Naming) {
+        if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
+            widget.name(naming);
+        }
+    }
+
+    /// What a name written in where it shows on the widget at `hwnd` was tried as, answered (see
+    /// `ui::naming::answered`).
+    pub fn naming_answered(&mut self, hwnd: HWND) {
+        if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
+            crate::ui::naming::answered(&widget.window);
+            widget.next_frame = Instant::now();
+        }
+    }
+
+    /// Where each thing drawn on the widget at `hwnd` is on the screen (physical px), as it was just drawn.
+    pub fn hits_on_screen_of(&self, hwnd: HWND) -> Vec<(RECT, view::Hit)> {
+        self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(Vec::new, Widget::hits_on_screen)
     }
 
     /// A to-do written on the widget at `hwnd` again (the picker of its time put away: see `ui::todo::RESUME`).
@@ -2616,7 +2638,7 @@ impl Widgets {
     /// Whether something on a widget is written in now, taking the keys: a note where it is, or a to-do (as the panel's
     /// to-dos are asked of, see `ui::todo::writing`): the station's keys (Ctrl+A, Ctrl+V) left to it meanwhile.
     pub fn writing(&self) -> bool {
-        self.list.iter().any(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.taking) || crate::ui::todo::writing(w.window.hwnd))
+        self.list.iter().any(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.taking) || crate::ui::todo::writing(w.window.hwnd) || crate::ui::naming::writing(w.window.hwnd))
     }
 
     /// The menu of the note `number` on the widget at `hwnd` (its card pressed with the right button, a note stuck on
@@ -2942,6 +2964,23 @@ impl Widgets {
                     crate::ui::todo::placed(widget.window.hwnd, rect, widget.contact.scale * widget.zoom * widget.part_zoom(view::Hit::Todo(at)));
                 }
             }
+            // A name written in where it shows on it (see `ui::naming`): a tag just made, its page turned to as it is
+            // found; its caret blinking; the input method's words put at it (as it was last drawn).
+            if let Some(tag) = crate::ui::naming::turn(widget.window.hwnd, &crate::station::run::shown().tags) {
+                if let Some(readings) = widget.content.readings_mut() {
+                    readings.tab = readings.tab.tagged(tag);
+                    crate::station::select::turned(widget.window.hwnd.0 as isize, readings.tab);
+                }
+                widget.next_frame = now;
+            }
+            if let (_, Some(at)) = crate::ui::naming::shown(widget.window.hwnd, now) {
+                widget.next_frame = widget.next_frame.min(at);
+            }
+            if crate::ui::naming::writing(widget.window.hwnd) {
+                if let Some((rect, _)) = widget.hits_on_screen().into_iter().find(|(_, hit)| *hit == view::Hit::Naming) {
+                    crate::ui::naming::placed(widget.window.hwnd, rect, widget.contact.scale * widget.zoom * widget.part_zoom(view::Hit::Naming));
+                }
+            }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
             let sees = look.skin.sees_backdrop() && widget.content.skinned(look.prefs.music.ground);
             if sees && widget.look_behind(self.live && sees) {
@@ -3264,7 +3303,7 @@ fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: b
         Takes::Nothing => IDC_ARROW,
         Takes::Edges((left, right, top, bottom)) => crate::panel::sizing(*left, *right, *top, *bottom),
         _ if over => IDC_HAND,
-        _ if matches!(hit, Some(view::Hit::Words(_) | view::Hit::Todo(view::TodoHit::Words(..)))) => IDC_IBEAM,
+        _ if matches!(hit, Some(view::Hit::Words(_) | view::Hit::Todo(view::TodoHit::Words(..)) | view::Hit::Naming)) => IDC_IBEAM,
         _ if hit.is_some_and(view::Hit::takes_press) => IDC_HAND,
         _ => IDC_ARROW,
     }
@@ -3357,8 +3396,28 @@ impl Widget {
         if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
             return;
         }
+        self.stop_naming(false);
         crate::ui::todo::begin(&self.window);
         self.next_frame = Instant::now();
+    }
+
+    /// `naming` written in where it shows on it, it taking the keys (see `ui::naming::begin`): a to-do written on it
+    /// kept first. (Not while a note on it takes them.)
+    fn name(&mut self, naming: crate::ui::naming::Naming) {
+        if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
+            return;
+        }
+        self.stop_todo(false);
+        crate::ui::naming::begin(&self.window, naming);
+        self.next_frame = Instant::now();
+    }
+
+    /// A name written in where it shows on it given back its keys (see `ui::naming::end`): Esc where `escaped`.
+    fn stop_naming(&mut self, escaped: bool) {
+        if crate::ui::naming::holds(self.window.hwnd) {
+            crate::ui::naming::end(&self.window, escaped);
+            self.next_frame = Instant::now();
+        }
     }
 
     /// The `n`th to-do, as `item`, written in where it shows on it, its words pressed `into` DIPs across: the caret put
@@ -3367,6 +3426,7 @@ impl Widget {
         if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
             return;
         }
+        self.stop_naming(false);
         let font = crate::ui::theme::Theme::new(self.drawn_look.0, self.drawn_look.1).body;
         let caret = crate::ui::todo::caret_at(&self.gfx, font, n, &item, into);
         crate::ui::todo::edit(&self.window, n, item, caret);
@@ -4537,6 +4597,11 @@ impl Widget {
                             if !matches!(hit, Some(view::Hit::Todo(hit)) if crate::ui::todo::keeps(hit)) {
                                 self.stop_todo(false);
                             }
+                            // A name written in where it shows: a press on it puts the caret there (in its own DIPs,
+                            // as large as the part it is in draws it), one away from it keeps it (see `ui::naming`).
+                            if hit != Some(view::Hit::Naming) {
+                                self.stop_naming(false);
+                            }
                             match hit {
                                 Some(view::Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
                                     crate::ui::todo::Act::Nothing => {}
@@ -4555,6 +4620,12 @@ impl Widget {
                                         }
                                     }
                                 },
+                                Some(view::Hit::Naming) => {
+                                    let into = self.hits.iter().find(|region| region.4 == view::Hit::Naming).map(|region| (lx - region.0) / self.part_zoom(view::Hit::Naming));
+                                    if let Some(into) = into {
+                                        crate::ui::naming::press(&self.window, &self.gfx, into);
+                                    }
+                                }
                                 Some(view::Hit::Ai(source)) => view::ai::toggle(source),
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
@@ -4994,7 +5065,9 @@ impl Widget {
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
         let info = controller.info();
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
+        // (A name written in where it shows on it, as it is now: see `ui::naming`.)
+        let (naming, _) = crate::ui::naming::shown(self.window.hwnd, Instant::now());
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), naming: naming.as_ref(), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -5356,7 +5429,9 @@ impl Widget {
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
         let info = controller.info();
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
+        // (A name written in where it shows on it, as it is now: see `ui::naming`.)
+        let (naming, _) = crate::ui::naming::shown(self.window.hwnd, Instant::now());
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), naming: naming.as_ref(), ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
         // The choices over its station's page: the one just lit, or just come, brought into sight.
@@ -6284,7 +6359,7 @@ mod tests {
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false, naming: None };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let readings = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, ..Readings::new(choice) });
         let mut merged = Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, (600.0, 700.0));
@@ -6377,7 +6452,7 @@ mod tests {
         let prefs = Prefs::resolve(&serde_json::json!({ "ai": shown_ids }), &[]).holding(crate::settings::Part::Ai);
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::default(), hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false, naming: None };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Shape(view::Shape::Least), columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let shown_at = |room: (f32, f32)| {
             let (choice, layout, detail) = laid_out(&scene, &theme, crate::settings::Part::Ai, choice, false, Some(room), (1920.0, 1080.0));

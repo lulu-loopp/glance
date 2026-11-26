@@ -654,7 +654,7 @@ impl Controller {
         // again (see `hand_target`).
         let mut last_place: Option<(POINT, Edge)> = None;
         // The panel a menu up was opened on, where it was opened on one.
-        let mut menu_of: Option<usize> = None;
+        let mut menu_of: Option<MenuOn> = None;
         // Made when first wanted; with no graphics device just then, tried
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
@@ -751,6 +751,7 @@ impl Controller {
             // What notes written in where they are took (the messages sent to their windows as this looked, or handed
             // on before it), seen to.
             for hwnd in crate::ui::keys::took() {
+                crate::ui::rename::written(hwnd);
                 widgets.written(hwnd);
                 for panel in panels.iter_mut().filter(|panel| panel.window.hwnd == hwnd) {
                     panel.next_frame = Instant::now();
@@ -801,7 +802,7 @@ impl Controller {
                     // A capture of the desktop behind the panel come back, up or
                     // not (see `collect_behind`).
                     panel.collect_behind(now);
-                    panel.menu_up = menu.is_some() && menu_of == Some(at);
+                    panel.menu_up = menu.is_some() && menu_of == Some(MenuOn::Panel(at));
                     if panel.is_shown() {
                         panel.tick(now);
                         if panel.is_shown() {
@@ -836,6 +837,10 @@ impl Controller {
                     // A thing dragged off a station's lane, carried (see `carry`); a thing on one pressed, carried off
                     // it, put back: drawn so on the panels and widgets at once, and as it springs back to its size.
                     if let Some(due) = crate::carry::tick(now) {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
+                    // (The box a name is written in beside a picture: its caret blinking.)
+                    if let Some(due) = crate::ui::rename::tick(now) {
                         wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                     }
                     let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|press| press.hit)).or_else(|| widgets.shelf_pressed());
@@ -947,6 +952,7 @@ impl Controller {
             // (see `ui::keys`).
             if crate::ui::keys::queued(&msg) {
                 for hwnd in crate::ui::keys::took() {
+                    crate::ui::rename::written(hwnd);
                     widgets.written(hwnd);
                     for panel in panels.iter_mut().filter(|panel| panel.window.hwnd == hwnd) {
                         panel.next_frame = Instant::now();
@@ -1001,8 +1007,15 @@ impl Controller {
             // (Enter keeps what is written, Esc or another window in front leaves it), a shortcut leaving it.
             if crate::ui::rename::is_up() {
                 use crate::ui::rename::{self, Handled as Renamed};
+                // (What was written in it, tried, answered: put away where it was done.)
+                if rename::owns(msg.hwnd) && msg.message == crate::ui::naming::ANSWERED {
+                    if rename::answered() {
+                        rename_closed(&mut panels, &mut widgets);
+                    }
+                    continue;
+                }
                 let left = if rename::owns(msg.hwnd) && msg.message == crate::ui::keys::LEFT {
-                    Some(rename::keeps(msg.wParam))
+                    Some(rename::escaped(msg.wParam))
                 } else if rename::owns(msg.hwnd) {
                     match rename::handle(&msg) {
                         Renamed::Left => Some(false),
@@ -1014,9 +1027,11 @@ impl Controller {
                 } else {
                     None
                 };
-                if let Some(keep) = left {
+                if let Some(escaped) = left {
                     closing_press.closed_by(msg.message);
-                    end_rename(keep, &mut panels, &mut widgets);
+                    if rename::left(escaped) {
+                        rename_closed(&mut panels, &mut widgets);
+                    }
                     if !matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
                         continue;
                     }
@@ -1201,10 +1216,11 @@ impl Controller {
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
                     if looking_here(&panels, &widgets) {
                         crate::ui::look::key(crate::ui::look::Key::Close);
-                    } else if panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd)) {
-                        // A to-do being written on it: the keys given back, and nothing more.
+                    } else if panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd) || crate::ui::naming::holds(panel.window.hwnd)) {
+                        // A to-do or a name being written on it: the keys given back, and nothing more.
                         for panel in panels.iter_mut() {
                             panel.stop_todo(true);
+                            panel.stop_naming(true);
                         }
                     } else if widgets.full().is_some() {
                         widgets.leave_full();
@@ -1280,7 +1296,13 @@ impl Controller {
                 crate::ui::keys::LEFT if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, msg.wParam.0 == 1),
                 // A to-do written on the panel giving back the keys (Esc, another window in front: the picker of its
                 // time, which writes it in again as it goes).
-                crate::ui::keys::LEFT if owner.is_some() => panels[owner.unwrap()].stop_todo(msg.wParam.0 == 1),
+                crate::ui::keys::LEFT if owner.is_some() => {
+                    panels[owner.unwrap()].stop_todo(msg.wParam.0 == 1);
+                    panels[owner.unwrap()].stop_naming(msg.wParam.0 == 1);
+                }
+                // What a name written in where it shows was tried as, answered (see `ui::naming`).
+                crate::ui::naming::ANSWERED if owner.is_some() => panels[owner.unwrap()].naming_answered(),
+                crate::ui::naming::ANSWERED if widgets.owns(msg.hwnd) => widgets.naming_answered(msg.hwnd),
                 crate::ui::todo::RESUME if owner.is_some() => panels[owner.unwrap()].write_todo(),
                 crate::ui::todo::RESUME if widgets.owns(msg.hwnd) => widgets.write_todo(msg.hwnd),
                 // (Alt+F4 on a note written in where it is: as Esc. Other windows of Glance's are not closed so.)
@@ -1486,6 +1508,7 @@ impl Controller {
                     if let Some(number) = widgets.take_note_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu = widgets.note_menu(msg.hwnd, number, panels[0].lang, panels.iter().any(Panel::is_shown)).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));
+                        menu_of = Some(MenuOn::Widget(msg.hwnd));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1498,6 +1521,7 @@ impl Controller {
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu = lane_menu(hit, tab, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd), Some(msg.hwnd));
+                        menu_of = Some(MenuOn::Widget(msg.hwnd));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1532,6 +1556,7 @@ impl Controller {
                         Some(Hit::Note(number) | Hit::Words(number)) => widgets.note_menu(msg.hwnd, number, panels[0].lang, panel_shown).map(|(open, name, choices)| (open, MenuFor::Note(name, choices))).or_else(|| widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd)))),
                         _ => widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
+                    menu_of = Some(MenuOn::Widget(msg.hwnd));
                     keep_menu_above(&menu, &mut overlay);
                 }
                 // On a thing on the station in the panel, its menu.
@@ -1541,7 +1566,7 @@ impl Controller {
                     if hit.is_some_and(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_)) || hit.tag().is_some()) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                        menu_of = owner;
+                        menu_of = owner.map(MenuOn::Panel);
                     }
                     let panel = &panels[owner.unwrap()];
                     let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab, view::lane_whole(&panel.hits)));
@@ -1662,7 +1687,7 @@ impl Controller {
                     panels[at].click(lparam_point(msg.lParam));
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                     menu = lane_menu(hit, panels[at].tab, true, panels[at].menu_look(), None);
-                    menu_of = Some(at);
+                    menu_of = Some(MenuOn::Panel(at));
                     keep_menu_above(&menu, &mut overlay);
                 }
                 WM_LBUTTONUP if owner.is_some() => {
@@ -1819,7 +1844,7 @@ impl Controller {
             // Ctrl+A taken while the pointer is over a list of things that may be chosen together, and only then, nothing
             // of Glance's that is written in having the keys (a note written in where it is, a to-do, a window of its
             // own in front): else it is every program's, and that one's own select-all.
-            let writing = widgets.writing() || panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd)) || own_window_in_front(&panels, &widgets);
+            let writing = widgets.writing() || panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd) || crate::ui::naming::writing(panel.window.hwnd)) || own_window_in_front(&panels, &widgets);
             let all_wanted = !writing && !crate::station::catch::dragging() && list_under(&panels, &widgets).is_some();
             if all_wanted != choose_all {
                 choose_all = all_wanted;
@@ -1945,10 +1970,9 @@ fn end_pick(asked: bool, panels: &mut [Panel], widgets: &mut crate::widget::Widg
     widgets.draw_soon();
 }
 
-/// The box a thing kept at hand is renamed in put away, what is written kept where `keep` (see `ui::rename`): the
-/// panels and widgets drawn again, the pointer not yet come onto a panel (as a menu's going leaves it).
-fn end_rename(keep: bool, panels: &mut [Panel], widgets: &mut crate::widget::Widgets) {
-    crate::ui::rename::close(keep);
+/// The box a thing drawn by its picture alone is renamed in put away (see `ui::rename`): the panels and widgets drawn
+/// again, the pointer not yet come onto a panel (as a menu's going leaves it).
+fn rename_closed(panels: &mut [Panel], widgets: &mut crate::widget::Widgets) {
     for panel in panels.iter_mut() {
         panel.menu_closed();
         if panel.is_shown() {
@@ -1967,6 +1991,13 @@ fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mu
 
 /// What a menu up is for: the tray icon's (with what each of its choices is), the widget's at a window, or the
 /// overlay's.
+/// Where the menu up was opened: on a panel (by its place among them), or on a widget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuOn {
+    Panel(usize),
+    Widget(HWND),
+}
+
 enum MenuFor {
     Tray(Vec<usize>),
     Widget(HWND),
@@ -2113,9 +2144,13 @@ impl Controller {
     }
 
     /// The menu up, if one is, gone, `choice` chosen in it (the index of one, or none, left): done.
-    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panels: &mut [Panel], menu_of: &mut Option<usize>, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
+    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panels: &mut [Panel], menu_of: &mut Option<MenuOn>, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
         let Some((open, of)) = menu.take() else { return };
-        let menu_panel = menu_of.take();
+        let menu_on = menu_of.take();
+        let menu_panel = match menu_on {
+            Some(MenuOn::Panel(at)) => Some(at),
+            _ => None,
+        };
         // (Where the choice was on the screen: what it opens comes out of there, but for the tray icon's menu.)
         let place = choice.and_then(|row| open.row_on_screen(row));
         let look = open.look();
@@ -2129,10 +2164,29 @@ impl Controller {
         for panel in panels.iter_mut() {
             panel.menu_closed();
         }
-        // Where a box opened by what was chosen goes (see `ui::rename`): where its row was (one of the choices beside it,
-        // where the pointer is), kept up for the panel it was asked on, if one.
-        let name_at = || place.map(|row| POINT { x: row.left, y: row.top }).or_else(cursor_position);
-        let owner = menu_panel.and_then(|at| panels.get(at)).map_or(HWND::default(), |panel| panel.window.hwnd);
+        // A name written in where it shows, as what was chosen asks (see `ui::naming`): on the window the menu was
+        // opened on; where that draws what it names by its picture alone, in a box beside its picture (see
+        // `ui::rename`).
+        let name = |naming: crate::ui::naming::Naming, panels: &mut [Panel], widgets: &mut crate::widget::Widgets| {
+            let (on, on_screen) = match menu_on {
+                Some(MenuOn::Panel(at)) => panels.get(at).map_or((HWND::default(), Vec::new()), |panel| (panel.window.hwnd, panel.hits_on_screen())),
+                Some(MenuOn::Widget(hwnd)) => (hwnd, widgets.hits_on_screen_of(hwnd)),
+                None => (HWND::default(), Vec::new()),
+            };
+            if let Some((picture, true)) = naming.named().and_then(|of| view::named_on_screen(&on_screen, of)) {
+                crate::ui::rename::open(on, naming, picture, look);
+                return;
+            }
+            match menu_on {
+                Some(MenuOn::Panel(at)) => {
+                    if let Some(panel) = panels.get_mut(at) {
+                        panel.name(naming);
+                    }
+                }
+                Some(MenuOn::Widget(hwnd)) => widgets.name(hwnd, naming),
+                None => {}
+            }
+        };
         match of {
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
@@ -2159,43 +2213,30 @@ impl Controller {
                         }
                     }
                 }
-                (Some(crate::station::Choice::NewTag), _) => {
-                    if let Some(at) = name_at() {
-                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Item(id)]), at, look, crate::update::language());
-                    }
-                }
+                (Some(crate::station::Choice::NewTag), _) => name(crate::station::new_tag(&[crate::station::Thing::Item(id)]), panels, widgets),
                 (Some(crate::station::Choice::Rename), _) => {
-                    if let Some((at, naming)) = name_at().zip(crate::station::renaming(crate::station::Thing::Item(id))) {
-                        crate::ui::rename::open(owner, naming, at, look, crate::update::language());
+                    if let Some(naming) = crate::station::renaming(crate::station::Thing::Item(id)) {
+                        name(naming, panels, widgets);
                     }
                 }
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
-            MenuFor::Tag(tag, name, choices) => match choice.and_then(|row| choices.get(row)) {
-                Some(crate::station::TagChoice::Rename) => {
-                    if let Some(at) = name_at() {
-                        crate::ui::rename::open(owner, crate::station::renaming_tag(tag, name), at, look, crate::update::language());
-                    }
-                }
+            MenuFor::Tag(tag, tag_name, choices) => match choice.and_then(|row| choices.get(row)) {
+                Some(crate::station::TagChoice::Rename) => name(crate::ui::naming::Naming::tag(tag, tag_name), panels, widgets),
                 Some(crate::station::TagChoice::Remove) => crate::station::run::ask(crate::station::run::Ask::RemoveTag(tag)),
                 None => {}
             },
             MenuFor::Tags(thing, choices) => match choice.and_then(|row| choices.get(row)) {
                 Some(crate::station::TagsChoice::Tag(tag)) => crate::station::turn_tag(&[thing], *tag),
-                Some(crate::station::TagsChoice::New) => {
-                    if let Some(at) = name_at() {
-                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![thing]), at, look, crate::update::language());
-                    }
-                }
+                Some(crate::station::TagsChoice::New) => name(crate::station::new_tag(&[thing]), panels, widgets),
                 None => {}
             },
             MenuFor::App(app, choices) => match choice.and_then(|row| choices.get(row)) {
+                // Its name written where it shows (in a box beside its picture, where that alone shows).
                 Some(crate::station::AppChoice::Rename) => {
-                    if let Some(at) = name_at() {
-                        let shown = crate::station::apps::told_apart(&crate::station::apps::shown()).into_iter().find(|(_, target)| *target == app.target).map_or_else(|| app.name.clone(), |(name, _)| name);
-                        crate::ui::rename::open(owner, crate::ui::rename::Naming::app(app, shown), at, look, crate::update::language());
-                    }
+                    let shown = crate::station::apps::told_apart(&crate::station::apps::shown()).into_iter().find(|(_, target)| *target == app.target).map_or_else(|| app.name.clone(), |(name, _)| name);
+                    name(crate::ui::naming::Naming::app(app, shown), panels, widgets);
                 }
                 Some(choice) => crate::station::app_chose(app, *choice),
                 None => {}
@@ -2203,7 +2244,7 @@ impl Controller {
             MenuFor::Note(name, choices) => match choice.and_then(|row| choices.get(row)) {
                 // (Offered where it is not stuck yet: its corner where its row was chosen.)
                 Some(crate::ui::note::Choice::Stick) => {
-                    if let Some(at) = name_at() {
+                    if let Some(at) = place.map(|row| POINT { x: row.left, y: row.top }).or_else(cursor_position) {
                         widgets.stick_note(&name, at, None);
                     }
                 }
@@ -2211,14 +2252,10 @@ impl Controller {
                 None => {}
             },
             MenuFor::Recent(file, choices) => match choice.and_then(|row| choices.get(row)) {
-                Some(crate::station::RecentChoice::NewTag) => {
-                    if let Some(at) = name_at() {
-                        crate::ui::rename::open(owner, crate::station::naming_tag(vec![crate::station::Thing::Recent(file)]), at, look, crate::update::language());
-                    }
-                }
+                Some(crate::station::RecentChoice::NewTag) => name(crate::station::new_tag(&[crate::station::Thing::Recent(file)]), panels, widgets),
                 Some(crate::station::RecentChoice::Rename) => {
-                    if let Some((at, naming)) = name_at().zip(crate::station::renaming(crate::station::Thing::Recent(file))) {
-                        crate::ui::rename::open(owner, naming, at, look, crate::update::language());
+                    if let Some(naming) = crate::station::renaming(crate::station::Thing::Recent(file)) {
+                        name(naming, panels, widgets);
                     }
                 }
                 Some(choice) => crate::station::recent_chose(file, *choice),
@@ -2227,10 +2264,8 @@ impl Controller {
             MenuFor::Many(hits, choices) => {
                 match choice.and_then(|row| choices.get(row)) {
                     Some(crate::station::ManyChoice::NewTag) => {
-                        let things = hits.iter().filter_map(|hit| crate::station::Thing::of(*hit)).collect();
-                        if let Some(at) = name_at() {
-                            crate::ui::rename::open(owner, crate::station::naming_tag(things), at, look, crate::update::language());
-                        }
+                        let things: Vec<_> = hits.iter().filter_map(|hit| crate::station::Thing::of(*hit)).collect();
+                        name(crate::station::new_tag(&things), panels, widgets);
                     }
                     Some(choice) => crate::station::many_chose(&hits, *choice),
                     None => {}
@@ -3293,12 +3328,38 @@ impl<'a> Panel<'a> {
         (open && !floating).then_some(Reopen { anchor, edge, pinned, game })
     }
 
-    /// A to-do written on it: its field written in, it taking the keys (see `ui::todo::begin`).
+    /// A to-do written on it: its field written in, it taking the keys (see `ui::todo::begin`). (A name written in
+    /// where it shows on it kept first.)
     fn write_todo(&mut self) {
         if self.is_open() {
+            self.stop_naming(false);
             crate::ui::todo::begin(&self.window);
             self.next_frame = Instant::now();
         }
+    }
+
+    /// `naming` written in where it shows on it, it taking the keys (see `ui::naming::begin`): a to-do written on it
+    /// kept first.
+    fn name(&mut self, naming: crate::ui::naming::Naming) {
+        if self.is_open() {
+            self.stop_todo(false);
+            crate::ui::naming::begin(&self.window, naming);
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// A name written in where it shows on it given back its keys (see `ui::naming::end`): Esc where `escaped`.
+    fn stop_naming(&mut self, escaped: bool) {
+        if crate::ui::naming::holds(self.window.hwnd) {
+            crate::ui::naming::end(&self.window, escaped);
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// What a name written in where it shows on it was tried as, answered (see `ui::naming::answered`).
+    fn naming_answered(&mut self) {
+        crate::ui::naming::answered(&self.window);
+        self.next_frame = Instant::now();
     }
 
     /// The `n`th to-do, as `item`, written in where it shows on it, pressed on its words (`hit`) at `client`: the caret
@@ -3307,6 +3368,7 @@ impl<'a> Panel<'a> {
         if !self.is_open() {
             return;
         }
+        self.stop_naming(false);
         let (x, _) = self.dips(client);
         let Some(into) = self.hits.iter().find(|region| region.4 == Hit::Todo(hit)).map(|region| x - region.0) else { return };
         let caret = crate::ui::todo::caret_at(&self.gfx, self.theme.body, n, &item, into);
@@ -3322,9 +3384,11 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// Going: a to-do written on it given back the keys, the picker of a time opened from it put away.
+    /// Going: a to-do written on it given back the keys, the picker of a time opened from it put away; a name written
+    /// in where it shows on it kept.
     fn let_go_todo(&mut self) {
         self.stop_todo(false);
+        self.stop_naming(false);
         if crate::ui::todo::pick::up_for(self.window.hwnd) {
             crate::ui::todo::pick::close(false);
         }
@@ -3662,7 +3726,7 @@ impl<'a> Panel<'a> {
         // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
         // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
         // closes the menu first.)
-        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up || crate::ui::todo::holds(self.window.hwnd) || crate::ui::rename::up_for(self.window.hwnd)
+        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up || crate::ui::todo::holds(self.window.hwnd) || crate::ui::naming::holds(self.window.hwnd) || crate::ui::rename::up_for(self.window.hwnd)
     }
 
     /// What may be looked at larger on it, as it was just drawn (see `ui::look`): each such thing, and where its tile is
@@ -4659,7 +4723,16 @@ impl<'a> Panel<'a> {
         // up from it.)
         let says = crate::ui::look::hint_says().filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
+        // A name written in where it shows on it, as it is now (a tag just made, its page turned to as it is found).
+        if let Some(tag) = crate::ui::naming::turn(self.window.hwnd, &crate::station::run::shown().tags) {
+            self.tab = self.tab.tagged(tag);
+            crate::station::select::turned(self.window.hwnd.0 as isize, self.tab);
+        }
+        let (naming, naming_due) = crate::ui::naming::shown(self.window.hwnd, now);
+        if let Some(due) = naming_due {
+            self.next_frame = self.next_frame.min(due);
+        }
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, sound_open: crate::ui::beside::sound_up_for(self.window.hwnd), naming: naming.as_ref(), ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -4849,6 +4922,12 @@ impl<'a> Panel<'a> {
         if crate::ui::todo::writing(hwnd) {
             if let Some(field) = self.on_screen(Hit::Todo(crate::ui::todo::caret_in(hwnd))) {
                 crate::ui::todo::placed(hwnd, field, px);
+            }
+        }
+        // A name written in where it shows on it: the input method's words put at its caret.
+        if crate::ui::naming::writing(hwnd) {
+            if let Some(field) = self.on_screen(Hit::Naming) {
+                crate::ui::naming::placed(hwnd, field, px);
             }
         }
         // A frame slow enough to be seen, noted (as the widgets' and the settings' are).
@@ -5191,7 +5270,7 @@ impl<'a> Panel<'a> {
             Some(edges) => point_at(&self.window, edges),
             // Over a to-do's words, written in where they show: the I-beam. Over what a press does something with (a
             // button, a drive's row): a hand.
-            None if matches!(self.hit_at(client), Some(Hit::Todo(view::TodoHit::Words(..)))) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_IBEAM),
+            None if matches!(self.hit_at(client), Some(Hit::Todo(view::TodoHit::Words(..)) | Hit::Naming)) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_IBEAM),
             None if self.hit_at(client).is_some_and(|hit| hit.takes_press()) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_HAND),
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
@@ -5232,6 +5311,16 @@ impl<'a> Panel<'a> {
         if !matches!(hit, Some(Hit::Todo(hit)) if crate::ui::todo::keeps(hit)) {
             self.stop_todo(false);
         }
+        // A name written in where it shows: a press on it puts the caret there, one away from it keeps it (see
+        // `ui::naming`).
+        if hit == Some(Hit::Naming) {
+            let (x, _) = self.dips(client);
+            if let Some(into) = self.hits.iter().find(|region| region.4 == Hit::Naming).map(|region| x - region.0) {
+                crate::ui::naming::press(&self.window, &self.gfx, into);
+            }
+            return;
+        }
+        self.stop_naming(false);
         // Let go on what was pressed with Ctrl or Shift: chosen, and nothing more.
         if let Some(press) = pressed.filter(|press| hit == Some(press.hit)) {
             if !crate::station::select::release(press) {
@@ -5413,6 +5502,7 @@ fn scene<'s>(
         music_apart: false,
         sound_open: false,
         hint: None,
+        naming: None,
     }
 }
 

@@ -50,6 +50,7 @@ impl Drop for Window {
         // (Whatever it took the keys for, and the to-dos' picker opened from it, let go with it.)
         super::keys::give_back(self.hwnd);
         super::todo::went(self.hwnd);
+        super::naming::went(self.hwnd);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         // (At its thread's end, what this thread kept may be gone before it.)
         let _ = TAKES.try_with(|takes| takes.borrow_mut().retain(|(of, _)| *of != self.hwnd.0 as isize));

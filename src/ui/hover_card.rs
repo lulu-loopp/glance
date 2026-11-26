@@ -348,6 +348,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, cl
         settings_lit: None,
         sound_open: false,
         music_apart: false,
+        naming: None,
     };
     let Some(lane) = told(&scene, of.hit) else { return hide() };
     let laid = |lane: &view::Lane| Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
