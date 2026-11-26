@@ -268,7 +268,7 @@ struct Palette {
     /// A flyout's fill and its hairline.
     fly: crate::ui::canvas::Color,
     fly_stroke: crate::ui::canvas::Color,
-    /// Windows 11's standard button: its fill, under the pointer, its hairline and its lower edge.
+    /// Windows 11's standard button: its fill, the layer over it under the pointer, its hairline and its lower edge.
     button: crate::ui::canvas::Color,
     button_hover: crate::ui::canvas::Color,
     button_stroke: crate::ui::canvas::Color,
@@ -323,7 +323,7 @@ impl Palette {
                 fly: Color::hex(0x2C2C2C, 1.0),
                 fly_stroke: white(0.09),
                 button: white(0.06),
-                button_hover: white(0.084),
+                button_hover: white(0.04),
                 button_stroke: white(0.07),
                 button_edge: white(0.07),
                 accent,
@@ -353,7 +353,7 @@ impl Palette {
                 fly: Color::hex(0xF9F9F9, 1.0),
                 fly_stroke: black(0.1),
                 button: white(0.7),
-                button_hover: Color::hex(0xF9F9F9, 0.5),
+                button_hover: black(0.035),
                 button_stroke: black(0.0578),
                 button_edge: black(0.1622),
                 accent,

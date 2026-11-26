@@ -1956,9 +1956,12 @@ fn flyout(frame: &Frame, p: &Palette, r: Rect) {
 /// Windows 11's button, its corners rounded by `radius`: standard, or as much the accent's as `pressed` says (0 to 1),
 /// as much under the pointer as `hover` says (the accent's then lifted `lift` times as bright).
 fn button(frame: &Frame, p: &Palette, r: Rect, radius: f32, pressed: f32, lift: f32, hover: f32) {
-    let standard = mix(p.button, p.button_hover, hover);
     let accent = bright(p.accent, 1.0 + (lift - 1.0) * hover);
-    fill(frame, mix(standard, accent, pressed), r.x, r.y, r.w, r.h, radius);
+    fill(frame, mix(p.button, accent, pressed), r.x, r.y, r.w, r.h, radius);
+    // (Under the pointer, a layer over it: a colour of its own would come out as the card under it does.)
+    if pressed < 1.0 && hover > 0.0 {
+        fill(frame, p.button_hover.alpha(hover * (1.0 - pressed)), r.x, r.y, r.w, r.h, radius);
+    }
     if pressed < 1.0 {
         stroke_inside(frame, r, radius, p.button_stroke.alpha(1.0 - pressed));
         within(frame, r, radius, 1.0 - pressed, || fill(frame, p.button_edge, r.x, r.y + r.h - 1.0, r.w, 1.0, 0.0));
