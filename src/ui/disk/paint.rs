@@ -34,8 +34,6 @@ const CARD_RADIUS: f32 = 8.0;
 const CHIP_H: f32 = 24.0;
 const BUTTON_H: f32 = 32.0;
 const PLATE_W: f32 = 320.0;
-/// The mark under the tab shown (its width), as the settings' own tabs' is.
-const TAB_MARK: f32 = 16.0;
 const TAG_W: f32 = 280.0;
 /// How much of a block (or a piece of one) not lit is gone, dimmed wholly; how dimmed a ground is then (its words a
 /// half as much as that).
@@ -428,7 +426,7 @@ impl Organizer {
     }
 
     /// The drives, a tab each, as the settings' own tabs are: the one shown marked under its middle by a short bar in
-    /// the accent (growing in as it is chosen), a drive nearly out of space by a dot after its name (told of under the
+    /// the accent (going to it as it is chosen), a drive nearly out of space by a dot after its name (told of under the
     /// pointer). Those that do not fit in a menu, the one shown never among them. Whether the mark moves still.
     fn paint_drives(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, hot: &Option<Target>) -> bool {
         const BETWEEN: f32 = 28.0;
@@ -487,16 +485,13 @@ impl Organizer {
             }
             self.spot(r, target);
         }
-        // The mark grows in under the drive chosen, from its middle.
+        // The mark goes to the drive chosen, as the settings' own tabs' does.
         let Some(middle) = middle else { return false };
-        if self.drive_mark.as_ref().is_none_or(|(root, _)| *root != self.root) {
-            self.drive_mark = Some((self.root.clone(), now));
-        }
-        let since = self.drive_mark.as_ref().map_or(0.0, |(_, since)| now.saturating_duration_since(*since).as_secs_f32());
-        let grown = if crate::panel::reduced_motion() { 1.0 } else { SLIDE.at(since / 0.22) };
-        let w = TAB_MARK * grown;
-        fill(frame, p.accent, middle - w / 2.0, TABS_Y + h - 2.0 - 3.0, w, 3.0, 1.5);
-        grown < 1.0
+        let mark = self.drive_mark.get_or_insert_with(|| Mark::new(middle));
+        mark.go(middle, now);
+        let (from, to) = mark.at(now);
+        fill(frame, p.accent, from, TABS_Y + h - 2.0 - 3.0, to - from, 3.0, 1.5);
+        mark.moving(now)
     }
 
     /// Back, the path to the folder shown, and the filters.
@@ -683,7 +678,7 @@ impl Organizer {
             (Some(at), None, None) => self.block_tools(frame, map, at),
             _ => None,
         };
-        let moving = self.paint_map(frame, p, map, now, dt, lighting.as_ref(), tools.as_ref(), hot);
+        let moving = self.paint_map(frame, p, map, now, dt, lighting.as_ref(), hot);
         self.paint_block_tools(frame, p, now, tools.as_ref(), hot) || moving
     }
 
@@ -693,7 +688,7 @@ impl Organizer {
     /// is still, the file chosen outlined, and the block under the pointer (or the file whose row is). Whether anything
     /// moves still.
     #[allow(clippy::too_many_arguments)]
-    fn paint_map(&mut self, frame: &Frame, p: &Palette, map: Rect, now: Instant, dt: f32, lighting: Option<&Light>, tools: Option<&BlockTools>, hot: &Option<Target>) -> bool {
+    fn paint_map(&mut self, frame: &Frame, p: &Palette, map: Rect, now: Instant, dt: f32, lighting: Option<&Light>, hot: &Option<Target>) -> bool {
         let lang = self.lang;
         let blocks = self.now_rects(now);
         let animating = self.anim.as_ref().is_some_and(|anim| now < anim.began + anim.lasts);
@@ -707,6 +702,8 @@ impl Organizer {
         frame.clip(map.x - 2.0, map.y - 2.0, map.w + 4.0, map.h + 4.0);
         let hover_key = self.hover.and_then(|at| self.laid.get(at)).map(|placed| placed.key).filter(|_| !animating);
         let any_gathered = !self.gathered.is_empty() || !self.going.is_empty() || self.pending.is_some();
+        // The tools up on a block (coming or going), how far they are seen: a ground's size gives way to its plus.
+        let tools_up = self.tools_shown.as_ref().and_then(|shown| self.laid.get(shown.what.at).map(|placed| (placed.key, shown.shown(now, 0.12, EASE), shown.what)));
         for seen in blocks {
             let Seen { placed, at, alpha, ground, was } = seen;
             let r = Rect { x: map.x + at.x, y: map.y + at.y, w: at.w, h: at.h };
@@ -821,14 +818,19 @@ impl Organizer {
                     let size = size_text(about.bytes, lang);
                     let size_w = frame.measure(&size, size_font);
                     let room = r.w - 16.0;
-                    let tools_here = tools.filter(|_| hovered);
-                    let show_size = room - size_w - 8.0 > 40.0 && tools_here.is_none_or(|tools| tools.add.is_none());
-                    let keep = tools_here.map_or(0.0, |tools| tools.room);
+                    let (tools_seen, keep, plus) = match tools_up {
+                        Some((key, seen, tools)) if key == placed.key => (seen, tools.room, tools.add.is_some()),
+                        _ => (0.0, 0.0, false),
+                    };
+                    let show_size = room - size_w - 8.0 > 40.0;
+                    let size_seen = if plus { 1.0 - tools_seen } else { 1.0 };
+                    let name_w = if show_size && size_seen > 0.0 { room - size_w - 8.0 } else { room };
+                    let name_w = if tools_seen > 0.0 { name_w.min(room - keep) } else { name_w };
                     let seen_as = as_ground * (1.0 - dim * 0.5);
                     let y = frame.line_in(font, r.y, crate::disk::map::LABEL);
-                    frame.text(&about.name, font, p.text.alpha(seen_as), r.x + 8.0, y, if show_size { room - size_w - 8.0 } else { room - keep }, Align::Start);
-                    if show_size {
-                        frame.text(&size, size_font, p.text2.alpha(seen_as), r.x + 8.0, y, room, Align::End);
+                    frame.text(&about.name, font, p.text.alpha(seen_as), r.x + 8.0, y, name_w, Align::Start);
+                    if show_size && size_seen > 0.0 {
+                        frame.text(&size, size_font, p.text2.alpha(seen_as * size_seen), r.x + 8.0, y, room, Align::End);
                     }
                 }
                 if !matches!(about.what, Some(What::Unlisted)) && self.gathered_at(&about.path) {
@@ -1035,20 +1037,17 @@ impl Organizer {
             }
             frame.text(label, font, if on { p.text } else { p.text2 }, r.x + 12.0, frame.line_in(font, r.y, r.h), w, Align::Start);
             if on {
-                mark_to = Some(r.x + r.w / 2.0 - TAB_MARK / 2.0);
+                mark_to = Some(r.x + r.w / 2.0);
             }
             self.spot(r, target);
             x += w + 2.0;
         }
-        if let Some(to) = mark_to {
-            let mark = self.tab_mark.get_or_insert_with(|| Tween::new(to as f64, 0.26, SLIDE));
-            if crate::panel::reduced_motion() {
-                mark.set(to as f64);
-            } else {
-                mark.go(to as f64, now);
-            }
+        if let Some(middle) = mark_to {
+            let mark = self.tab_mark.get_or_insert_with(|| Mark::new(middle));
+            mark.go(middle, now);
             moving |= mark.moving(now);
-            fill(frame, p.accent, mark.at(now) as f32, side.y + TABS_H - 5.0, TAB_MARK, 3.0, 1.5);
+            let (from, to) = mark.at(now);
+            fill(frame, p.accent, from, side.y + TABS_H - 5.0, to - from, 3.0, 1.5);
         }
         let Some(shown) = self.shown.clone().filter(|shown| shown.root.eq_ignore_ascii_case(&self.root)) else { return moving };
         let detail = &shown.detail;

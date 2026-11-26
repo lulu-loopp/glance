@@ -641,6 +641,9 @@ pub struct Detail {
 pub struct Lit {
     pub folders: HashSet<u32>,
     pub rests: HashSet<u32>,
+    /// The folder a file was last marked in, and whether its rest was marked then: the files of a folder come
+    /// together, and once one is marked another marks nothing more (unless it marks the rest).
+    last: Option<(u32, bool)>,
 }
 
 impl Lit {
@@ -648,6 +651,15 @@ impl Lit {
     /// `up` each drawn folder's own), the file itself drawn or not: the folders drawn from `drawn_up` up told as
     /// holding one (those above one told already are), and the rest it is drawn in.
     fn mark(&mut self, up: &HashMap<u32, u32>, folder: u32, drawn: Drawn, drawn_up: u32, file_drawn: bool) {
+        let rest = match drawn {
+            Drawn::Opened if !file_drawn => Some(folder),
+            Drawn::InRestOf(owner) => Some(owner),
+            _ => None,
+        };
+        let rest_marked = matches!(self.last, Some((last, marked)) if last == folder && marked);
+        if self.last.is_some_and(|(last, _)| last == folder) && (rest.is_none() || rest_marked) {
+            return;
+        }
         let mut at = drawn_up;
         while self.folders.insert(at) {
             match up.get(&at) {
@@ -655,15 +667,10 @@ impl Lit {
                 None => break,
             }
         }
-        match drawn {
-            Drawn::Opened if !file_drawn => {
-                self.rests.insert(folder);
-            }
-            Drawn::InRestOf(owner) => {
-                self.rests.insert(owner);
-            }
-            _ => {}
+        if let Some(rest) = rest {
+            self.rests.insert(rest);
         }
+        self.last = Some((folder, rest_marked || rest.is_some()));
     }
 }
 
@@ -683,8 +690,7 @@ impl Detail {
         let marks = filter.on() || matches!(light, Some(Light::Extension(_) | Light::Age(_)));
         let mut largest: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32)>> = std::collections::BinaryHeap::new();
         let mut kinds: HashMap<u32, Kind> = HashMap::new();
-        let mut extensions: HashMap<&str, (u64, u64, [u64; 9])> = HashMap::new();
-        let mut by_extension: HashMap<&str, Lit> = HashMap::new();
+        let mut extensions: HashMap<&str, (u64, u64, [u64; 9], Lit)> = HashMap::new();
         // Each folder drawn's own (by their places): a file lit told of in each folder drawn it is in.
         let mut up: HashMap<u32, u32> = HashMap::new();
         for node in &tree.nodes {
@@ -726,7 +732,7 @@ impl Detail {
                 age.0 += 1;
                 age.1 += stat.size;
                 let file_drawn = tree.by_place.contains_key(&place);
-                by_extension.entry(extension_of(name)).or_default().mark(&up, folder, drawn, drawn_up, file_drawn);
+                extension.3.mark(&up, folder, drawn, drawn_up, file_drawn);
                 detail.by_age[age_at].mark(&up, folder, drawn, drawn_up, file_drawn);
                 if !light.is_none_or(|light| light.lights(name, is.kind, stat.written, survey.at)) {
                     return;
@@ -754,10 +760,11 @@ impl Detail {
             .into_iter()
             .filter_map(|(bytes, place)| Some(Row { place, name: index.name(place).to_string_lossy().into_owned(), path: index.path(place, &survey.root)?, bytes, written: index.stat(place).written, kind: kinds[&place] }))
             .collect();
-        let mut extensions: Vec<Extension> = extensions.into_iter().map(|(extension, (bytes, files, kinds))| Extension { extension: extension.to_string(), bytes, files, kind: Held { kinds, ..Held::default() }.kind() }).collect();
-        extensions.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.extension.cmp(&b.extension)));
+        let mut extensions: Vec<(Extension, Lit)> = extensions.into_iter().map(|(extension, (bytes, files, kinds, lit))| (Extension { extension: extension.to_string(), bytes, files, kind: Held { kinds, ..Held::default() }.kind() }, lit)).collect();
+        extensions.sort_by(|a, b| b.0.bytes.cmp(&a.0.bytes).then(a.0.extension.cmp(&b.0.extension)));
         extensions.truncate(EXTENSIONS_LISTED);
-        detail.by_extension = extensions.iter().filter_map(|listed| by_extension.remove(listed.extension.as_str()).map(|lit| (listed.extension.clone(), lit))).collect();
+        let (extensions, lit): (Vec<Extension>, Vec<Lit>) = extensions.into_iter().unzip();
+        detail.by_extension = extensions.iter().map(|listed| listed.extension.clone()).zip(lit).collect();
         detail.extensions = extensions;
         detail
     }

@@ -89,6 +89,59 @@ impl Tween {
     }
 }
 
+/// The bar under the tab shown, going to another chosen as the settings' own tabs' does: its end toward it first,
+/// stretching it, its other end after, drawing it in again.
+#[derive(Clone, Copy)]
+struct Mark {
+    left: Tween,
+    right: Tween,
+}
+
+impl Mark {
+    /// Under the middle `middle`.
+    fn new(middle: f32) -> Mark {
+        let (left, right) = Mark::ends(middle);
+        Mark { left: Tween::new(left, 1.0, EASE), right: Tween::new(right, 1.0, EASE) }
+    }
+
+    fn ends(middle: f32) -> (f64, f64) {
+        let half = (crate::ui::settings_window::TAB_MARK / 2.0) as f64;
+        (middle as f64 - half, middle as f64 + half)
+    }
+
+    /// Going under the middle `middle` (there at once, with less motion asked for).
+    fn go(&mut self, middle: f32, now: Instant) {
+        let (left, right) = Mark::ends(middle);
+        if crate::panel::reduced_motion() {
+            self.left.set(left);
+            self.right.set(right);
+            return;
+        }
+        if left == self.left.to {
+            return;
+        }
+        use crate::ui::settings_window::{TAB_MARK_LEADS as LEADS, TAB_MARK_TRAILS as TRAILS};
+        let rightward = left > self.left.to;
+        let (left_how, right_how) = if rightward { (TRAILS, LEADS) } else { (LEADS, TRAILS) };
+        for (end, to, (lasts, curve)) in [(&mut self.left, left, left_how), (&mut self.right, right, right_how)] {
+            end.from = end.at(now);
+            end.to = to;
+            end.since = now;
+            end.lasts = lasts.as_secs_f32();
+            end.curve = curve;
+        }
+    }
+
+    /// Where its ends are now.
+    fn at(&self, now: Instant) -> (f32, f32) {
+        (self.left.at(now) as f32, self.right.at(now) as f32)
+    }
+
+    fn moving(&self, now: Instant) -> bool {
+        self.left.moving(now) || self.right.moving(now)
+    }
+}
+
 /// Something over the page as it comes and goes (a tag, a card, a menu, what is dragged): what it is, when it came,
 /// when it went (drawn going till it has faded).
 #[derive(Clone, Debug)]
@@ -583,6 +636,10 @@ pub struct Organizer {
     /// What was read last, and its drive's state: its files being found still, or it gone.
     shown: Option<Rc<Shown>>,
     listing: bool,
+    /// What was asked last (its serial aside), and what was read of the folder shown and of those above it as they
+    /// were asked so: going up to one is shown from it at once, as it is read anew.
+    asked: Option<Ask>,
+    read_above: Vec<(Ask, Rc<Shown>)>,
     /// The map as laid out (its size), moving from the last, and what each block and piece is dimmed to (eased).
     laid: Vec<Placed>,
     laid_size: (f32, f32),
@@ -598,8 +655,8 @@ pub struct Organizer {
     tab: Tab,
     /// Where the mark under the list's tab shown is (its left, sliding to it), and the drive whose tab is shown and
     /// since when (its mark growing in under it).
-    tab_mark: Option<Tween>,
-    drive_mark: Option<(String, Instant)>,
+    tab_mark: Option<Mark>,
+    drive_mark: Option<Mark>,
     scroll: f32,
     scroll_to: f32,
     gathered: Vec<Gathered>,
@@ -683,6 +740,8 @@ impl Organizer {
             focus: PathBuf::new(),
             shown: None,
             listing: false,
+            asked: None,
+            read_above: Vec::new(),
             laid: Vec::new(),
             laid_size: (0.0, 0.0),
             anim: None,
@@ -816,6 +875,14 @@ impl Organizer {
         self.focus = path;
         self.scroll = 0.0;
         self.scroll_to = 0.0;
+        // A folder above, read before as it is asked now: shown from that at once (moving as it was to), the reading
+        // anew shown as it comes.
+        let read = self.read_above.iter().find(|(asked, _)| *asked == self.asking(0)).map(|(_, shown)| shown.clone());
+        if let Some(read) = read {
+            self.shown = Some(read);
+            let change = self.change.take();
+            self.relay(change);
+        }
         self.ask();
     }
 
@@ -849,12 +916,19 @@ impl Organizer {
             return;
         }
         self.serial += 1;
+        let ask = self.asking(self.serial);
+        self.asked = Some(Ask { serial: 0, ..ask.clone() });
+        self.worker.ask(ask);
+        self.next_frame = Instant::now();
+    }
+
+    /// What is to be asked now, as `serial`.
+    fn asking(&self, serial: u64) -> Ask {
         // (As large as the map can be: the tree is copied out as far down as that could draw.)
         let (width, height) = self.client();
         let card = paint::geo(width, height).card;
         let area = ((card.w - 24.0) * (card.h - 60.0)).max(10_000.0);
-        self.worker.ask(Ask { root: self.root.clone(), focus: self.focus.clone(), filter: self.filter, light: self.light.clone(), area, serial: self.serial });
-        self.next_frame = Instant::now();
+        Ask { root: self.root.clone(), focus: self.focus.clone(), filter: self.filter, light: self.light.clone(), area, serial }
     }
 
     /// Its window's size (DIPs).
@@ -903,7 +977,13 @@ impl Organizer {
                     drive.total = shown.total;
                     drive.free = shown.free;
                 }
-                self.shown = Some(Rc::new(*shown));
+                let shown = Rc::new(*shown);
+                // Kept as read for what was asked, with what was read of the folders above it asked as it was.
+                if let Some(asked) = self.asked.clone().filter(|_| shown.serial == self.serial) {
+                    self.read_above.retain(|(above, _)| above.focus != asked.focus && asked.focus.starts_with(&above.focus) && Ask { focus: asked.focus.clone(), ..above.clone() } == asked);
+                    self.read_above.push((asked, shown.clone()));
+                }
+                self.shown = Some(shown);
                 self.relay(Some(change));
             }
         }
@@ -920,9 +1000,13 @@ impl Organizer {
         }
         let blocks = crate::disk::map::lay_out(&shown.tree, width, height);
         let next: Vec<Placed> = blocks.into_iter().map(|block| Placed { key: key_of(&shown, &block.item), block, shown: shown.clone() }).collect();
-        // Laid out as it was (the drive changed, not what the map shows of it): nothing moves.
+        // Laid out as it was (the drive changed, not what the map shows of it): nothing starts moving, what moves keeps
+        // on as it was, the tools and the tag kept.
         let same = next.len() == self.laid.len() && next.iter().zip(&self.laid).all(|(next, was)| next.key == was.key && same_rect(next.block.at, was.block.at));
-        let change = change.filter(|_| !same);
+        if same {
+            self.laid = next;
+            return;
+        }
         // Going out: into where the folder shown before is drawn now, else the drive changed under it.
         let change = match change {
             Some(Change::Out(_)) => {

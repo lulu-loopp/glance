@@ -254,11 +254,23 @@ pub enum Reading<R> {
     Read { read: R, replaced: u64, watch: Watch },
 }
 
+/// How a drive's index is, held to be read, against when it was read before (see `read_drive`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Since {
+    /// Nothing on the drive changed since.
+    Same,
+    /// Something changed, its entries kept their places (an entry's place is never another's while the index is not
+    /// put anew: what comes takes new ones).
+    Changed,
+    /// Put anew (its entries' places others), its drive gone and come again, or never read before.
+    Anew,
+}
+
 /// The index of the drive at `root` ("C:\\") read by `read` as it is now, held from being changed meanwhile (what
 /// changes on the drive is taken in after): an index's entries are known by their places only while it is not put
-/// anew, which `Reading::Read` tells the number of (see `read_since`). `read` is told whether it may have changed
-/// since it was read as `since` tells (always, with none), as it is held.
-pub fn read_drive<R>(root: &str, since: Option<(u64, &Watch)>, read: impl FnOnce(&Index, bool) -> R) -> Reading<R> {
+/// anew, which `Reading::Read` tells the number of (see `read_since`). `read` is told how it is against when it was
+/// read as `since` tells (anew, with none), as it is held.
+pub fn read_drive<R>(root: &str, since: Option<(u64, &Watch)>, read: impl FnOnce(&Index, Since) -> R) -> Reading<R> {
     let volume = {
         let volumes = VOLUMES.lock().unwrap();
         if volumes.is_empty() {
@@ -273,12 +285,17 @@ pub fn read_drive<R>(root: &str, since: Option<(u64, &Watch)>, read: impl FnOnce
 }
 
 /// `volume`'s index read by `read` (see `read_drive`).
-fn read_volume<R>(volume: &Volume, since: Option<(u64, &Watch)>, read: impl FnOnce(&Index, bool) -> R) -> Reading<R> {
+fn read_volume<R>(volume: &Volume, since: Option<(u64, &Watch)>, read: impl FnOnce(&Index, Since) -> R) -> Reading<R> {
     if !volume.ready.load(Ordering::Relaxed) {
         return Reading::Listing;
     }
     let index = volume.index.read().unwrap();
-    let changed = since.is_none_or(|(replaced, watch)| volume.read_since(replaced, watch));
+    let changed = match since {
+        Some((replaced, _)) if volume.away() || volume.replaced.load(Ordering::Relaxed) != replaced => Since::Anew,
+        Some((_, watch)) if volume.changed(watch) => Since::Changed,
+        Some(_) => Since::Same,
+        None => Since::Anew,
+    };
     // (Its root told before it is read, under the same hold: what changes it after is told.)
     let Some(id) = index.id(index::ROOT) else { return Reading::Nowhere };
     let stamp = {
@@ -1031,8 +1048,8 @@ mod tests {
         assert!(keeping.due(at(201), false, false, much, false), "kept, as before");
     }
 
-    /// A drive's index read whole is told to be so till anything on it is listed again as changed, or its index is put
-    /// anew (its places others then): read again, it is so again.
+    /// A drive's index read whole is told to be so till anything on it is listed again as changed (read again, told so,
+    /// its places kept), or its index is put anew (read again, told so, its places others): read again, it is so again.
     #[test]
     fn a_drive_read_whole_is_so_till_anything_on_it_changes_or_its_index_is_put_anew() {
         let root = tree("read", 2, 2, 3);
@@ -1047,10 +1064,10 @@ mod tests {
             _ => panic!("not read"),
         };
         let ((files, changed), replaced, watch) = read(&volume, None);
-        assert!(files > 0 && changed);
+        assert!(files > 0 && changed == Since::Anew);
         assert!(!volume.read_since(replaced, &watch));
         let ((_, changed), replaced, watch) = read(&volume, Some((replaced, &watch)));
-        assert!(!changed, "told as unchanged, read again unchanged");
+        assert_eq!(changed, Since::Same, "told as unchanged, read again unchanged");
         // Anything changed deep in it: read again, it is so till the next.
         let deep = volume.index.read().unwrap().place_of(Path::new("folder 1/folder 0")).unwrap();
         std::fs::write(root.join("folder 1").join("folder 0").join("new.txt"), [0u8; 10]).unwrap();
@@ -1059,12 +1076,14 @@ mod tests {
         assert!(volume.read_since(replaced, &watch));
         let ((again, changed), replaced, watch) = read(&volume, Some((replaced, &watch)));
         assert_eq!(again, files + 1);
-        assert!(changed);
+        assert_eq!(changed, Since::Changed, "changed, its entries in their places");
         assert!(!volume.read_since(replaced, &watch));
         // Its index put anew (its places others).
         let anew = std::mem::replace(&mut *volume.index.write().unwrap(), Index::new(0, true));
         volume.put(anew);
         assert!(volume.read_since(replaced, &watch));
+        let ((_, changed), _, _) = read(&volume, Some((replaced, &watch)));
+        assert_eq!(changed, Since::Anew, "put anew: its places others");
     }
 
     /// A folder's size is told by its path, and told to have changed as anything in it is listed again: a file come in a

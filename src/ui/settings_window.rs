@@ -1830,9 +1830,9 @@ const NOTICE_ICON_ROOM: f32 = 28.0;
 const TABS_ROW: f32 = 48.0;
 /// How wide the bar under the tab shown is (as Windows' own), and how its ends move to another chosen: the end toward
 /// it, then the other.
-const TAB_MARK: f32 = 16.0;
-const TAB_MARK_LEADS: (Duration, Easing) = (Duration::from_millis(200), Easing(0.55, 0.55, 0.0, 1.0));
-const TAB_MARK_TRAILS: (Duration, Easing) = (Duration::from_millis(360), Easing(0.55, 0.55, 0.0, 1.0));
+pub(crate) const TAB_MARK: f32 = 16.0;
+pub(crate) const TAB_MARK_LEADS: (Duration, Easing) = (Duration::from_millis(200), Easing(0.55, 0.55, 0.0, 1.0));
+pub(crate) const TAB_MARK_TRAILS: (Duration, Easing) = (Duration::from_millis(360), Easing(0.55, 0.55, 0.0, 1.0));
 /// How large a QR code's white square is on the devices' page's stage (see `Ui::paint_adding`) where it has room,
 /// and how wide the steps under it are at most.
 const CODE: f32 = 248.0;

@@ -11,6 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::disk::{self, Detail, Filter, Light, Places, Survey, Tree, What};
 use crate::search::index::{Index, ROOT};
+use crate::search::Since;
 
 /// How often the drive is looked at for changes while nothing is asked, and how long at least between two readings of
 /// it as it changes (a system drive changes all the time: read anew each second, the window was laid out anew as often).
@@ -136,28 +137,41 @@ fn run(asked: Receiver<Ask>, told: Arc<Mutex<Option<Told>>>, window: HWND, messa
             (None, Some(last)) if listing || (read_at.elapsed() >= READ_AGAIN_AFTER && kept.as_ref().is_some_and(|kept| crate::search::read_since(kept.replaced, &kept.watch))) => (last.clone(), false),
             (None, _) => continue,
         };
-        let reading = read(&ask, &places, &mut kept, anew);
+        let mut gone = false;
+        let mut tell = |reading: Told| {
+            *told.lock().unwrap() = Some(reading);
+            gone |= unsafe { PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)) }.is_err();
+        };
+        let reading = read(&ask, &places, &mut kept, anew, &mut tell);
         read_at = std::time::Instant::now();
         listing = matches!(reading, Told::Listing(_));
         last = Some(ask);
-        *told.lock().unwrap() = Some(reading);
-        if unsafe { PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)) }.is_err() {
+        tell(reading);
+        if gone {
             return;
         }
     }
 }
 
-/// `ask` read, the survey kept (`kept`) taken again where the drive changed since, or it is of another drive.
-fn read(ask: &Ask, places: &Places, kept: &mut Option<Kept>, anew: bool) -> Told {
+/// `ask` read, the survey kept (`kept`) taken again where the drive changed since, or it is of another drive. Asked
+/// anew of a drive changed since its survey (its entries in their places still), what the survey kept shows is told
+/// at once (by `tell`), as surveying a drive whole takes a while: what is shown moves as it is asked, and is shown as
+/// the drive is now once it is surveyed again.
+fn read(ask: &Ask, places: &Places, kept: &mut Option<Kept>, anew: bool, tell: &mut dyn FnMut(Told)) -> Told {
     let space = disk::act::space(&ask.root);
     let mine = kept.take().filter(|kept| kept.root.eq_ignore_ascii_case(&ask.root));
     let since = mine.as_ref().map(|kept| (kept.replaced, &kept.watch));
     let mut survey = None;
     let mut retaken = false;
-    let reading = crate::search::read_drive(&ask.root, since, |index, changed| {
+    let reading = crate::search::read_drive(&ask.root, since, |index, since| {
         let had = mine.as_ref().map(|kept| &kept.survey);
+        if let (Some(survey), Some(kept), Since::Changed, true) = (had, &mine, since, anew) {
+            let mut shown = shown(index, survey, ask);
+            shown.replaced = kept.replaced;
+            tell(Told::Shown(Box::new(shown)));
+        }
         let survey = match had {
-            Some(survey) if !changed => survey,
+            Some(survey) if since == Since::Same => survey,
             _ => {
                 retaken = had.is_some();
                 survey.insert(Survey::take(index, &ask.root, places, space, disk::now()))
