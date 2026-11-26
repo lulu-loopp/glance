@@ -346,6 +346,12 @@ static VOLUMES: Mutex<Vec<Arc<Volume>>> = Mutex::new(Vec::new());
 /// Whether the drives there are have been found (as `drives` first looked).
 static DRIVES_FOUND: AtomicBool = AtomicBool::new(false);
 
+/// Whether the drives there are have been found yet (search started late, once the machine has settled, they are
+/// not for a while: see `start`).
+pub fn drives_found() -> bool {
+    DRIVES_FOUND.load(Ordering::Relaxed)
+}
+
 /// How many times a drive's index has come to hold all its names as they are now (listed whole, or read as kept and
 /// all that changed since found: see `Volume::caught_up`): more, where more may be found by name since.
 static LISTED: AtomicU64 = AtomicU64::new(0);

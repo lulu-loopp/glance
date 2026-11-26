@@ -36,6 +36,8 @@ pub const ACTED: u32 = WM_APP + 53;
 const UNDO_FOR: Duration = Duration::from_secs(5);
 const WENT_FOR: Duration = Duration::from_secs(9);
 const SAID_FOR: Duration = Duration::from_millis(2600);
+/// How often the drives are looked for while none is shown.
+const DRIVES_EVERY: Duration = Duration::from_millis(500);
 /// How long the map takes to move from one layout to the next: going in or out of a folder, the drive changing under
 /// it, another drive.
 const ZOOM: Duration = Duration::from_millis(380);
@@ -638,6 +640,8 @@ pub struct Organizer {
     palette: Palette,
     next_frame: Instant,
     last_frame: Instant,
+    /// When the drives were last looked for, none shown.
+    drives_at: Instant,
     worker: Worker,
     serial: u64,
     /// The drives offered, the one shown, the folder shown (as asked: shown as soon as it is read).
@@ -753,6 +757,7 @@ impl Organizer {
             palette: Palette::new(dark),
             next_frame: Instant::now(),
             last_frame: Instant::now(),
+            drives_at: Instant::now(),
             worker: Worker::start(hwnd, SHOWN),
             serial: 0,
             drives: crate::disk::act::drives(),
@@ -831,6 +836,8 @@ impl Organizer {
     /// Turned to what `asked` says: a drive (its root, a folder on it), as it is now; with nothing asked, to the drive
     /// shown last (as it was left, if it is shown still).
     pub fn turn(&mut self, asked: &Asked) {
+        // (The drives come from search's: found now, the machine settled or not.)
+        crate::search::asked();
         self.drives = crate::disk::act::drives();
         let last = crate::app().settings.lock().unwrap().disk_drive.clone();
         let system = std::env::var("SystemDrive").map(|drive| format!("{}\\", drive.to_ascii_uppercase())).unwrap_or_else(|_| "C:\\".into());
@@ -1201,6 +1208,15 @@ impl Organizer {
             self.went = None;
             self.next_frame = now;
         }
+        // No drive shown: looked for again, and turned to the first come.
+        if self.root.is_empty() && now >= self.drives_at + DRIVES_EVERY {
+            self.drives_at = now;
+            self.drives = crate::disk::act::drives();
+            if !self.drives.is_empty() {
+                self.turn(&Asked::default());
+            }
+            self.next_frame = now;
+        }
     }
 
     fn say(&mut self, words: String, icon: crate::ui::icons::Icon) {
@@ -1290,7 +1306,8 @@ impl Organizer {
         self.last_frame = now;
         let moving = self.paint(frame, now, dt);
         // Moving: the next frame at once (the screen's next); else when a timer is due, or a while.
-        let due = [self.pending.as_ref().map(|pending| pending.since + UNDO_FOR), self.said.as_ref().map(|said| said.since + SAID_FOR), self.went.as_ref().map(|went| went.until)].into_iter().flatten().min();
+        let looking = self.root.is_empty().then(|| self.drives_at + DRIVES_EVERY);
+        let due = [self.pending.as_ref().map(|pending| pending.since + UNDO_FOR), self.said.as_ref().map(|said| said.since + SAID_FOR), self.went.as_ref().map(|went| went.until), looking].into_iter().flatten().min();
         self.next_frame = if moving || self.pending.is_some() { now + Duration::from_millis(8) } else { due.unwrap_or(now + Duration::from_secs(3600)).max(now + Duration::from_millis(8)) };
         moving
     }

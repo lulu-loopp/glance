@@ -368,8 +368,13 @@ impl Organizer {
         let lang = self.lang;
         let top = g.height / 2.0 - 30.0;
         frame.icon(Icon::Disk, Point { x: PAGE_X + g.page_w / 2.0, y: top }, 28.0, p.text3);
+        // (Search's drives not found yet, as Glance has just started: they are looked for, and shown as they come.)
+        if !crate::search::drives_found() {
+            centred(frame, lang.pick("正在查找磁盘…", "Finding drives…"), body(13.0, 400.0), p.text2, PAGE_X, top + 28.0, g.page_w);
+            return;
+        }
         centred(frame, lang.pick("没有可以显示的磁盘", "No drive to show"), body(16.0, 600.0), p.text, PAGE_X, top + 28.0, g.page_w);
-        centred(frame, lang.pick("磁盘整理读取搜索的索引，开启搜索后即可在这里查看磁盘。", "The organizer reads search's index: drives are shown here once search is on."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
+        centred(frame, lang.pick("未找到这台电脑上可以读取的本地磁盘。", "No local drive on this PC could be read."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
     }
 
     /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown: its words
