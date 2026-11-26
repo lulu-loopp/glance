@@ -550,38 +550,25 @@ impl Organizer {
         };
         const SEPARATOR: f32 = 16.0;
         const MORE: f32 = 32.0;
-        // As many from the end as fit, the root kept where it can be; those between in a menu.
-        let mut shown_at: Vec<usize> = Vec::new();
-        let mut used = 0.0;
-        for at in (0..crumbs.len()).rev() {
-            let w = width_of(at) + if shown_at.is_empty() { 0.0 } else { SEPARATOR };
-            let hidden_left = at > 0;
-            if used + w + if hidden_left { MORE + SEPARATOR } else { 0.0 } > room && !shown_at.is_empty() {
-                break;
-            }
-            used += w;
-            shown_at.push(at);
+        // The drive, then the folders nearest the one shown, as many as fit at their whole width: those between go
+        // under a button listing them (nearest first), as Explorer's address bar does. Only the folder shown is cut
+        // short, where even the drive, the button and it do not fit.
+        let count = crumbs.len();
+        let taken = |hidden: usize| -> f32 {
+            let more = if hidden > 0 { SEPARATOR + MORE } else { 0.0 };
+            width_of(0) + more + (1 + hidden..count).map(|at| SEPARATOR + width_of(at)).sum::<f32>()
+        };
+        let mut hidden = 0;
+        while taken(hidden) > room && hidden + 2 < count {
+            hidden += 1;
         }
-        shown_at.reverse();
-        let first_shown = shown_at.first().copied().unwrap_or(0);
+        let over = (taken(hidden) - room).max(0.0);
+        let shown_at: Vec<usize> = std::iter::once(0).chain(1 + hidden..count).collect();
+        let width_shown = |at: usize| if at + 1 == count { (width_of(at) - over).max(28.0) } else { width_of(at) };
         let mut x = back.x + back.w + 8.0;
-        if first_shown > 0 {
-            let hidden: Vec<(String, PathBuf)> = crumbs[..first_shown].iter().rev().cloned().collect();
-            let r = Rect { x, y: top, w: MORE, h: 32.0 };
-            let target = Target::CrumbMore(hidden);
-            let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
-            if lit > 0.0 {
-                fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
-            }
-            frame.icon(Icon::Ellipsis, Point { x: r.x + 16.0, y: r.y + 16.0 }, 16.0, mix(p.text2, p.text, lit));
-            self.spot(r, target);
-            x += MORE;
-            frame.icon(Icon::ChevronRight, Point { x: x + SEPARATOR / 2.0, y: top + 16.0 }, 12.0, p.text3);
-            x += SEPARATOR;
-        }
         for (n, &at) in shown_at.iter().enumerate() {
-            let last = at + 1 == crumbs.len();
-            let w = width_of(at);
+            let last = at + 1 == count;
+            let w = width_shown(at);
             let r = Rect { x, y: top, w, h: 32.0 };
             let target = Target::Crumb(crumbs[at].1.clone());
             let lit = self.fade(&target, Look::Hot, !last && *hot == Some(target.clone()), 0.12);
@@ -595,6 +582,21 @@ impl Organizer {
             }
             x += w;
             if n + 1 < shown_at.len() {
+                frame.icon(Icon::ChevronRight, Point { x: x + SEPARATOR / 2.0, y: top + 16.0 }, 12.0, p.text3);
+                x += SEPARATOR;
+            }
+            // (After the drive, the button listing those between.)
+            if at == 0 && hidden > 0 {
+                let between: Vec<(String, PathBuf)> = crumbs[1..1 + hidden].iter().rev().cloned().collect();
+                let r = Rect { x, y: top, w: MORE, h: 32.0 };
+                let target = Target::CrumbMore(between);
+                let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
+                if lit > 0.0 {
+                    fill(frame, p.hover.alpha(lit), r.x, r.y, r.w, r.h, 6.0);
+                }
+                frame.icon(Icon::Ellipsis, Point { x: r.x + 16.0, y: r.y + 16.0 }, 16.0, mix(p.text2, p.text, lit));
+                self.spot(r, target);
+                x += MORE;
                 frame.icon(Icon::ChevronRight, Point { x: x + SEPARATOR / 2.0, y: top + 16.0 }, 12.0, p.text3);
                 x += SEPARATOR;
             }
