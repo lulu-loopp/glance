@@ -55,16 +55,39 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION StartAsUser
 
+; The pages' own words, in place of NSIS's: each says what happens, not which button to press.
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
+!define MUI_DIRECTORYPAGE_TEXT_TOP "$(DirectoryTop)"
+!define MUI_DIRECTORYPAGE_TEXT_DESTINATION "$(DirectoryBox)"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TITLE "$(FinishTitle)"
+!define MUI_FINISHPAGE_TEXT "$(FinishText)"
+!define MUI_FINISHPAGE_RUN_TEXT "$(FinishRun)"
 !insertmacro MUI_PAGE_FINISH
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "$(RemoveTop)"
+!define MUI_UNCONFIRMPAGE_TEXT_LOCATION "$(RemoveBox)"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
 ; English first: a system in neither language gets the first.
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+LangString DirectoryTop ${LANG_SIMPCHINESE} "Glance 将安装到以下文件夹。"
+LangString DirectoryTop ${LANG_ENGLISH} "Glance will be installed in the folder below."
+LangString DirectoryBox ${LANG_SIMPCHINESE} "安装位置"
+LangString DirectoryBox ${LANG_ENGLISH} "Install location"
+LangString FinishTitle ${LANG_SIMPCHINESE} "Glance 已安装"
+LangString FinishTitle ${LANG_ENGLISH} "Glance is installed"
+LangString FinishText ${LANG_SIMPCHINESE} "Glance 已安装到这台电脑。"
+LangString FinishText ${LANG_ENGLISH} "Glance has been installed on this PC."
+LangString FinishRun ${LANG_SIMPCHINESE} "启动 Glance"
+LangString FinishRun ${LANG_ENGLISH} "Start Glance"
+LangString RemoveTop ${LANG_SIMPCHINESE} "将从这台电脑卸载 Glance。"
+LangString RemoveTop ${LANG_ENGLISH} "Glance will be removed from this PC."
+LangString RemoveBox ${LANG_SIMPCHINESE} "安装位置："
+LangString RemoveBox ${LANG_ENGLISH} "Installed in:"
 
 LangString OpenFolderRefused ${LANG_SIMPCHINESE} "无法安装到所选位置。$\r$\n$\r$\n所选位置不受保护：它的上级文件夹可由普通程序重命名或更改权限，安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n请安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。"
 LangString OpenFolderRefused ${LANG_ENGLISH} "Glance cannot be installed to the selected location.$\r$\n$\r$\nThe location is not protected: a folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nInstall to Program Files, or to a new folder at the root of a drive (for example D:\Glance)."
