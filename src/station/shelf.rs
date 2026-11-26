@@ -151,6 +151,31 @@ pub fn entries(files: &[Arrived]) -> Vec<Entry<'_>> {
     entries
 }
 
+/// Where in `files` (sent from devices nearby) the files of entry `at` of them are (see `entries`): a file sent by
+/// itself, it; a folder sent, all of its files, in their order. None where there is no such entry.
+fn entry_files(files: &[Arrived], at: usize) -> Vec<usize> {
+    let top = match entries(files).get(at) {
+        Some(Entry::File(arrived)) => return files.iter().position(|one| std::ptr::eq(one, *arrived)).into_iter().collect(),
+        Some(Entry::Folder { name, .. }) => name.to_string(),
+        None => return Vec::new(),
+    };
+    files.iter().enumerate().filter(|(_, arrived)| arrived.folder() == Some(top.as_str())).map(|(place, _)| place).collect()
+}
+
+/// Entry `at` of `files` (see `entries`) given out by `name` from now on: a file, as itself; a folder, all its files
+/// under it. Whether there is one.
+fn rename_entry(files: &mut [Arrived], at: usize, name: &str) -> bool {
+    let of = entry_files(files, at);
+    for &place in &of {
+        let arrived = &mut files[place];
+        arrived.name = match arrived.name.split_once('/') {
+            Some((_, under)) => format!("{name}/{under}"),
+            None => name.to_string(),
+        };
+    }
+    !of.is_empty()
+}
+
 /// What a thing on the station is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -220,22 +245,81 @@ impl What {
     fn rename(&mut self, name: &str) -> bool {
         match self {
             What::Picture { name: was, .. } | What::Saved { name: was, words: false, .. } => *was = name.to_string(),
-            What::Came { files } => {
-                let one = match entries(files).as_slice() {
-                    [Entry::File(_)] => false,
-                    [Entry::Folder { .. }] => true,
-                    _ => return false,
-                };
-                for arrived in files.iter_mut() {
-                    arrived.name = match arrived.name.split_once('/') {
-                        Some((_, under)) if one => format!("{name}/{under}"),
-                        _ => name.to_string(),
-                    };
-                }
-            }
-            What::Files { .. } | What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => return false,
+            What::Came { files } if entries(files).len() == 1 => return rename_entry(files, 0, name),
+            What::Files { .. } | What::Came { .. } | What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => return false,
         }
         true
+    }
+
+    /// How many it holds together, each of them its own where it is unfolded (see `part_out`): of files put on it, or
+    /// sent, together, each file or folder; all else is one.
+    pub fn parts(&self) -> usize {
+        match self {
+            What::Files { paths, .. } => paths.len().max(1),
+            What::Came { files } => entries(files).len().max(1),
+            What::Text { .. } | What::Link { .. } | What::Picture { .. } | What::Saved { .. } => 1,
+        }
+    }
+
+    /// Part `at` of what it holds together (see `parts`) taken out of it, as a thing of its own: a file or folder put
+    /// on it, its copy kept with it where one is; a file or folder sent, all of its files. None where it holds no more
+    /// than one, or none at `at`.
+    fn part_out(&mut self, at: usize) -> Option<What> {
+        if self.parts() < 2 || at >= self.parts() {
+            return None;
+        }
+        match self {
+            What::Files { paths, kept } => {
+                let path = paths.remove(at);
+                let copy = (at < kept.len()).then(|| kept.remove(at)).filter(|name| !name.is_empty());
+                Some(What::Files { paths: vec![path], kept: copy.into_iter().collect() })
+            }
+            What::Came { files } => {
+                let of = entry_files(files, at);
+                let mut taken = Vec::with_capacity(of.len());
+                for place in of.into_iter().rev() {
+                    taken.push(files.remove(place));
+                }
+                taken.reverse();
+                Some(What::Came { files: taken })
+            }
+            What::Text { .. } | What::Link { .. } | What::Picture { .. } | What::Saved { .. } => None,
+        }
+    }
+
+    /// The files of its own folder part `at` of it keeps (see `parts`; of one that holds one thing, all it keeps).
+    pub fn part_own_files(&self, at: usize) -> Vec<&str> {
+        match self {
+            What::Files { kept, .. } => kept.get(at).filter(|name| !name.is_empty()).map(String::as_str).into_iter().collect(),
+            What::Came { files } => entry_files(files, at).into_iter().map(|place| files[place].file.as_str()).collect(),
+            _ if at == 0 => self.own_files(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// How part `at` of what it holds together (see `parts`) is renamed: a file or folder put on it, where it is; one
+    /// sent, given out by a name of its own. None for one that holds no more than one (renamed as a whole: see
+    /// `renamed_by`).
+    pub fn part_renamed_by(&self, at: usize) -> Option<Renamed<'_>> {
+        if self.parts() < 2 {
+            return None;
+        }
+        match self {
+            What::Files { paths, .. } => paths.get(at).map(|path| Renamed::There(path)),
+            What::Came { files } => match entries(files).get(at)? {
+                Entry::File(arrived) => Some(Renamed::Own { name: arrived.name.clone(), folder: false }),
+                Entry::Folder { name, .. } => Some(Renamed::Own { name: name.to_string(), folder: true }),
+            },
+            What::Text { .. } | What::Link { .. } | What::Picture { .. } | What::Saved { .. } => None,
+        }
+    }
+
+    /// Part `at` of what was sent together given out by `name` from now on (see `part_renamed_by`). Whether it is.
+    fn rename_part(&mut self, at: usize, name: &str) -> bool {
+        match self {
+            What::Came { files } if entries(files).len() > 1 => rename_entry(files, at, name),
+            _ => false,
+        }
     }
 
     /// Its files where they are, the file or folder at `from` (and what is in it) now at `to`. Whether any was.
@@ -582,6 +666,28 @@ impl Shelf {
         self.items.iter_mut().find(|item| item.id == id).is_some_and(|item| item.what.rename(name))
     }
 
+    /// Part `at` of `id`, sent with others, given out by `name` from now on (see `What::part_renamed_by`). Whether it is.
+    pub fn rename_part(&mut self, id: u64, at: usize, name: &str) -> bool {
+        self.items.iter_mut().find(|item| item.id == id).is_some_and(|item| item.what.rename_part(at, name))
+    }
+
+    /// Part `at` of `id` (see `What::parts`) taken out of it, a thing of its own (with `own_bytes` of what `id` keeps of
+    /// its own), listed just after it: put there when it was, marked as it is, from where it came. Its number; none
+    /// where `id` holds no such part, or no other.
+    pub fn take_part(&mut self, id: u64, at: usize, own_bytes: u64) -> Option<u64> {
+        let place = self.items.iter().position(|item| item.id == id)?;
+        let what = self.items[place].what.part_out(at)?;
+        let number = self.next;
+        self.next += 1;
+        let group = &mut self.items[place];
+        let own_bytes = own_bytes.min(group.own_bytes);
+        group.own_bytes -= own_bytes;
+        let part = Item { id: number, what, own_bytes, ..group.clone() };
+        // (The newest last, the first listed: put before it, it is listed just after it.)
+        self.items.insert(place, part);
+        Some(number)
+    }
+
     /// The file or folder at `from` renamed to `to` (by Glance, or seen so): what holds it, or what is in it, holds
     /// it there. Whether anything does.
     pub fn moved(&mut self, from: &Path, to: &Path) -> bool {
@@ -683,6 +789,55 @@ mod tests {
     /// it came, a file or a folder sent alone) by a name of its own, a folder's files under it. Words, addresses, files
     /// together and sendings of several have none. A file or folder renamed where it is is followed by what holds it,
     /// or what is in it, and nothing else.
+    /// Files put on it, or sent, together are each a part of what holds them (a folder sent, one part with all its
+    /// files): each renamed by itself, and taken out of it as a thing of its own, listed just after it, as it was put
+    /// there and marked as it is. What holds one alone has no parts to take out.
+    #[test]
+    fn what_holds_files_together_gives_each_its_own() {
+        let arrived = |name: &str| Arrived { file: format!("n1-{name}"), name: name.into() };
+        let mut shelf = Shelf::default();
+        let lone = shelf.put(text("a"), 1, false, false, 0);
+        let put = shelf.put(What::Files { paths: vec![r"D:\a.jpg".into(), r"D:\b.jpg".into(), r"D:\c.jpg".into()], kept: vec!["k-a".into(), String::new(), "k-c".into()] }, 5, false, false, 30);
+        let sent = shelf.put(What::Came { files: vec![arrived("x.jpg"), arrived("资料/p.pdf"), arrived("y.jpg"), arrived("资料/图/q.png")] }, 9, false, false, 40);
+        shelf.pin(put, true, 5);
+        assert_eq!([lone, put, sent].map(|id| shelf.get(id).unwrap().what.parts()), [1, 3, 3]);
+        // Renamed each by itself: one put on it where it is, one sent by a name of its own (a folder, all under it).
+        let named = |shelf: &Shelf, id: u64, at: usize| shelf.get(id).unwrap().what.part_renamed_by(at).map(|renamed| match renamed {
+            Renamed::There(path) => path.display().to_string(),
+            Renamed::Own { name, folder } => format!("{name}{}", if folder { "/" } else { "" }),
+        });
+        assert_eq!((0..3).map(|at| named(&shelf, put, at)).collect::<Vec<_>>(), [Some(r"D:\a.jpg".into()), Some(r"D:\b.jpg".into()), Some(r"D:\c.jpg".into())]);
+        assert_eq!((0..4).map(|at| named(&shelf, sent, at)).collect::<Vec<_>>(), [Some("x.jpg".into()), Some("资料/".into()), Some("y.jpg".into()), None]);
+        assert_eq!(named(&shelf, lone, 0), None);
+        assert!(shelf.rename_part(sent, 1, "旧资料") && shelf.rename_part(sent, 2, "海.jpg"));
+        assert!(!shelf.rename_part(put, 0, "b") && !shelf.rename(sent, "b"));
+        let names = |shelf: &Shelf, id: u64| match &shelf.get(id).unwrap().what {
+            What::Came { files } => files.iter().map(|one| one.name.clone()).collect::<Vec<_>>(),
+            What::Files { paths, kept } => paths.iter().map(|path| path.display().to_string()).chain(kept.iter().map(|name| format!("kept {name}"))).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(names(&shelf, sent), ["x.jpg", "旧资料/p.pdf", "海.jpg", "旧资料/图/q.png"]);
+        assert_eq!(shelf.get(sent).unwrap().what.part_own_files(1), ["n1-资料/p.pdf", "n1-资料/图/q.png"]);
+        // Taken out: a thing of its own, its copy (its files) with it, listed just after it, as it was put there.
+        let folder = shelf.take_part(sent, 1, 15).unwrap();
+        assert_eq!(names(&shelf, folder), ["旧资料/p.pdf", "旧资料/图/q.png"]);
+        assert_eq!(names(&shelf, sent), ["x.jpg", "海.jpg"]);
+        assert_eq!((shelf.get(sent).unwrap().own_bytes, shelf.get(folder).unwrap().own_bytes), (25, 15));
+        let b = shelf.take_part(put, 1, 0).unwrap();
+        let c = shelf.take_part(put, 1, 20).unwrap();
+        assert_eq!(names(&shelf, put), [r"D:\a.jpg", "kept k-a"]);
+        assert_eq!(names(&shelf, b), [r"D:\b.jpg"]);
+        assert_eq!(names(&shelf, c), [r"D:\c.jpg", "kept k-c"]);
+        let part = shelf.get(c).unwrap();
+        assert_eq!((part.added_ms, part.pinned, part.own_bytes), (5, true, 20));
+        let order = |filter: Filter| listed(&shelf.items, false, filter, false).every().iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(order(Filter::All), [put, c, b, sent, folder, lone]);
+        // One alone, nothing taken out of it.
+        assert_eq!(shelf.take_part(put, 0, 0), None);
+        assert_eq!(shelf.take_part(lone, 0, 0), None);
+        assert_eq!(shelf.take_part(sent, 2, 0), None);
+    }
+
     #[test]
     fn what_has_a_name_is_renamed() {
         let arrived = |name: &str| Arrived { file: format!("n1-{name}"), name: name.into() };

@@ -405,6 +405,47 @@ impl Keep {
         }
     }
 
+    /// Part `at` of `id`, sent with others, given out by `name` from now on (see `Shelf::rename_part`).
+    pub fn rename_part(&mut self, id: u64, at: usize, name: &str) {
+        if self.shelf.rename_part(id, at, name) {
+            self.save();
+        }
+    }
+
+    /// The bytes part `at` of `id` keeps of its own (see `What::part_own_files`).
+    fn part_bytes(&self, id: u64, at: usize) -> u64 {
+        let Some(item) = self.shelf.get(id) else { return 0 };
+        item.what.part_own_files(at).into_iter().filter_map(|name| std::fs::metadata(self.folder.path(name)).ok()).map(|kept| kept.len()).sum()
+    }
+
+    /// Part `at` of `id` taken out of it, a thing of its own listed just after it (see `Shelf::take_part`): its number.
+    pub fn take_part(&mut self, id: u64, at: usize) -> Option<u64> {
+        let taken = self.shelf.take_part(id, at, self.part_bytes(id, at));
+        if taken.is_some() {
+            self.save();
+        }
+        taken
+    }
+
+    /// All `id` holds together each a thing of its own, listed in its order where it was (see `Shelf::take_part`).
+    pub fn split(&mut self, id: u64) {
+        let parts = self.shelf.get(id).map_or(0, |item| item.what.parts());
+        // (The last first: each taken out listed just after it, before those taken out after it.)
+        for at in (1..parts).rev() {
+            self.shelf.take_part(id, at, self.part_bytes(id, at));
+        }
+        if parts > 1 {
+            self.save();
+        }
+    }
+
+    /// Part `at` of `id` taken off it, its own files with it (see `remove`).
+    pub fn remove_part(&mut self, id: u64, at: usize) {
+        if let Some(part) = self.take_part(id, at) {
+            self.remove(part);
+        }
+    }
+
     /// The file or folder at `from` renamed to `to`: what holds it holds it there (see `Shelf::moved`).
     pub fn moved(&mut self, from: &std::path::Path, to: &std::path::Path) {
         if self.shelf.moved(from, to) {
@@ -466,6 +507,37 @@ mod tests {
         let dir = crate::settings::local_dir().join(format!("keep-{test}"));
         let _ = std::fs::remove_dir_all(&dir);
         Keep::open(Folder::at(dir), rules, false)
+    }
+
+    /// What was sent together, split, is each a thing of its own in the order it came, keeping its own files and the
+    /// bytes of them; a part taken off goes with its files, the rest staying as they were.
+    #[test]
+    fn what_was_sent_together_is_split_in_its_order() {
+        let mut keep = keep("split", Rules::default());
+        let made: Vec<(PathBuf, String, u64)> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+            .iter()
+            .enumerate()
+            .map(|(at, name)| {
+                let source = crate::settings::local_dir().join(format!("keep-split-{name}"));
+                std::fs::write(&source, vec![7u8; at + 1]).unwrap();
+                (source, name.to_string(), at as u64 + 1)
+            })
+            .collect();
+        let device = super::super::shelf::Device { alias: "Fold".into(), fingerprint: "f".into(), kind: None };
+        keep.arrived("s", &made, device, 10).unwrap();
+        let id = keep.shelf.items[0].id;
+        assert_eq!(keep.shelf.items[0].own_bytes, 10);
+        keep.remove_part(id, 3);
+        let names = |keep: &Keep| super::super::shelf::listed(&keep.shelf.items, false, super::super::shelf::Filter::All, false).every().iter().map(|item| match &item.what {
+            What::Came { files } => (files.iter().map(|one| one.name.as_str()).collect::<Vec<_>>().join(","), item.own_bytes),
+            _ => unreachable!(),
+        }).map(|(names, bytes)| format!("{names} {bytes}")).collect::<Vec<_>>();
+        assert_eq!(names(&keep), ["a.jpg,b.jpg,c.jpg 6"]);
+        keep.split(id);
+        assert_eq!(names(&keep), ["a.jpg 1", "b.jpg 2", "c.jpg 3"]);
+        // (Each its own file given out still.)
+        let given: Vec<Option<Content>> = keep.shelf.items.iter().map(|item| keep.content_of(item)).collect();
+        assert!(given.iter().all(|one| matches!(one, Some(Content::Files(paths)) if paths.len() == 1 && paths[0].exists())), "{given:?}");
     }
 
     #[test]

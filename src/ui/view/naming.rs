@@ -10,6 +10,8 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Named {
     Item(u64),
+    /// Part of what a thing holds together (see `Hit::Part`).
+    Part(u64, usize),
     Recent(crate::station::recent::Entry),
     Tag(u32),
     App(u64),
@@ -20,6 +22,7 @@ impl Named {
     pub fn names(self, hit: Hit) -> bool {
         match (self, hit) {
             (Named::Item(id), Hit::Shelf(of) | Hit::Copied(of)) => id == of,
+            (Named::Part(id, at), Hit::Part(of, part)) => (id, at) == (of, part),
             (Named::Recent(entry), Hit::Recent(of)) => entry == of,
             (Named::App(number), Hit::App(of)) => number == of,
             _ => false,

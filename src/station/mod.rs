@@ -140,6 +140,17 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             *last = (!again).then(|| (id, std::time::Instant::now()));
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
+        // Part of what one holds together: as a thing on it is.
+        Hit::Part(id, part) => {
+            static LAST_PART: std::sync::Mutex<Option<((u64, usize), std::time::Instant)>> = std::sync::Mutex::new(None);
+            let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
+            let mut last = LAST_PART.lock().unwrap();
+            let again = last.is_some_and(|(was, at)| was == (id, part) && at.elapsed() <= double);
+            *last = (!again).then(|| ((id, part), std::time::Instant::now()));
+            run::ask(run::Ask::Part(id, part, if again { run::PartAct::Open } else { run::PartAct::Copy }));
+        }
+        // The count on what holds things together: they shown under it, or no longer.
+        Hit::Unfold(thing) => unfold(thing),
         // Its pin: pinned, or not any more. What is pinned, where it is listed first: folded away, or shown.
         Hit::PinThing(thing) => pin(&[thing], !marks(&[thing]).0),
         Hit::PinsHead(page) => {
@@ -178,6 +189,20 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
     true
 }
 
+/// What holds things together (`thing`: one on the station or copied lately, files come lately together) shown with them
+/// under it, each its own, or no longer (see `run::Shown::unfolded`).
+pub fn unfold(thing: Thing) {
+    let shown = run::shown();
+    run::ask(match thing {
+        Thing::Item(id) => run::Ask::Unfold(run::Unfolded::Item(id), !shown.unfolds(id)),
+        Thing::Recent(entry) => {
+            let keys: Vec<recent::Key> = recent::files_of(&recent::shown(), entry).iter().map(|came| came.key).collect();
+            let on = !shown.unfolds_files(keys.iter());
+            run::Ask::Unfold(run::Unfolded::Files(keys), on)
+        }
+    });
+}
+
 /// What a thing on the station's menu does: put it on the clipboard, open it, show it in Explorer, pin it (or not), tag
 /// it (`Tags`, the row opening the tags, `Tag` one of them by its number, `NewTag` one made: see `tags_row`), send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key: see
 /// `send::menu_row`), take it off.
@@ -194,6 +219,24 @@ pub enum Choice {
     NewTag,
     Send,
     SendTo(u64),
+    /// All it holds together each a thing of its own (see `keep::Keep::split`).
+    Split,
+    Remove,
+}
+
+/// What the menu of part of what a thing holds together does (see `part_menu`): put it on the clipboard, open it, look at
+/// it, show it in Explorer, rename it, send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of
+/// them by its key), take it out of what holds it as a thing of its own, take it off.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PartChoice {
+    Copy,
+    Open,
+    Preview,
+    Show,
+    Rename,
+    Send,
+    SendTo(u64),
+    TakeOut,
     Remove,
 }
 
@@ -272,20 +315,50 @@ pub fn tag_menu(id: u32, at: windows::Win32::Foundation::POINT, over_the_panel: 
 /// `rename_there`), one the station keeps itself given out by the name written from now on (a picture never renamed
 /// written in as what it is, of its kind).
 pub fn renaming(thing: Thing) -> Option<crate::ui::naming::Naming> {
+    renamed(match thing {
+        Thing::Item(id) => Renaming::Item(id),
+        Thing::Recent(entry) => Renaming::Recent(entry),
+    })
+}
+
+/// What is renamed where it shows (see `renamed`): a thing on the station, part of what one holds together, a file come
+/// lately.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Renaming {
+    Item(u64),
+    Part(u64, usize),
+    Recent(recent::Entry),
+}
+
+/// How `what` is renamed where it shows (see `ui::naming`), where it has a name to rename (see `renaming`; part of what a
+/// thing holds together as `shelf::What::part_renamed_by` says).
+pub fn renamed(what: Renaming) -> Option<crate::ui::naming::Naming> {
     use crate::ui::naming::Naming;
     use crate::ui::view::naming::Named;
     let lang = crate::update::language();
-    let of = match thing {
-        Thing::Item(id) => Named::Item(id),
-        Thing::Recent(entry) => Named::Recent(entry),
+    let of = match what {
+        Renaming::Item(id) => Named::Item(id),
+        Renaming::Part(id, at) => Named::Part(id, at),
+        Renaming::Recent(entry) => Named::Recent(entry),
     };
     let there = |path: std::path::PathBuf| {
         let folder = thumbs::looked(&path) == Some(thumbs::Looked::Folder);
         let name = path.file_name()?.to_string_lossy().into_owned();
         Some(Naming::file(of, name, folder, lang, move |written| rename_there(&path, written, lang)))
     };
-    match thing {
-        Thing::Item(id) => {
+    match what {
+        Renaming::Part(id, at) => {
+            let shown = run::shown();
+            let item = shown.items.iter().find(|item| item.id == id)?;
+            match item.what.part_renamed_by(at)? {
+                shelf::Renamed::There(path) => there(path.to_path_buf()),
+                shelf::Renamed::Own { name, folder } => Some(Naming::file(of, name, folder, lang, move |written| {
+                    run::ask(run::Ask::Part(id, at, run::PartAct::Rename(written.to_string())));
+                    Ok(())
+                })),
+            }
+        }
+        Renaming::Item(id) => {
             let shown = run::shown();
             let item = shown.items.iter().find(|item| item.id == id)?;
             match item.what.renamed_by()? {
@@ -305,8 +378,8 @@ pub fn renaming(thing: Thing) -> Option<crate::ui::naming::Naming> {
                 }
             }
         }
-        Thing::Recent(entry @ recent::Entry::File(_)) => there(recent::paths_of(entry)?.into_iter().next()?),
-        Thing::Recent(recent::Entry::Burst(..)) => None,
+        Renaming::Recent(entry @ recent::Entry::File(_)) => there(recent::paths_of(entry)?.into_iter().next()?),
+        Renaming::Recent(recent::Entry::Burst(..)) => None,
     }
 }
 
@@ -359,6 +432,8 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
         rows.push((Choice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false));
     }
     rows.push((Choice::Pin, if item.pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
+    // (What holds things together: each made a thing of its own, after "发送到".)
+    let splits = item.what.parts() > 1;
     rows.push((Choice::Remove, lang.pick("移除", "Remove"), Icon::Trash, true));
     let stays_here = item.stays_here;
     let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
@@ -370,9 +445,117 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     let (send, keys) = send::menu_row(stays_here);
     items.insert(items.len() - 1, send);
     choices.insert(choices.len() - 1, Choice::Send);
+    if splits {
+        items.insert(items.len() - 1, Item::new(lang.pick("拆分为单独项目", "Split into separate items"), Some(crate::ui::menu::Mark::Icon(Icon::Ungroup)), false, false));
+        choices.insert(choices.len() - 1, Choice::Split);
+    }
     choices.extend(tagged.into_iter().chain(keys.into_iter().map(Choice::SendTo)));
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, choices))
+}
+
+/// The menu of part `part` of what the thing `id` on the station holds together (a right click on it, shown under it),
+/// at `at` on the screen (`over_the_panel`: as `Menu::open_at` says): up, with what its rows do.
+pub fn part_menu(id: u64, part: usize, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<PartChoice>)> {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Menu};
+    let shown = run::shown();
+    let item = shown.items.iter().find(|item| item.id == id).filter(|item| part < item.what.parts() && item.what.parts() > 1)?;
+    let lang = crate::update::language();
+    let mut rows: Vec<(PartChoice, &'static str, Icon, bool)> = vec![
+        (PartChoice::Copy, lang.pick("复制", "Copy"), Icon::Clipboard, false),
+        (PartChoice::Open, lang.pick("打开", "Open"), Icon::File, false),
+        (PartChoice::Preview, lang.pick("预览", "Preview"), Icon::Image, false),
+        (PartChoice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false),
+    ];
+    if item.what.part_renamed_by(part).is_some() {
+        rows.push((PartChoice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false));
+    }
+    rows.push((PartChoice::TakeOut, lang.pick("移出此组", "Take out of group"), Icon::ArrowUpFromLine, true));
+    rows.push((PartChoice::Remove, lang.pick("移除", "Remove"), Icon::Trash, false));
+    let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
+    let mut choices: Vec<PartChoice> = rows.into_iter().map(|(choice, ..)| choice).collect();
+    // "发送到" before the rule, its devices chosen after all its rows (see `Menu::sub_choice`).
+    let (send, keys) = send::menu_row(item.stays_here);
+    let before = choices.len() - 2;
+    items.insert(before, send);
+    choices.insert(before, PartChoice::Send);
+    choices.extend(keys.into_iter().map(PartChoice::SendTo));
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
+    Some((menu, choices))
+}
+
+/// What the menu of a file the look shows does (see `given_menu`): put it on the clipboard, open it, show it in
+/// Explorer, send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GivenChoice {
+    Copy,
+    Open,
+    Show,
+    Send,
+    SendTo(u64),
+}
+
+/// The menu of `given`, a file the look shows (one of files together, or the one it shows: see `ui::look`), at `at`
+/// on the screen (`over_the_panel`: as `Menu::open_at` says): up, with what its rows do.
+pub fn given_menu(given: &run::Given, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<GivenChoice>)> {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Mark, Menu};
+    let lang = crate::update::language();
+    let stays_here = match given {
+        run::Given::Item(id) | run::Given::Part(id, _) => run::shown().items.iter().any(|item| item.id == *id && item.stays_here),
+        run::Given::Files(_) => false,
+    };
+    let rows = [
+        (GivenChoice::Copy, lang.pick("复制", "Copy"), Icon::Clipboard),
+        (GivenChoice::Open, lang.pick("打开", "Open"), Icon::File),
+        (GivenChoice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel),
+    ];
+    let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon)| Item::new(*label, Some(Mark::Icon(*icon)), false, false)).collect();
+    let mut choices: Vec<GivenChoice> = rows.iter().map(|(choice, ..)| *choice).collect();
+    // "发送到" last, its devices chosen after all its rows (see `Menu::sub_choice`).
+    let (send, keys) = send::menu_row(stays_here);
+    items.push(send);
+    choices.push(GivenChoice::Send);
+    choices.extend(keys.into_iter().map(GivenChoice::SendTo));
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
+    Some((menu, choices))
+}
+
+/// `choice` made in the menu of `given`, a file the look shows (see `given_menu`): done, on the station's thread.
+/// Opened, the look goes, as its own button to open it does.
+pub fn given_chose(given: run::Given, choice: GivenChoice) {
+    use run::{FilesAct, Given, PartAct};
+    let act = |given: Given, files: FilesAct, part: PartAct, item: fn(u64) -> run::Ask| match given {
+        Given::Item(id) => item(id),
+        Given::Part(id, at) => run::Ask::Part(id, at, part),
+        Given::Files(paths) => run::Ask::Files(paths, files),
+    };
+    run::ask(match choice {
+        GivenChoice::Copy => act(given, FilesAct::Copy(None), PartAct::Copy, run::Ask::Copy),
+        GivenChoice::Open => {
+            crate::ui::look::close();
+            act(given, FilesAct::Open, PartAct::Open, run::Ask::Open)
+        }
+        GivenChoice::Show => act(given, FilesAct::Show, PartAct::Show, run::Ask::Show),
+        GivenChoice::SendTo(key) => run::Ask::SendTo(vec![given], key),
+        GivenChoice::Send => return,
+    });
+}
+
+/// `choice` made in the menu of part `part` of the thing `id` (see `part_menu`): done, on the station's thread.
+pub fn part_chose(id: u64, part: usize, choice: PartChoice) {
+    use run::PartAct;
+    run::ask(match choice {
+        PartChoice::Copy => run::Ask::Part(id, part, PartAct::Copy),
+        PartChoice::Open => run::Ask::Part(id, part, PartAct::Open),
+        PartChoice::Show => run::Ask::Part(id, part, PartAct::Show),
+        PartChoice::TakeOut => run::Ask::Part(id, part, PartAct::TakeOut),
+        PartChoice::Remove => run::Ask::Part(id, part, PartAct::Remove),
+        PartChoice::SendTo(key) => run::Ask::SendTo(vec![run::Given::Part(id, part)], key),
+        // (Looked at, and renamed where it shows, by what the menu was up on: see `Controller::end_menu`.)
+        PartChoice::Preview | PartChoice::Rename | PartChoice::Send => return,
+    });
 }
 
 /// `choice` made in the menu of the thing `id` on the station (see `menu`): done, on the station's thread.
@@ -391,6 +574,7 @@ pub fn chose(id: u64, choice: Choice) {
         Choice::Tag(tag) => return turn_tag(&[thing], tag),
         Choice::Send => return,
         Choice::SendTo(key) => run::Ask::SendTo(vec![run::Given::Item(id)], key),
+        Choice::Split => run::Ask::Split(id),
         Choice::Remove => run::Ask::Remove(id),
     });
 }
@@ -421,6 +605,7 @@ fn given(hits: &[crate::ui::view::Hit]) -> Vec<run::Given> {
     hits.iter()
         .filter_map(|hit| match *hit {
             Hit::Shelf(id) | Hit::Copied(id) => Some(run::Given::Item(id)),
+            Hit::Part(id, at) => Some(run::Given::Part(id, at)),
             Hit::Recent(entry) => recent::paths_of(entry).map(run::Given::Files),
             _ => None,
         })
@@ -453,7 +638,8 @@ pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item], came: 
     let item = |id: u64| items.iter().find(|item| item.id == id);
     let ids: Vec<u64> = hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None }).collect();
     let recent = hits.iter().any(|hit| matches!(hit, Hit::Recent(_)));
-    let files = recent || ids.iter().filter_map(|id| item(*id)).any(|item| matches!(item.what, shelf::What::Files { .. } | shelf::What::Picture { .. } | shelf::What::Saved { words: false, .. } | shelf::What::Came { .. }));
+    let parts = hits.iter().any(|hit| matches!(hit, Hit::Part(..)));
+    let files = recent || parts || ids.iter().filter_map(|id| item(*id)).any(|item| matches!(item.what, shelf::What::Files { .. } | shelf::What::Picture { .. } | shelf::What::Saved { words: false, .. } | shelf::What::Came { .. }));
     let mut choices = vec![ManyChoice::Copy];
     if files {
         choices.push(ManyChoice::Show);
@@ -464,7 +650,7 @@ pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item], came: 
     let things: Vec<Thing> = hits.iter().filter_map(|hit| Thing::of(*hit)).collect();
     choices.push(ManyChoice::Pin(!marks_among(&things, items, came).0));
     choices.extend([ManyChoice::Tags, ManyChoice::Send]);
-    if !ids.is_empty() {
+    if !ids.is_empty() || parts {
         choices.push(ManyChoice::Remove);
     }
     choices
@@ -481,7 +667,7 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
     let items_held = &shown.items;
     let mut choices = many_choices(hits, items_held, &recent::shown());
     // (Sent all together: none where one of them may not leave this PC.)
-    let stays_here = hits.iter().any(|hit| matches!(hit, Hit::Shelf(id) | Hit::Copied(id) if items_held.iter().any(|item| item.id == *id && item.stays_here)));
+    let stays_here = hits.iter().any(|hit| matches!(hit, Hit::Shelf(id) | Hit::Copied(id) | Hit::Part(id, _) if items_held.iter().any(|item| item.id == *id && item.stays_here)));
     let things: Vec<Thing> = hits.iter().filter_map(|hit| Thing::of(*hit)).collect();
     let (tags, tagged) = tags_row(&things, ManyChoice::Tag, ManyChoice::NewTag);
     let (send, keys) = send::menu_row(stays_here);
@@ -527,6 +713,10 @@ pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
         ManyChoice::Send => {}
         ManyChoice::SendTo(key) => run::ask(run::Ask::SendTo(given(hits), key)),
         ManyChoice::Remove => {
+            // (Parts of one, the last first: each taken off leaves those before it where they were.)
+            let mut parts: Vec<(u64, usize)> = hits.iter().filter_map(|hit| if let Hit::Part(id, at) = hit { Some((*id, *at)) } else { None }).collect();
+            parts.sort_by(|one, other| other.cmp(one));
+            parts.into_iter().for_each(|(id, at)| run::ask(run::Ask::Part(id, at, run::PartAct::Remove)));
             ids().for_each(|id| run::ask(run::Ask::Remove(id)));
             select::change(select::Chosen::clear);
         }

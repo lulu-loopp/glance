@@ -311,6 +311,9 @@ pub struct Controller {
     widgets_seen: AtomicBool,
     /// The workbench asked for from a notification, not yet opened, and the to-do to light in it (see `open_todo`).
     todo_asked: Mutex<Option<Option<String>>>,
+    /// The menu of a file the look shows asked for by a right click on it, not yet up: what it is, where the pointer
+    /// was, and how the look is drawn (see `look_menu`).
+    look_menu_asked: Mutex<Option<(crate::station::run::Given, POINT, crate::ui::menu::Look)>>,
 }
 
 impl Controller {
@@ -330,6 +333,7 @@ impl Controller {
             widget_processes: AtomicBool::new(false),
             widgets_seen: AtomicBool::new(false),
             todo_asked: Mutex::new(None),
+            look_menu_asked: Mutex::new(None),
         }
     }
 
@@ -509,6 +513,13 @@ impl Controller {
     pub fn open_todo(&self, key: Option<String>) {
         *self.todo_asked.lock().unwrap() = Some(key);
         self.post(OPEN_TODO);
+    }
+
+    /// The menu of `given`, a file the look shows, up at `at` on the screen as `look` (from the look's thread, on a right
+    /// click on it): up on this thread, which runs the menus (see `station::given_menu`).
+    pub fn look_menu(&self, given: crate::station::run::Given, at: POINT, look: crate::ui::menu::Look) {
+        *self.look_menu_asked.lock().unwrap() = Some((given, at, look));
+        self.post(WAKE);
     }
 
     /// Whether a desktop widget was put away that can be brought back.
@@ -761,6 +772,14 @@ impl Controller {
             if widgets.writing_menu_was_asked() {
                 self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                 menu = widgets.take_writing_menu_asked(panels[0].lang, panels.iter().any(Panel::is_shown)).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));
+                keep_menu_above(&menu, &mut overlay);
+            }
+            // The menu of a file the look shows, asked for on it (see `look_menu`): over the look, the panel it is up from
+            // staying.
+            let look_menu = self.look_menu_asked.lock().unwrap().take();
+            if let Some((given, at, look)) = look_menu {
+                self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                menu = crate::station::given_menu(&given, at, true, look).map(|(open, choices)| (open, MenuFor::Given(given, choices)));
                 keep_menu_above(&menu, &mut overlay);
             }
             if !got {
@@ -1545,10 +1564,11 @@ impl Controller {
                     let panel_shown = panels.iter().any(Panel::is_shown);
                     let hit = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).map(of_thing);
                     // (On one of several chosen together: their menu.)
-                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(msg.hwnd.0 as isize, hit, widgets.page_of(msg.hwnd), widgets.lane_whole(msg.hwnd)));
+                    let together = hit.filter(|hit| hit.drags()).map_or_else(Vec::new, |hit| crate::station::select::menu_on(msg.hwnd.0 as isize, hit, widgets.page_of(msg.hwnd), widgets.lane_whole(msg.hwnd)));
                     menu = match hit {
                         Some(_) if !together.is_empty() => cursor_position().and_then(|at| crate::station::many_menu(&together, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Many(together, choices))),
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
+                        Some(Hit::Part(id, part)) => cursor_position().and_then(|at| crate::station::part_menu(id, part, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Part(id, part, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         Some(hit) if hit.tag().is_some() => hit.tag().zip(cursor_position()).and_then(|(tag, at)| crate::station::tag_menu(tag, at, panel_shown, widgets.look_of(msg.hwnd)).map(|(open, choices, name)| (open, MenuFor::Tag(tag, name, choices)))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
@@ -1563,13 +1583,13 @@ impl Controller {
                 WM_RBUTTONUP if owner.is_some() => {
                     let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam)).map(of_thing);
                     let look = panels[owner.unwrap()].menu_look();
-                    if hit.is_some_and(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_)) || hit.tag().is_some()) {
+                    if hit.is_some_and(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Part(..) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_)) || hit.tag().is_some()) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu_of = owner.map(MenuOn::Panel);
                     }
                     let panel = &panels[owner.unwrap()];
-                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab, view::lane_whole(&panel.hits)));
+                    let together = hit.filter(|hit| hit.drags()).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab, view::lane_whole(&panel.hits)));
                     match hit {
                         // On one of several chosen together: their menu.
                         Some(_) if !together.is_empty() => {
@@ -1578,6 +1598,10 @@ impl Controller {
                         }
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => {
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true, look)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
+                        Some(Hit::Part(id, part)) => {
+                            menu = cursor_position().and_then(|at| crate::station::part_menu(id, part, at, true, look)).map(|(open, choices)| (open, MenuFor::Part(id, part, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(hit) if hit.tag().is_some() => {
@@ -2004,6 +2028,11 @@ enum MenuFor {
     Overlay,
     /// A thing on the station, by its number, what each row does, and the widget it was opened on (none: the panel).
     Station(u64, Vec<crate::station::Choice>, Option<HWND>),
+    /// Part of what a thing on the station holds together (by the thing's number and its place), what each row does,
+    /// and the widget it was opened on (none: the panel).
+    Part(u64, usize, Vec<crate::station::PartChoice>, Option<HWND>),
+    /// A file the look shows, as it gives it, and what each row does (see `station::given_menu`).
+    Given(crate::station::run::Given, Vec<crate::station::GivenChoice>),
     /// The station's head's (see `station::head_menu`).
     /// (And the widget it was opened on: none, the panel.)
     StationHead(Vec<crate::station::HeadChoice>, Option<HWND>),
@@ -2043,7 +2072,7 @@ impl MenuFor {
     /// The devices its "发送到" lists (where it has one), listed again in `open` where they changed: what each of them
     /// is chosen as with them (after all its own rows: see `Menu::sub_choice`).
     fn devices_again(&mut self, open: &mut crate::ui::menu::Menu) {
-        use crate::station::{Choice, ManyChoice, RecentChoice};
+        use crate::station::{Choice, GivenChoice, ManyChoice, PartChoice, RecentChoice};
         fn again<C: PartialEq>(open: &mut crate::ui::menu::Menu, choices: &mut Vec<C>, row: C, to: fn(u64) -> C, is: fn(&C) -> bool) {
             let Some(at) = choices.iter().position(|choice| *choice == row) else { return };
             let Some((more, keys)) = crate::station::send::menu_row_again() else { return };
@@ -2054,6 +2083,8 @@ impl MenuFor {
         }
         match self {
             MenuFor::Station(_, choices, _) => again(open, choices, Choice::Send, Choice::SendTo, |choice| matches!(choice, Choice::SendTo(_))),
+            MenuFor::Part(_, _, choices, _) => again(open, choices, PartChoice::Send, PartChoice::SendTo, |choice| matches!(choice, PartChoice::SendTo(_))),
+            MenuFor::Given(_, choices) => again(open, choices, GivenChoice::Send, GivenChoice::SendTo, |choice| matches!(choice, GivenChoice::SendTo(_))),
             MenuFor::Many(_, choices) => again(open, choices, ManyChoice::Send, ManyChoice::SendTo, |choice| matches!(choice, ManyChoice::SendTo(_))),
             MenuFor::Recent(_, choices) => again(open, choices, RecentChoice::Send, RecentChoice::SendTo, |choice| matches!(choice, RecentChoice::SendTo(_))),
             _ => {}
@@ -2222,6 +2253,26 @@ impl Controller {
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
+            MenuFor::Part(id, part, choices, on) => match choice.and_then(|row| choices.get(row)) {
+                // Looked at larger where it was chosen: on the widget, or on the panel.
+                Some(crate::station::PartChoice::Preview) => {
+                    if let Some(window) = on.or_else(|| menu_panel.and_then(|at| panels.get(at)).map(|panel| panel.window.hwnd)) {
+                        look_at(panels, widgets, window, Hit::Part(id, part), false);
+                    }
+                }
+                Some(crate::station::PartChoice::Rename) => {
+                    if let Some(naming) = crate::station::renamed(crate::station::Renaming::Part(id, part)) {
+                        name(naming, panels, widgets);
+                    }
+                }
+                Some(choice) => crate::station::part_chose(id, part, *choice),
+                None => {}
+            },
+            MenuFor::Given(given, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::given_chose(given, *choice);
+                }
+            }
             MenuFor::Tag(tag, tag_name, choices) => match choice.and_then(|row| choices.get(row)) {
                 Some(crate::station::TagChoice::Rename) => name(crate::ui::naming::Naming::tag(tag, tag_name), panels, widgets),
                 Some(crate::station::TagChoice::Remove) => crate::station::run::ask(crate::station::run::Ask::RemoveTag(tag)),

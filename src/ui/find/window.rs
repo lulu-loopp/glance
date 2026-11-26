@@ -2302,6 +2302,7 @@ fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
             open: Some(Ask::Files(vec![path.clone()], FilesAct::Open)),
             copy: Some(if row.kind == Kind::Folder { Ask::CopyText(path.display().to_string(), None) } else { Ask::Files(vec![path.clone()], FilesAct::Copy(None)) }),
             pastes: false,
+            given: None,
         }),
         What::Item(id) => {
             let hit = if row.kind == Kind::Copied { crate::ui::view::Hit::Copied(*id) } else { crate::ui::view::Hit::Shelf(*id) };
@@ -2319,6 +2320,7 @@ fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
                 open: None,
                 copy: Some(Ask::CopyText(note.text.clone(), None)),
                 pastes: false,
+                given: None,
             })
         }
         What::Program(_) | What::Page(_) | What::Todo(_) | What::Answer(_) | What::Url(_) => None,

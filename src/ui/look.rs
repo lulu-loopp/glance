@@ -34,7 +34,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetCapture, 
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetCursor,
     SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, ASFW_ANY, CS_DBLCLKS, GA_ROOT, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER,
+    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Matrix3x2;
@@ -47,7 +47,7 @@ use super::motion::Easing;
 use super::text::Lang;
 use super::theme::{self, Skin, Theme};
 use super::view::Rect;
-use crate::station::run::Ask;
+use crate::station::run::{Ask, FilesAct, Given, PartAct};
 
 mod pane;
 mod play;
@@ -68,6 +68,17 @@ pub struct Item {
     pub copy: Option<Ask>,
     /// Its main button pastes it where the keyboard is (words on the station), rather than opening it.
     pub pastes: bool,
+    /// What it gives dragged off the sheet (see `drag_out`): none, the file shown where it is.
+    pub given: Option<Given>,
+}
+
+/// One of files shown together (see `Shows::Files`): where it is, the name it shows by (one the station keeps, the
+/// name it came by), and what it gives by itself, dragged off, opened, copied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Together {
+    pub path: PathBuf,
+    pub name: String,
+    pub given: Given,
 }
 
 /// What is looked at: words as they are (text on the station, a web address, a note); words kept in a file (text on
@@ -78,7 +89,7 @@ pub enum Shows {
     Words(String),
     Kept(PathBuf),
     File(PathBuf),
-    Files(Vec<PathBuf>),
+    Files(Vec<Together>),
 }
 
 /// A look asked for: at `items[at]`, the others had by the arrows, called up from the window `owner` (whose clicks are
@@ -474,6 +485,27 @@ struct Member {
     folder: bool,
     size: Option<u64>,
     written: Option<u64>,
+    /// What it gives by itself, where that is not the file where it is (see `Together::given`).
+    given: Option<Given>,
+}
+
+impl Member {
+    /// What it gives by itself (see `given`).
+    fn gives(&self) -> Given {
+        self.given.clone().unwrap_or_else(|| Given::Files(vec![self.path.clone()]))
+    }
+}
+
+/// What opens `given` (`open`) or puts it on the clipboard.
+fn asked(given: Given, open: bool) -> Ask {
+    match (given, open) {
+        (Given::Item(id), true) => Ask::Open(id),
+        (Given::Item(id), false) => Ask::Copy(id),
+        (Given::Part(id, at), true) => Ask::Part(id, at, PartAct::Open),
+        (Given::Part(id, at), false) => Ask::Part(id, at, PartAct::Copy),
+        (Given::Files(paths), true) => Ask::Files(paths, FilesAct::Open),
+        (Given::Files(paths), false) => Ask::Files(paths, FilesAct::Copy(None)),
+    }
 }
 
 /// A thing read: what its body shows, and what it is said to be (a file's: its kind, size, when it was written).
@@ -605,13 +637,10 @@ fn read(shows: &Shows, lang: Lang, scale: f32, key: u64) -> Read {
             None => Read { body: Body::Other(None), about: Some(lang.pick("文件已不存在", "File no longer exists").into()) },
         },
         // (Each measured, to be laid out in rows at its own shape: see `group_cells`.)
-        Shows::Files(paths) => {
-            let members = paths
+        Shows::Files(together) => {
+            let members = together
                 .iter()
-                .map(|path| {
-                    let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
-                    Member { path: path.clone(), name, seen: measure(&Shows::File(path.clone())), folder: path.is_dir(), size: None, written: None }
-                })
+                .map(|one| Member { path: one.path.clone(), name: one.name.clone(), seen: measure(&Shows::File(one.path.clone())), folder: one.path.is_dir(), size: None, written: None, given: Some(one.given.clone()) })
                 .collect();
             Read { body: Body::Group(members), about: None }
         }
@@ -696,7 +725,7 @@ fn listed(path: &Path) -> Option<Vec<Member>> {
         .map(|(entry, meta)| {
             let folder = meta.is_dir();
             let name = entry.file_name().to_string_lossy().into_owned();
-            Member { path: entry.path(), name, seen: None, folder, size: (!folder).then_some(meta.len()), written: meta.modified().ok().map(ms_of) }
+            Member { path: entry.path(), name, seen: None, folder, size: (!folder).then_some(meta.len()), written: meta.modified().ok().map(ms_of), given: None }
         })
         .collect();
     members.sort_by(|a, b| b.folder.cmp(&a.folder).then_with(|| by_name(&a.name, &b.name)));
@@ -1086,7 +1115,7 @@ struct Looker {
     pressed: Option<Hit>,
     /// A file pressed on (one of those shown together, or the file shown), and where (on the window, px): dragged out
     /// as the pointer goes far enough from there (see `drag_out`).
-    drag_from: Option<(PathBuf, (i32, i32))>,
+    drag_from: Option<(Given, (i32, i32))>,
     hits: Vec<(Rect, Hit)>,
     /// What a button said a moment, and since when.
     told: Option<(Hit, Instant)>,
@@ -1805,6 +1834,23 @@ impl Looker {
                 Shows::File(path) => Some(path),
                 _ => None,
             },
+        }
+    }
+
+    /// What the thing shown gives by itself (dragged off, opened, copied): a file of files together as it is given (see
+    /// `Member::gives`), the thing looked at as its look says, else the file shown where it is.
+    fn shown_given(&self) -> Option<Given> {
+        match (self.inside, self.within.is_empty()) {
+            (Some(member), true) => self.members()?.get(member).map(Member::gives),
+            // (Files together are dragged each by itself, not by where they are laid out.)
+            (None, true) => {
+                let item = self.items.get(self.at)?;
+                if matches!(item.shows, Shows::Files(_)) {
+                    return None;
+                }
+                item.given.clone().or_else(|| self.shown_path().map(|path| Given::Files(vec![path.to_path_buf()])))
+            }
+            _ => self.shown_path().map(|path| Given::Files(vec![path.to_path_buf()])),
         }
     }
 
@@ -3000,10 +3046,11 @@ impl Looker {
         if self.pressed == Some(Hit::Body) && self.pictured() && self.zoom > 1.0 {
             self.dragging = Some((on, self.pan));
         }
-        // A file pressed on, to be dragged out (a picture zoomed in is moved about instead).
+        // A file pressed on, to be dragged out (a picture zoomed in is moved about instead): one of files together as it
+        // is given by itself (a folder of them too; one of a folder gone into, a file alone).
         let file = match self.pressed {
-            Some(Hit::Cell(member)) => self.members().and_then(|members| members.get(member)).filter(|member| !member.folder).map(|member| member.path.clone()),
-            Some(Hit::Body) if self.zoom <= 1.0 && matches!(self.motion, Motion::Resting) => self.shown_path().map(Path::to_path_buf),
+            Some(Hit::Cell(member)) => self.members().and_then(|members| members.get(member)).filter(|member| member.given.is_some() || !member.folder).map(Member::gives),
+            Some(Hit::Body) if self.zoom <= 1.0 && matches!(self.motion, Motion::Resting) => self.shown_given(),
             _ => None,
         };
         self.drag_from = file.map(|file| (file, at));
@@ -3025,11 +3072,30 @@ impl Looker {
         let Some((file, _)) = self.drag_from.take() else { return false };
         self.pressed = None;
         super::window::let_go_of_capture(self.hwnd);
+        // (The devices nearby looked for, to rise at the station's foot as it is dragged: see `station::send`.)
+        crate::nearby::want_to_send();
         crate::station::drag::announce();
         let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-        crate::station::run::ask(Ask::DragOut(vec![crate::station::run::Given::Files(vec![file])], thread));
+        crate::station::run::ask(Ask::DragOut(vec![file], thread));
         self.draw();
         true
+    }
+
+    /// A right click at `at`: on a file it shows (one of files together, or the one shown), that file's menu, up on the
+    /// panel's thread, which runs the menus (see `Controller::look_menu`). Elsewhere, nothing.
+    fn menu(&mut self, at: (i32, i32)) {
+        let given = match self.hit_at(self.on_sheet(at)) {
+            Some(Hit::Cell(member)) => self.members().and_then(|members| members.get(member)).filter(|member| member.given.is_some() || !member.folder).map(Member::gives),
+            Some(Hit::Body) => self.shown_given(),
+            _ => None,
+        };
+        let Some(given) = given else { return };
+        let mut on_screen = windows::Win32::Foundation::POINT::default();
+        if unsafe { GetCursorPos(&mut on_screen) }.is_err() {
+            return;
+        }
+        let look = super::menu::Look::of(self.skin, self.dark).frosted(self.frost, true);
+        crate::app().controller.look_menu(given, on_screen, look);
     }
 
     fn release(&mut self, at: (i32, i32)) {
@@ -3394,15 +3460,15 @@ impl Looker {
             Key::Open if group && self.inside.is_none() && self.picked.is_some() => self.open_member(self.picked.unwrap_or_default()),
             // (A file of the group by itself, a folder gone into: it opened, copied.)
             Key::Open if self.deeper() => {
-                let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
+                let Some(given) = self.shown_given() else { return };
                 let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
-                crate::station::run::ask(Ask::Files(vec![path], crate::station::run::FilesAct::Open));
+                crate::station::run::ask(asked(given, true));
                 self.told = Some((Hit::Open, Instant::now()));
                 self.close();
             }
             Key::Copy if self.deeper() => {
-                let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
-                crate::station::run::ask(Ask::Files(vec![path], crate::station::run::FilesAct::Copy(None)));
+                let Some(given) = self.shown_given() else { return };
+                crate::station::run::ask(asked(given, false));
                 self.told = Some((Hit::Copy, Instant::now()));
                 self.draw();
             }
@@ -3672,6 +3738,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(|looker| looker.double(point(lparam)));
             LRESULT(0)
         }
+        WM_RBUTTONUP => {
+            with(|looker| looker.menu(point(lparam)));
+            LRESULT(0)
+        }
         WM_CAPTURECHANGED => {
             with(|looker| {
                 looker.dragging = None;
@@ -3740,7 +3810,7 @@ mod tests {
 【纯享合集】P9 织造局灯笼高高挂，杨金水暗回查真相 #大明王朝1566 #电视剧解说 #历史";
         let picture = file("icons/128x128@2x.png");
         let (shown, own) = decode(&picture, 7).expect("decoded");
-        let item = |key: u64, title: &str, about: &str, shows: Shows, pastes: bool| Item { key, title: title.into(), about: about.into(), shows, from: None, open: Some(Ask::Open(key)), copy: Some(Ask::Copy(key)), pastes };
+        let item = |key: u64, title: &str, about: &str, shows: Shows, pastes: bool| Item { key, title: title.into(), about: about.into(), shows, from: None, open: Some(Ask::Open(key)), copy: Some(Ask::Copy(key)), pastes, given: None };
         let things = [
             (item(1, "文字", "129 字 · 40 分钟前", Shows::Words(words.into()), true), Read { body: Body::Words { text: words.into(), fixed: false, cut: false }, about: None }, WORDS),
             (item(2, "128x128@2x.png", "256 × 256 · PNG 图像 · 31 KB", Shows::File(picture.clone()), false), Read { body: Body::Picture(shown, own), about: None }, (420.0, 400.0)),
@@ -3784,10 +3854,10 @@ mod tests {
         let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let now = crate::station::now_ms();
-        let member = |name: &str, folder: bool, size: u64, ago: u64| Member { path: PathBuf::from(format!(r"C:\site\{name}")), name: name.into(), seen: None, folder, size: Some(size), written: Some(now - ago * 60_000) };
+        let member = |name: &str, folder: bool, size: u64, ago: u64| Member { path: PathBuf::from(format!(r"C:\site\{name}")), name: name.into(), seen: None, folder, size: Some(size), written: Some(now - ago * 60_000), given: None };
         let members = vec![member("assets", true, 4, 600), member("docs", true, 6, 120), member("scripts", true, 0, 9000), member("build.ps1", false, 2048, 4000), member("README.md", false, 3100, 120), member("release-notes.pdf", false, 312_000, 12_000)];
         let read = Read { body: Body::Folder { members, rows: true, readable: true }, about: Some(r"C:\site · 3 个文件夹，3 个文件".into()) };
-        let item = Item { key: 1, title: "site".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\site")), from: None, open: Some(Ask::Open(1)), copy: Some(Ask::Copy(1)), pastes: false };
+        let item = Item { key: 1, title: "site".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\site")), from: None, open: Some(Ask::Open(1)), copy: Some(Ask::Copy(1)), pastes: false, given: None };
         let looks = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
         let px = 1.5f32;
         let mut sizes = Vec::new();
@@ -3830,7 +3900,7 @@ mod tests {
     /// still among them kept at their places now, none for those new.
     #[test]
     fn what_was_read_is_carried_to_the_things_had_anew() {
-        let item = |key: u64| Item { key, title: String::new(), about: String::new(), shows: Shows::Words(String::new()), from: None, open: None, copy: None, pastes: false };
+        let item = |key: u64| Item { key, title: String::new(), about: String::new(), shows: Shows::Words(String::new()), from: None, open: None, copy: None, pastes: false, given: None };
         let read = |text: &str| Some(Read { body: Body::Words { text: text.into(), fixed: false, cut: false }, about: None });
         let words = |read: &Option<Read>| match read {
             Some(Read { body: Body::Words { text, .. }, .. }) => Some(text.clone()),
@@ -3904,7 +3974,7 @@ mod tests {
     fn a_page_keeps_a_page_shape() {
         let _device = crate::ui::gfx::held().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
-        let item = Item { key: 1, title: "a.pdf".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:.pdf")), from: None, open: None, copy: None, pastes: false };
+        let item = Item { key: 1, title: "a.pdf".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:.pdf")), from: None, open: None, copy: None, pastes: false, given: None };
         let mut looker = Looker::new(HWND::default(), reads);
         (looker.items, looker.read, looker.measured) = (vec![item], vec![None], vec![None]);
         let (top, pad) = (looker.body_top(), looker.inset());
@@ -3920,7 +3990,7 @@ mod tests {
     fn a_sheet_keeps_its_size_as_what_it_shows_is_read() {
         let _device = crate::ui::gfx::held().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
-        let item = |name: &str| Item { key: 1, title: name.into(), about: String::new(), shows: Shows::File(PathBuf::from(format!(r"C:\a\{name}"))), from: None, open: None, copy: None, pastes: false };
+        let item = |name: &str| Item { key: 1, title: name.into(), about: String::new(), shows: Shows::File(PathBuf::from(format!(r"C:\a\{name}"))), from: None, open: None, copy: None, pastes: false, given: None };
         let picture = |size: (u32, u32)| Picture { key: 1, size, pixels: std::sync::Arc::new(Vec::new()) };
         let most = (1400.0, 900.0);
         for (name, size, read) in [
@@ -3945,7 +4015,7 @@ mod tests {
     fn a_video_with_nothing_to_show_is_as_large_as_what_has_no_preview() {
         let _device = crate::ui::gfx::held().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
-        let item = Item { key: 1, title: "broken.mp4".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a\broken.mp4")), from: None, open: None, copy: None, pastes: false };
+        let item = Item { key: 1, title: "broken.mp4".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a\broken.mp4")), from: None, open: None, copy: None, pastes: false, given: None };
         let most = (1400.0, 900.0);
         let mut looker = Looker::new(HWND::default(), reads);
         looker.items = vec![item];
@@ -4061,12 +4131,12 @@ mod tests {
     fn a_folder_gone_into_is_what_shows() {
         let _device = crate::ui::gfx::held().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
-        let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None };
+        let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None, given: None };
         let outer = (0..30).map(|place| member(&format!("{place}"), place == 0)).collect::<Vec<_>>();
         let inner = vec![member(r"0\x.txt", false), member(r"0\y.txt", false)];
         let mut looker = Looker::new(HWND::default(), reads);
         looker.scale = 1.0;
-        looker.items = vec![Item { key: 1, title: "a".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a")), from: None, open: None, copy: None, pastes: false }];
+        looker.items = vec![Item { key: 1, title: "a".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a")), from: None, open: None, copy: None, pastes: false, given: None }];
         (looker.read, looker.measured, looker.asked) = (vec![Some(Read { body: Body::Folder { members: outer, rows: true, readable: true }, about: None })], vec![None], vec![true]);
         let most = (1400.0, 900.0);
         let (top, pad) = (looker.body_top(), looker.inset());
@@ -4240,7 +4310,7 @@ mod tests {
         let hwnd = made.0;
         let (reads, _read) = std::sync::mpsc::channel();
         let mut looker = Looker::new(hwnd, reads);
-        looker.items = vec![Item { key: 1, title: "words".into(), about: String::new(), shows: Shows::Words("words".into()), from: None, open: None, copy: None, pastes: false }];
+        looker.items = vec![Item { key: 1, title: "words".into(), about: String::new(), shows: Shows::Words("words".into()), from: None, open: None, copy: None, pastes: false, given: None }];
         (looker.read, looker.measured, looker.asked) = (vec![None], vec![None], vec![false]);
         (looker.monitor, looker.work, looker.scale, looker.skin, looker.owner) = (away, away, 1.0, Skin::Paper, owner.hwnd.0 as isize);
         looker.held = buttons_held();

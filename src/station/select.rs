@@ -44,7 +44,8 @@ impl On {
     /// The list `hit` is in, in `window`, its lane showing the page `shown`, whole or not.
     pub fn of(window: isize, hit: Hit, shown: Tab, whole: bool) -> On {
         let page = match (hit, shown) {
-            (Hit::Copied(_), Tab::Copies(_)) | (Hit::Recent(_), Tab::Recent(_)) | (Hit::Shelf(_), Tab::Shelf(_)) => shown,
+            // (Part of what a thing holds together: of the page it shows on.)
+            (Hit::Copied(_), Tab::Copies(_)) | (Hit::Recent(_), Tab::Recent(_)) | (Hit::Shelf(_), Tab::Shelf(_)) | (Hit::Part(..), Tab::Shelf(_) | Tab::Copies(_)) => shown,
             (Hit::Copied(_), _) => Tab::Copies(Default::default()),
             (Hit::Recent(_), _) => Tab::Recent(Default::default()),
             _ => Tab::default(),
@@ -322,6 +323,7 @@ pub fn landing(hits: &[Hit]) -> usize {
     hits.iter()
         .map(|hit| match *hit {
             Hit::Shelf(id) | Hit::Copied(id) => shown.items.iter().find(|item| item.id == id).map_or(0, |item| files_in(&item.what)),
+            Hit::Part(..) => 1,
             Hit::Recent(entry) => super::recent::paths_of(entry).map_or(0, |paths| paths.len()),
             _ => 0,
         })

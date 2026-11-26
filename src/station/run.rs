@@ -84,6 +84,33 @@ pub enum Ask {
     Sent(u64),
     /// What is given sent to the device nearby of this key (see `send::key_of`), as chosen in a menu's "发送到".
     SendTo(Vec<Given>, u64),
+    /// Part of what a thing holds together (by the thing's number and its place among them: see `shelf::What::parts`)
+    /// done with as `PartAct` says.
+    Part(u64, usize, PartAct),
+    /// All a thing holds together each a thing of its own (see `keep::Keep::split`).
+    Split(u64),
+    /// What holds things together shown with them under it, or not any more (see `Shown::unfolded`).
+    Unfold(Unfolded, bool),
+}
+
+/// What is done with part of what a thing holds together (see `Ask::Part`): put on the clipboard, opened, shown in
+/// Explorer, taken out of it as a thing of its own, taken off, given out by a name of its own (one sent).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartAct {
+    Copy,
+    Open,
+    Show,
+    TakeOut,
+    Remove,
+    Rename(String),
+}
+
+/// What holds things together, shown with them (see `Shown::unfolded`): a thing on the station, by its number; files
+/// come lately together, by theirs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unfolded {
+    Item(u64),
+    Files(Vec<super::recent::Key>),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -107,6 +134,8 @@ pub enum Together {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Copied {
     Item(u64),
+    /// Part of what a thing holds together (see `Ask::Part`).
+    Part(u64, usize),
     Recent(super::recent::Entry),
 }
 
@@ -122,13 +151,15 @@ pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(140
 #[derive(Clone, Debug, PartialEq)]
 pub enum Given {
     Item(u64),
+    /// Part of what a thing holds together (see `Ask::Part`).
+    Part(u64, usize),
     Files(Vec<std::path::PathBuf>),
 }
 
-/// What leaves the station as it is dragged off (see `drag_off`): the thing on it it is (none: files not on it), what
-/// it gives, whether it is never to leave this PC, and the files of its own it holds meanwhile.
+/// What leaves the station as it is dragged off (see `drag_off`): the thing on it it is, or is part of (none: files not
+/// on it), what it gives, whether it is never to leave this PC, and the files of its own it holds meanwhile.
 struct Leaving {
-    id: Option<u64>,
+    id: Option<(u64, Option<usize>)>,
     content: Content,
     stays_here: bool,
     held: Vec<String>,
@@ -162,6 +193,10 @@ pub struct Shown {
     pub receiving: Option<crate::nearby::Receiving>,
     /// What last came from devices nearby (its number on it), and when: shown coming in for `ARRIVED_FOR`.
     pub arrived: Option<(Vec<u64>, std::time::Instant)>,
+    /// What holds things together shown with them under it, each its own (see `shelf::What::parts`): things on it, by
+    /// their numbers; files come lately together, where they are those of them (see `unfolds`). Till Glance ends.
+    pub unfolded: Vec<u64>,
+    pub unfolded_files: Vec<super::recent::Key>,
 }
 
 impl Shown {
@@ -174,7 +209,23 @@ impl Shown {
         let order = |shown: &Shown| shown.items.iter().filter(|item| !item.copied).map(|item| item.id).collect::<Vec<u64>>();
         let coming = |shown: &Shown| shown.receiving.as_ref().map(|receiving| receiving.session.clone());
         let pinned = |shown: &Shown| [false, true].map(|copied| listed(&shown.items, copied, Filter::Pinned, false).rest.iter().map(|item| item.id).collect::<Vec<u64>>());
-        order(self) != order(before) || coming(self) != coming(before) || self.folded != before.folded || pinned(self) != pinned(before)
+        order(self) != order(before) || coming(self) != coming(before) || self.folded != before.folded || pinned(self) != pinned(before) || self.unfolded != before.unfolded || self.unfolded_files != before.unfolded_files || self.parts() != before.parts()
+    }
+
+    /// How many each thing holds together, of those it shows unfolded.
+    fn parts(&self) -> Vec<usize> {
+        self.unfolded.iter().filter_map(|id| self.items.iter().find(|item| item.id == *id)).map(|item| item.what.parts()).collect()
+    }
+
+    /// Whether the thing `id` is shown with what it holds together under it (see `unfolded`).
+    pub fn unfolds(&self, id: u64) -> bool {
+        self.unfolded.contains(&id)
+    }
+
+    /// Whether the files come lately together `files` are shown each under them: any of them was, as they were
+    /// unfolded (those come since with them, too).
+    pub fn unfolds_files<'a>(&self, mut files: impl Iterator<Item = &'a super::recent::Key>) -> bool {
+        files.any(|key| self.unfolded_files.contains(key))
     }
 }
 
@@ -380,7 +431,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, folded: Default::default(), view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, folders_over: false, copied: None, receiving: None, arrived: None })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, folded: Default::default(), view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, folders_over: false, copied: None, receiving: None, arrived: None, unfolded: Vec::new(), unfolded_files: Vec::new() })));
 }
 
 /// For pictures: what is pretended (see `pretend`) with these tags, and what is pinned `folded` away.
@@ -399,6 +450,18 @@ pub fn pretend_tags(tags: Vec<super::shelf::Tag>, folded: crate::settings::PinsF
 #[allow(dead_code)]
 pub fn pretend_folders_over(over: bool) {
     PRETENDED.with(|pretended| Arc::make_mut(pretended.borrow_mut().get_or_insert_with(Default::default)).folders_over = over);
+}
+
+/// For tests: what is pretended (see `pretend`) with the things `items` and the files come together `files` shown
+/// unfolded (see `Shown::unfolded`).
+#[cfg(test)]
+pub fn pretend_unfolded(items: Vec<u64>, files: Vec<super::recent::Key>) {
+    PRETENDED.with(|pretended| {
+        if let Some(shown) = pretended.borrow_mut().as_mut() {
+            let shown = Arc::make_mut(shown);
+            (shown.unfolded, shown.unfolded_files) = (items, files);
+        }
+    });
 }
 
 /// For tests: what is pretended (see `pretend`) just put on the clipboard as `copied` (see `Shown::copied`).
@@ -572,6 +635,9 @@ struct Station {
     sending: std::collections::HashMap<u64, Vec<String>>,
     /// What was put on the clipboard from it, and when (ms since 1970), not listed so yet (see `used`).
     used: Vec<(u64, u64)>,
+    /// What holds things together shown unfolded (see `Shown::unfolded`).
+    unfolded: Vec<u64>,
+    unfolded_files: Vec<super::recent::Key>,
 }
 
 thread_local! {
@@ -596,7 +662,7 @@ fn run(asks: Receiver<Ask>) {
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new() }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -640,7 +706,13 @@ fn drag_off() {
         }
         let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
         if remove && dragged == Some(super::drag::Dragged::Taken) && sent.is_none() {
-            for id in leaving.iter().filter_map(|one| one.id) {
+            // (Parts of one, the last first: each taken off leaves those before it where they were.)
+            let mut parts: Vec<(u64, usize)> = leaving.iter().filter_map(|one| one.id).filter_map(|(id, part)| Some((id, part?))).collect();
+            parts.sort_by(|one, other| other.cmp(one));
+            for (id, at) in parts {
+                station.keep.remove_part(id, at);
+            }
+            for (id, _) in leaving.iter().filter_map(|one| one.id).filter(|(_, part)| part.is_none()) {
                 station.keep.remove(id);
             }
         }
@@ -825,8 +897,29 @@ impl Station {
                 Ask::CopyText(text, from) => {
                     self.copy(&Content::Text(text), false, from.into_iter().collect());
                 }
+                Ask::Part(id, at, act) => self.part(id, at, act),
+                Ask::Split(id) => self.keep.split(id),
+                Ask::Unfold(Unfolded::Item(id), on) => {
+                    self.unfolded.retain(|one| *one != id);
+                    if on {
+                        self.unfolded.push(id);
+                    }
+                }
+                Ask::Unfold(Unfolded::Files(keys), on) => {
+                    self.unfolded_files.retain(|key| !keys.contains(key));
+                    if on {
+                        self.unfolded_files.extend(keys);
+                    }
+                }
                 Ask::Together(given, Together::Copy) => {
-                    let marks: Vec<Copied> = given.iter().filter_map(|given| if let Given::Item(id) = given { Some(Copied::Item(*id)) } else { None }).collect();
+                    let marks: Vec<Copied> = given
+                        .iter()
+                        .filter_map(|given| match given {
+                            Given::Item(id) => Some(Copied::Item(*id)),
+                            Given::Part(id, at) => Some(Copied::Part(*id, *at)),
+                            Given::Files(_) => None,
+                        })
+                        .collect();
                     let leaving: Vec<Leaving> = given.into_iter().filter_map(|given| self.leaving(given)).collect();
                     let contents: Vec<Content> = leaving.iter().map(|one| one.content.clone()).collect();
                     let stays_here = leaving.iter().any(|one| one.stays_here);
@@ -845,6 +938,7 @@ impl Station {
                                 Some(Content::Files(paths)) => paths,
                                 _ => Vec::new(),
                             },
+                            Given::Part(id, at) => self.part_path(id, at).into_iter().collect(),
                             Given::Files(paths) => paths,
                         })
                         .collect();
@@ -941,6 +1035,49 @@ impl Station {
         }
     }
 
+    /// Where part `at` of what `id` holds together is given out from (see `shelf::What::parts`): a file or folder put
+    /// on it, where it is (gone from there, its copy, where one is kept); one sent, as it is given out. None where there
+    /// is no such part, or none of it to give.
+    fn part_path(&self, id: u64, at: usize) -> Option<std::path::PathBuf> {
+        let item = self.keep.shelf.get(id)?;
+        if item.what.parts() < 2 {
+            return None;
+        }
+        match self.keep.content_of(item)? {
+            Content::Files(mut paths) if at < paths.len() => Some(paths.swap_remove(at)),
+            _ => None,
+        }
+    }
+
+    /// `act` done with part `at` of what `id` holds together (see `Ask::Part`).
+    fn part(&mut self, id: u64, at: usize, act: PartAct) {
+        match act {
+            PartAct::Copy => {
+                let stays_here = self.keep.shelf.get(id).is_some_and(|item| item.stays_here);
+                if let Some(path) = self.part_path(id, at) {
+                    if self.copy(&Content::Files(vec![path]), stays_here, vec![Copied::Part(id, at)]) {
+                        self.used(id);
+                    }
+                }
+            }
+            PartAct::Open => {
+                if let Some(path) = self.part_path(id, at) {
+                    by_the_shell(move || open(&Content::Files(vec![path])));
+                }
+            }
+            PartAct::Show => {
+                if let Some(path) = self.part_path(id, at) {
+                    by_the_shell(move || show_in_explorer(&[path]));
+                }
+            }
+            PartAct::TakeOut => {
+                self.keep.take_part(id, at);
+            }
+            PartAct::Remove => self.keep.remove_part(id, at),
+            PartAct::Rename(name) => self.keep.rename_part(id, at, &name),
+        }
+    }
+
     /// What is `given` sent to the device nearby of `key` (see `send::key_of`), where it is found: its own files held
     /// till the sending is over (see `Ask::Sent`), the strip showing how it goes (see `send::sent_from_menu`), its files
     /// told apart on a thread of their own. Nothing where something of it may not leave this PC, or nothing of it is
@@ -967,6 +1104,16 @@ impl Station {
     fn leaving(&mut self, given: Given) -> Option<Leaving> {
         let id = match given {
             Given::Item(id) => id,
+            Given::Part(id, at) => {
+                let path = self.part_path(id, at)?;
+                let item = self.keep.shelf.get(id)?;
+                let held: Vec<String> = item.what.part_own_files(at).into_iter().map(str::to_string).collect();
+                let stays_here = item.stays_here;
+                for name in &held {
+                    self.keep.folder.hold(name);
+                }
+                return Some(Leaving { id: Some((id, Some(at))), content: Content::Files(vec![path]), stays_here, held });
+            }
             Given::Files(paths) => return Some(Leaving { id: None, content: Content::Files(paths), stays_here: false, held: Vec::new() }),
         };
         let item = self.keep.shelf.get(id)?.clone();
@@ -975,7 +1122,7 @@ impl Station {
         for name in &held {
             self.keep.folder.hold(name);
         }
-        Some(Leaving { id: Some(id), content, stays_here: item.stays_here, held })
+        Some(Leaving { id: Some((id, None)), content, stays_here: item.stays_here, held })
     }
 
     /// The settings as they are now: the shelf's rules, and the clipboard listened to while Recently copied is on.
@@ -1065,7 +1212,11 @@ impl Station {
         // (What a device nearby may send it, as it has room now.)
         crate::nearby::room(self.keep.room_offered());
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, folded: settings.folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, folders_over: self.folders_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
+        // (What no longer holds things together, gone or holding one, unfolded no more: holding more again, as it was.)
+        let items = &self.keep.shelf.items;
+        let mut unfolded = self.unfolded.clone();
+        unfolded.retain(|id| items.iter().any(|item| item.id == *id && item.what.parts() > 1));
+        let shown = Shown { items: items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, folded: settings.folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, folders_over: self.folders_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone(), unfolded, unfolded_files: self.unfolded_files.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
@@ -1089,7 +1240,7 @@ mod tests {
             id
         });
         let (_, asks) = std::sync::mpsc::channel();
-        let mut station = super::Station { keep, window: Default::default(), asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new() };
+        let mut station = super::Station { keep, window: Default::default(), asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new() };
         let order = |station: &super::Station| shelf::listed(&station.keep.shelf.items, true, shelf::Filter::Pinned, false).rest.iter().map(|item| item.id).collect::<Vec<_>>();
         let was = order(&station);
         assert_eq!(was, [b, a]);

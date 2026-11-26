@@ -4965,7 +4965,7 @@ impl Widget {
             moving |= self.thumbs.choose(now, &view::choices(self.content.tab()));
         }
         // What was just copied from what it shows of the station, marked so a moment.
-        if shows(|hit| matches!(hit, view::Hit::Shelf(_) | view::Hit::Copied(_) | view::Hit::Recent(_))) {
+        if shows(|hit| hit.drags()) {
             moving |= self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR);
             moving |= self.thumbs.mark_arrived(now, view::arrived(), crate::station::run::ARRIVED_FOR);
         }
