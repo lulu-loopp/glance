@@ -5835,6 +5835,11 @@ It can be disconnected here at any time, and the status line command put back.",
         }
         self.ai_keys = ai_keys_kept();
         crate::ai::keys_changed();
+        // (Found now: kept as found, that its lane, turned off later, is not turned on again.)
+        if crate::app().follow_ai_keys() {
+            let now = crate::app().settings.lock().unwrap().clone();
+            self.take(now);
+        }
         self.next_frame = Instant::now();
     }
 

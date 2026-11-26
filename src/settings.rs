@@ -951,6 +951,11 @@ pub struct Settings {
     /// first given (see `slot_gpus`).
     #[serde(default)]
     pub gpu_slots: Vec<(String, usize)>,
+    /// The AI providers whose keys Glance has found, by their lanes ("ai:glm"): a lane is turned on as its key is
+    /// first found, and never again (turned off, it stays off: see `keys_first_found`). None: not looked for yet, as
+    /// with settings from before this was kept, whose lanes are as the user left them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_keys_found: Option<Vec<String>>,
     /// How large what plays is as the panel slides it out, from a side edge and from the top, as the hand made it.
     pub music_rooms: MusicRooms,
     /// The desktop widgets torn off the panel.
@@ -1193,6 +1198,7 @@ impl Default for Settings {
             panel_pinned_edge: None,
             panels_pinned: Vec::new(),
             gpu_slots: Vec::new(),
+            ai_keys_found: None,
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,
@@ -1342,6 +1348,8 @@ impl Settings {
         };
         if begins.is_some() {
             settings.began = begins;
+            // (Where Glance begins, each key there is to be found is found first now.)
+            settings.ai_keys_found = Some(Vec::new());
         }
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
@@ -1426,6 +1434,19 @@ impl Settings {
         crate::elevation::ensure_folder(dir)?;
         crate::elevation::write_in_place(dir, FILE, text.as_bytes())
     }
+}
+
+/// The lanes of `found` (the AI providers whose keys are there now, by their lanes) whose keys were not found before,
+/// as `kept` remembers them, kept with it: to be turned on. With none kept (settings from before it was kept), all
+/// are taken as found before, their lanes left as they are.
+pub fn keys_first_found(found: &[&str], kept: &mut Option<Vec<String>>) -> Vec<String> {
+    let Some(kept) = kept else {
+        *kept = Some(found.iter().map(|lane| lane.to_string()).collect());
+        return Vec::new();
+    };
+    let first: Vec<String> = found.iter().filter(|lane| !kept.iter().any(|had| had == *lane)).map(|lane| lane.to_string()).collect();
+    kept.extend(first.iter().cloned());
+    first
 }
 
 /// Gives each GPU of `gpus` its number in the module that shows it: the one it was given before, by what it is
@@ -1596,6 +1617,20 @@ mod tests {
         let mut gpus = [gpu("discrete", 0)];
         assert!(!slot_gpus(&mut gpus, &mut kept));
         assert_eq!(gpus[0].slot, 0);
+    }
+
+    /// A provider's lane is turned on as its key is first found, never again; settings from before keep their lanes.
+    #[test]
+    fn a_lane_is_turned_on_as_its_key_is_first_found_alone() {
+        let mut kept = None;
+        assert!(keys_first_found(&["ai:deepseek"], &mut kept).is_empty());
+        assert_eq!(kept.as_deref(), Some(&["ai:deepseek".to_string()][..]));
+        assert_eq!(keys_first_found(&["ai:deepseek", "ai:glm"], &mut kept), vec!["ai:glm".to_string()]);
+        // (Its lane turned off since, or its key gone and back: found before.)
+        assert!(keys_first_found(&["ai:glm"], &mut kept).is_empty());
+        assert!(keys_first_found(&["ai:deepseek", "ai:glm"], &mut kept).is_empty());
+        let mut begun = Some(Vec::new());
+        assert_eq!(keys_first_found(&["ai:kimi"], &mut begun), vec!["ai:kimi".to_string()]);
     }
 
     /// Read from its file as Glance reads it: numbers outside what the settings offer brought within it; a file that

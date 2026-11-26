@@ -284,6 +284,30 @@ impl App {
         });
     }
 
+    /// The lanes of the AI providers whose keys are found now (given in Glance, or in a variable: read as Glance
+    /// starts) for the first time, turned on: once each (see `settings::keys_first_found`). Whether the settings
+    /// changed.
+    pub fn follow_ai_keys(&self) -> bool {
+        let found: Vec<&str> = ui::prefs::AI.iter().copied().filter(|lane| ui::view::ai::provider_of(lane).is_some_and(|provider| provider.fields.iter().all(|field| ai::keys::kept(field.id, field.env) != ai::keys::Kept::None))).collect();
+        let mut kept = self.settings.lock().unwrap().ai_keys_found.clone();
+        let first = settings::keys_first_found(&found, &mut kept);
+        if kept == self.settings.lock().unwrap().ai_keys_found {
+            return false;
+        }
+        let known = self.controller.known_modules();
+        self.change(|settings| {
+            settings.ai_keys_found = kept;
+            if !first.is_empty() {
+                let mut prefs = ui::prefs::Prefs::resolve(&settings.view, &known);
+                for entry in prefs.ai.iter_mut().filter(|entry| first.contains(&entry.id)) {
+                    entry.on = true;
+                }
+                settings.view = ui::prefs::kept(&prefs, &settings.view);
+            }
+        });
+        true
+    }
+
     /// The overlay turned on or off from the panel.
     pub fn set_overlay(&self, on: bool) {
         self.change(|settings| {
@@ -609,6 +633,8 @@ pub fn run() {
     if new_gpus {
         app().change(|settings| settings.gpu_slots = gpu_slots);
     }
+    // The lanes of AI providers whose keys are found here first, turned on.
+    let _ = app().follow_ai_keys();
 
     thread::Builder::new().name("glance: panel".into()).spawn({
         let controller = controller.clone();
