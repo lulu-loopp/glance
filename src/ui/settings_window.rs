@@ -1158,14 +1158,16 @@ impl Tab {
     }
 }
 
-/// The pages' list as it reads: each page, and over the components' own pages their heading (a name, not a page).
+/// The pages' list as it reads: each page, over the components' own pages their heading (a name, not a page), and
+/// after them a rule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NavItem {
     Page(Page),
     Components,
+    Rule,
 }
 
-const NAV_ITEMS: [NavItem; 12] = [
+const NAV_ITEMS: [NavItem; 13] = [
     NavItem::Page(Page::Layout),
     NavItem::Page(Page::Look),
     NavItem::Components,
@@ -1173,10 +1175,11 @@ const NAV_ITEMS: [NavItem; 12] = [
     NavItem::Page(Page::Workbench),
     NavItem::Page(Page::Music),
     NavItem::Page(Page::Ai),
+    NavItem::Rule,
+    NavItem::Page(Page::Disk),
     NavItem::Page(Page::Devices),
     NavItem::Page(Page::Phone),
     NavItem::Page(Page::Nearby),
-    NavItem::Page(Page::Disk),
     NavItem::Page(Page::General),
 ];
 
@@ -1186,6 +1189,7 @@ impl NavItem {
             NavItem::Page(Page::Layout) => pick(lang, "布局", "Layout"),
             NavItem::Page(Page::Look) => pick(lang, "外观", "Appearance"),
             NavItem::Components => pick(lang, "组件", "Components"),
+            NavItem::Rule => "",
             NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
             NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
@@ -6376,7 +6380,7 @@ It can be disconnected here at any time, and the status line command put back.",
     fn stops(&self) -> Vec<Target> {
         let pages = NAV_ITEMS.iter().filter_map(|item| match item {
             NavItem::Page(page) => Some(Target::Nav(*page)),
-            NavItem::Components => None,
+            NavItem::Components | NavItem::Rule => None,
         });
         let editor = if self.page == Page::Layout { self.editor_stops() } else { Vec::new() };
         pages.chain(self.layout().into_iter()
@@ -7207,13 +7211,14 @@ It can be disconnected here at any time, and the status line command put back.",
                     y += NAV_HEADING;
                     continue;
                 }
+                NavItem::Rule => {
+                    y += NAV_GAP / 2.0;
+                    fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
+                    y += NAV_GAP / 2.0;
+                    continue;
+                }
                 NavItem::Page(page) => page,
             };
-            if page == Page::Devices {
-                y += NAV_GAP / 2.0;
-                fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
-                y += NAV_GAP / 2.0;
-            }
             let r = Rect { x: left, y, w: width, h: NAV_ITEM };
             y += NAV_ITEM + 4.0;
             let target = Target::Nav(page);

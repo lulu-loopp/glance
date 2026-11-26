@@ -1866,7 +1866,6 @@ impl Organizer {
                 .filter_map(|&at| self.gathered.get(at).map(|item| (Some(if item.folder { Icon::Folder } else { kind_icon(item.kind) }), item.name.clone(), Some(size_text(item.bytes, lang)), Target::MenuUngather(at), false)))
                 .collect(),
         };
-        let checks = matches!(menu.of, MenuOf::Sizes);
         let gathered = matches!(menu.of, MenuOf::Gathered(_));
         let widest = items.iter().map(|(_, label, size, _, _)| frame.measure(label, font).min(260.0) + size.as_ref().map_or(0.0, |size| frame.measure(size, body(12.0, 400.0)) + 12.0)).fold(0.0, f32::max);
         let w = (widest + 12.0 + 28.0 + 12.0 + if gathered { 24.0 } else { 0.0 }).max(menu.under.w).max(160.0);
@@ -1886,12 +1885,10 @@ impl Organizer {
             if on {
                 fill(frame, p.accent, ir.x, ir.y + 9.0, 3.0, 14.0, 1.5);
             }
-            let text_x = if checks || icon.is_some() { ir.x + 36.0 } else { ir.x + 12.0 };
+            // (The one chosen marked by the accent's bar alone, as a drop-down list marks it.)
+            let text_x = if icon.is_some() { ir.x + 36.0 } else { ir.x + 12.0 };
             if let Some(icon) = icon {
                 frame.icon(icon, Point { x: ir.x + 18.0, y: ir.y + 16.0 }, 14.0, p.text2);
-            }
-            if checks && on {
-                frame.icon(Icon::Check, Point { x: ir.x + 18.0, y: ir.y + 16.0 }, 14.0, p.accent);
             }
             let right = ir.x + ir.w - if gathered { 30.0 } else { 12.0 };
             let mut label_right = right;
