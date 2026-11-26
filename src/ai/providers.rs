@@ -426,12 +426,14 @@ fn shape_under(value: &Value, told: bool) -> String {
     }
 }
 
-/// The plan's windows in the answer `body`: each of its token limits, by its length (its unit: 5 minutes, 3 hours,
-/// 1 days, 6 weeks), how much of it is used (`usage` is what it is limited to), and when it starts again.
+/// The plan's windows in the answer `body`: each of its limits of what is spent (in tokens, `TOKENS_LIMIT`, or in its
+/// credits, `CREDIT_LIMIT`, as plans bought since late 2026 count it), by its length (its unit: 5 minutes, 3 hours,
+/// 1 days, 6 weeks), how much of it is used (`usage` is what it is limited to), and when it starts again. Its tools'
+/// calls (`TIME_LIMIT`) are not a window of it.
 fn glm_windows(body: &Value) -> Vec<Window> {
     let mut windows: Vec<Window> = Vec::new();
     for item in body["data"]["limits"].as_array().into_iter().flatten() {
-        if item["type"].as_str().is_some_and(|kind| kind != "TOKENS_LIMIT") {
+        if item["type"].as_str().is_some_and(|kind| !matches!(kind, "TOKENS_LIMIT" | "CREDIT_LIMIT")) {
             continue;
         }
         let by = match item["unit"].as_i64() {
@@ -781,8 +783,9 @@ mod tests {
         assert_eq!(kimi_windows(&wrapped), [Window { minutes: 300, used: 100.0, resets: None }]);
     }
 
-    /// GLM's windows: each token limit by its unit and number, `usage` what it is limited to; its tools' calls not
-    /// among them. Its plan, of this period's subscription in force.
+    /// GLM's windows: each limit of what is spent (tokens, or credits as plans bought now count it) by its unit and
+    /// number, `usage` what it is limited to, its tools' calls not among them. Its plan, of this period's subscription
+    /// in force.
     #[test]
     fn reads_glms_windows_and_plan() {
         let body = json!({"code": 200, "data": {"limits": [
@@ -790,6 +793,11 @@ mod tests {
             {"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "usage": 0, "percentage": 12},
             {"type": "TIME_LIMIT", "unit": 5, "number": 1, "usage": 100, "currentValue": 3}]}});
         assert_eq!(glm_windows(&body), [Window { minutes: 300, used: 75.0, resets: Some(1_780_297_200_000) }, Window { minutes: 10080, used: 12.0, resets: None }]);
+        // (As bigmodel.cn answers a plan counted in credits, its five hours not begun.)
+        let credits = json!({"code": 200, "success": true, "msg": "操作成功", "data": {"level": "lite", "limits": [
+            {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 1000, "currentValue": 250, "remaining": 750, "percentage": 25},
+            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 4000, "currentValue": 0, "remaining": 4000, "percentage": 0, "nextResetTime": 1_780_297_200_000u64}]}});
+        assert_eq!(glm_windows(&credits), [Window { minutes: 300, used: 25.0, resets: None }, Window { minutes: 10080, used: 0.0, resets: Some(1_780_297_200_000) }]);
         let plans = json!({"data": [{"productName": "GLM Coding Lite", "status": "EXPIRED", "inCurrentPeriod": false}, {"productName": "GLM Coding Pro", "status": "VALID", "inCurrentPeriod": true}]});
         assert_eq!(glm_plan(&plans).as_deref(), Some("GLM Coding Pro"));
     }
