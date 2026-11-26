@@ -214,7 +214,7 @@ fn heard(kept: &mut Kept, body: &[u8]) -> Vec<(String, Message)> {
 fn notice(lang: Lang, id: &str, newest: &Message) -> (String, String) {
     let first = newest.text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
     let first: String = first.chars().take(120).collect();
-    let see = lang.pick("点击此处查看。", "Click here to see it.").to_string();
+    let see = lang.pick("单击以查看。", "Click to view.").to_string();
     match (newest.kind, lang) {
         (Kind::Reply, Lang::Zh) => (format!("你的反馈 {id} 有新回复"), if first.is_empty() { see } else { first }),
         (Kind::Reply, Lang::En) => (format!("New reply to your report {id}"), if first.is_empty() { see } else { first }),
@@ -222,15 +222,15 @@ fn notice(lang: Lang, id: &str, newest: &Message) -> (String, String) {
             let version = &newest.version;
             let words = match (crate::update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
                 (true, Lang::Zh) => format!("更新到 {version} 即可获得此修复。"),
-                (true, Lang::En) => format!("Update to {version} to have the fix."),
+                (true, Lang::En) => format!("Update to {version} to get the fix."),
                 (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
-                (false, Lang::En) => "This version has the fix.".to_string(),
+                (false, Lang::En) => "This version includes the fix.".to_string(),
             };
-            (lang.pick(&format!("你的反馈 {id} 已在 {version} 修复"), &format!("Your report {id} is fixed in {version}")).to_string(), words)
+            (lang.pick(&format!("你的反馈 {id} 已在 {version} 修复"), &format!("Your report {id} was fixed in {version}")).to_string(), words)
         }
-        (Kind::Closed, _) => (lang.pick(&format!("你的反馈 {id} 已关闭"), &format!("Your report {id} is closed")).to_string(), see),
-        (Kind::Answered, _) => (lang.pick(&format!("你的反馈 {id} 已回复"), &format!("Your report {id} is answered")).to_string(), see),
-        (Kind::Open | Kind::User, _) => (lang.pick(&format!("你的反馈 {id} 已重新打开"), &format!("Your report {id} is open again")).to_string(), see),
+        (Kind::Closed, _) => (lang.pick(&format!("你的反馈 {id} 已关闭"), &format!("Your report {id} was closed")).to_string(), see),
+        (Kind::Answered, _) => (lang.pick(&format!("你的反馈 {id} 已回复"), &format!("Your report {id} was answered")).to_string(), see),
+        (Kind::Open | Kind::User, _) => (lang.pick(&format!("你的反馈 {id} 已重新打开"), &format!("Your report {id} was reopened")).to_string(), see),
     }
 }
 
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(title, "你的反馈 KQRH9F 已在 999.0 修复");
         assert_eq!(words, "更新到 999.0 即可获得此修复。");
         let (_, words) = notice(Lang::En, "KQRH9F", &fixed("0.0.1"));
-        assert_eq!(words, "This version has the fix.");
+        assert_eq!(words, "This version includes the fix.");
         let reply = Message { kind: Kind::Reply, text: "\n  请问是哪块主板？\n更多".into(), ..fixed("") };
         assert_eq!(notice(Lang::Zh, "KQRH9F", &reply), ("你的反馈 KQRH9F 有新回复".to_string(), "请问是哪块主板？".to_string()));
     }

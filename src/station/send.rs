@@ -458,7 +458,7 @@ pub fn menu_row(stays_here: bool) -> (Item<'static>, Vec<u64>) {
     let lang = crate::update::language();
     let mut row = Item::new(lang.pick("发送到", "Send to"), Some(Mark::Icon(Icon::Send)), false, false);
     if stays_here {
-        (row.detail, row.dimmed) = (Some(lang.pick("此内容不可发送到其他设备", "This may not leave this PC").into()), true);
+        (row.detail, row.dimmed) = (Some(lang.pick("此内容不可发送到其他设备", "This can't be sent to other devices").into()), true);
         *LISTED.lock().unwrap() = None;
         return (row, Vec::new());
     }
@@ -494,7 +494,7 @@ pub fn menu_row_again() -> Option<(Vec<Item<'static>>, Vec<u64>)> {
 /// not reached, dimmed, saying so. None yet: a dimmed row saying they are looked for.
 fn device_rows(targets: &[Target], busy: &[String], lang: Lang) -> (Vec<Item<'static>>, Vec<u64>) {
     if targets.is_empty() {
-        let mut looking = Item::new(lang.pick("正在查找附近的设备", "Looking for devices nearby"), Some(Mark::Icon(Icon::Search)), false, false);
+        let mut looking = Item::new(lang.pick("正在查找附近的设备", "Looking for nearby devices"), Some(Mark::Icon(Icon::Search)), false, false);
         looking.dimmed = true;
         return (vec![looking], Vec::new());
     }
@@ -638,8 +638,8 @@ impl IDropTarget_Impl for ToDevice_Impl {
             let lang = crate::update::language_in(&crate::app().settings.lock().unwrap().view);
             match alias {
                 Some((alias, _)) if self.takes.get() => super::drag::describe(data, DROPIMAGE_COPY, lang.pick("发送到 %1", "Send to %1"), &alias),
-                Some(_) if own && going.stays_here => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This may not leave this PC"), ""),
-                Some((_, true)) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("正在发送，请稍候", "Sending, a moment please"), ""),
+                Some(_) if own && going.stays_here => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This can't be sent to other devices"), ""),
+                Some((_, true)) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("正在发送，请稍候", "Sending…"), ""),
                 _ => {}
             }
             *self.data.borrow_mut() = Some(data.clone());

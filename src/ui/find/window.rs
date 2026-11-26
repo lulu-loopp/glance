@@ -807,7 +807,7 @@ impl Finder {
                 let on = by == self.order.by;
                 let mut item = Item::new(sort_said(by, lang), None, on, false);
                 item.detail = way_said(by, on && self.order.reversed, lang).map(|way| match on {
-                    true => format!("{way}{}", lang.pick("，再选反转", ", choose again to reverse")).into(),
+                    true => format!("{way}{}", lang.pick("，再选反转", ", select again to reverse")).into(),
                     false => way.into(),
                 });
                 item
@@ -1156,7 +1156,7 @@ impl Finder {
                     Line::Others(count) => {
                         let said = match self.lang {
                             Lang::Zh => format!("另有 {} 项未列出，输入更多文字可缩小范围", count_said(*count)),
-                            Lang::En => format!("{} more not listed: type more to narrow them down", count_said(*count)),
+                            Lang::En => format!("{} more not shown. Keep typing to narrow them down", count_said(*count)),
                         };
                         let font = self.font(11.5, 400.0);
                         let (ascent, descent) = frame.gfx.baseline(font);
@@ -1325,9 +1325,9 @@ impl Finder {
         let lang = self.lang;
         let left = match &self.told {
             Some((said, at)) if at.elapsed() < TOLD_FOR => said.clone(),
-            _ if self.typing.string().trim().is_empty() => lang.pick("Enter 打开 · Ctrl+Enter 打开所在位置 · Tab 切换类别", "Enter to open · Ctrl+Enter to show in folder · Tab for kinds").into(),
+            _ if self.typing.string().trim().is_empty() => lang.pick("Enter 打开 · Ctrl+Enter 打开所在位置 · Tab 切换类别", "Enter to open · Ctrl+Enter to open file location · Tab to switch category").into(),
             // (What is shown is what was typed itself: see `results::gather`.)
-            _ if self.shown.total == 0 && !self.shown.lines.is_empty() => lang.pick("本机未找到相符的项目", "Nothing found on this PC").into(),
+            _ if self.shown.total == 0 && !self.shown.lines.is_empty() => lang.pick("本机未找到相符的项目", "No results on this PC").into(),
             _ => match lang {
                 Lang::Zh => format!("共 {} 项", count_said(self.shown.total)),
                 Lang::En => format!("{} found", count_said(self.shown.total)),
@@ -2029,7 +2029,7 @@ fn standing_said(lang: Lang) -> (String, bool) {
     if building {
         let said = match lang {
             Lang::Zh => format!("正在建立索引，已收录 {} 项，现在即可搜索", count_said(names)),
-            Lang::En => format!("Indexing: {} so far, search now", count_said(names)),
+            Lang::En => format!("Indexing: {} so far, you can search now", count_said(names)),
         };
         return (said, true);
     }
@@ -2043,7 +2043,7 @@ fn ready_said(lang: Lang, roots: &[&str], names: usize) -> String {
     let drives = roots.iter().map(|root| root.trim_end_matches('\\')).collect::<Vec<_>>().join(" ");
     match lang {
         Lang::Zh => format!("{drives} 已索引 {} 项 · 实时更新", count_said(names)),
-        Lang::En => format!("{} indexed on {drives}, kept current", count_said(names)),
+        Lang::En => format!("{} indexed on {drives}, kept up to date", count_said(names)),
     }
 }
 
@@ -2715,7 +2715,7 @@ mod tests {
     /// colon after them all, and the last drive's doubled ("C: D:: 1,284,503 indexed").
     #[test]
     fn the_drives_indexed_are_named_with_one_colon_each() {
-        assert_eq!(ready_said(Lang::En, &["C:\\", "D:\\"], 1_284_503), "1,284,503 indexed on C: D:, kept current");
+        assert_eq!(ready_said(Lang::En, &["C:\\", "D:\\"], 1_284_503), "1,284,503 indexed on C: D:, kept up to date");
         assert_eq!(ready_said(Lang::Zh, &["C:\\", "D:\\"], 1_284_503), "C: D: 已索引 1,284,503 项 · 实时更新");
         assert!(!ready_said(Lang::En, &["C:\\"], 7).contains("::"));
     }

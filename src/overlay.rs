@@ -528,7 +528,7 @@ impl Overlay {
         // Its glass is its tint alone: what is behind it is not blurred (the system's compositor would then draw
         // the game behind into it every frame, some frames in a hundred of the game's).
         self.surface.set_frost(0.0);
-        let said = self.said.map(|clear| (if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, format!("{:.0}", clear * 100.0)));
+        let said = self.said.map(|clear| (if self.lang == Lang::Zh { "透明度" } else { "Transparency" }, format!("{:.0}", clear * 100.0)));
         // The glass where it is on its stage (physical px, and DIPs).
         let stage = self.stage_at;
         let (at_x, at_y) = (self.rect.left - stage.left, self.rect.top - stage.top);
@@ -910,10 +910,10 @@ impl Overlay {
         use crate::ui::icons::Icon;
         use crate::ui::menu::{Item, Menu};
         let items = vec![
-            Item::new(if zh { "屏幕顶部居中" } else { "Top centre of the screen" }, Some(crate::ui::menu::Mark::Icon(Icon::ArrowUpToLine)), false, false),
+            Item::new(if zh { "屏幕顶部居中" } else { "Top center of the screen" }, Some(crate::ui::menu::Mark::Icon(Icon::ArrowUpToLine)), false, false),
             Item::new(if zh { "锁定位置" } else { "Lock position" }, Some(crate::ui::menu::Mark::Icon(Icon::Pin)), self.locked, false),
-            Item::new(if zh { "鼠标穿透" } else { "Let clicks through" }, Some(crate::ui::menu::Mark::Icon(Icon::Pointer)), self.through, false),
-            Item::new(if zh { "关闭悬浮窗" } else { "Close the overlay" }, Some(crate::ui::menu::Mark::Icon(Icon::Close)), false, false),
+            Item::new(if zh { "鼠标穿透" } else { "Click-through" }, Some(crate::ui::menu::Mark::Icon(Icon::Pointer)), self.through, false),
+            Item::new(if zh { "关闭悬浮窗" } else { "Close overlay" }, Some(crate::ui::menu::Mark::Icon(Icon::Close)), false, false),
             Item::new(if zh { "设置…" } else { "Settings…" }, Some(crate::ui::menu::Mark::Icon(Icon::Settings)), false, true),
         ];
         Menu::open(items, crate::ui::menu::Look::system(), over_the_panel)

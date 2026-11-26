@@ -309,7 +309,7 @@ fn own_row(kind: Kind, name: String, detail: String, what: What) -> Row {
 /// What was typed, worked out, where it is a sum.
 fn sum_row(typed: &str, lang: Lang) -> Option<Row> {
     let answer = sum::worked_out(typed)?;
-    let detail = format!("{} · {}", answer.said, lang.pick("按 Enter 复制结果", "Enter copies the result"));
+    let detail = format!("{} · {}", answer.said, lang.pick("按 Enter 复制结果", "Press Enter to copy the result"));
     Some(own_row(Kind::Sum, answer.shown, detail, What::Answer(answer.plain)))
 }
 

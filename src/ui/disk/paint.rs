@@ -207,31 +207,31 @@ impl Organizer {
     fn why_not(&self, shown: &Shown, node: usize, many: bool, what: Option<What>, info: Option<Info>, path: &Path, guarded: bool) -> Option<String> {
         let lang = self.lang;
         if many {
-            return Some(lang.pick("若干小项目的合计，请单击查看其中各项", "Several small items together: click to see each").into());
+            return Some(lang.pick("若干小项目的合计，请单击查看其中各项", "Several small items combined. Click to see each").into());
         }
         let said = |zh: &str, en: &str| Some(lang.pick(zh, en).to_string());
         match (what, info) {
-            (_, Some(Info::Unlisted)) => return said("系统项目，不可删除", "Used by the system: it cannot be deleted"),
-            (_, Some(Info::Bin)) => return said("回收站请使用「清空回收站」", "Empty the Recycle Bin instead"),
-            (Some(What::Rest), _) => return said("若干小文件的合计，请选择其所在的文件夹", "Several small files together: choose the folder they are in"),
+            (_, Some(Info::Unlisted)) => return said("系统项目，不可删除", "System item, can't be deleted"),
+            (_, Some(Info::Bin)) => return said("回收站请使用「清空回收站」", "Use Empty Recycle Bin instead"),
+            (Some(What::Rest), _) => return said("若干小文件的合计，请选择其所在的文件夹", "Several small files combined. Choose their folder"),
             _ => {}
         }
         if shown.binned[node] {
             return said("已在回收站中", "Already in the Recycle Bin");
         }
         match what {
-            Some(What::File { system: true }) => return said("系统项目，不可删除", "Used by the system: it cannot be deleted"),
-            Some(What::Folder(Role::Kept | Role::System | Role::Unread)) => return said("系统文件夹，不可删除", "A system folder: it cannot be deleted"),
-            Some(What::Folder(_)) if guarded => return said("其中含有系统项目，不可整体删除", "It holds system items: it cannot be deleted whole"),
+            Some(What::File { system: true }) => return said("系统项目，不可删除", "System item, can't be deleted"),
+            Some(What::Folder(Role::Kept | Role::System | Role::Unread)) => return said("系统文件夹，不可删除", "System folder, can't be deleted"),
+            Some(What::Folder(_)) if guarded => return said("其中含有系统项目，不可整体删除", "Contains system items, can't be deleted as a whole"),
             _ => {}
         }
         if self.gathered.iter().chain(&self.going).any(|gathered| gathered.path == path) || self.pending.as_ref().is_some_and(|pending| pending.items.iter().any(|item| item.path == path)) {
-            return said("已在待清理中", "Already gathered");
+            return said("已在待清理中", "Already queued");
         }
         if let Some(holder) = self.gathered.iter().find(|gathered| gathered.folder && path.starts_with(&gathered.path)) {
             return Some(match lang {
                 Lang::Zh => format!("已包含在待清理的「{}」中", holder.name),
-                Lang::En => format!("Already in “{}”, gathered", holder.name),
+                Lang::En => format!("Already in “{}”, queued", holder.name),
             });
         }
         None
@@ -373,8 +373,8 @@ impl Organizer {
             centred(frame, lang.pick("正在查找磁盘…", "Finding drives…"), body(13.0, 400.0), p.text2, PAGE_X, top + 28.0, g.page_w);
             return;
         }
-        centred(frame, lang.pick("没有可以显示的磁盘", "No drive to show"), body(16.0, 600.0), p.text, PAGE_X, top + 28.0, g.page_w);
-        centred(frame, lang.pick("未找到这台电脑上可以读取的本地磁盘。", "No local drive on this PC could be read."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
+        centred(frame, lang.pick("没有可以显示的磁盘", "No drives to show"), body(16.0, 600.0), p.text, PAGE_X, top + 28.0, g.page_w);
+        centred(frame, lang.pick("未找到这台电脑上可以读取的本地磁盘。", "No readable local drives found on this PC."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
     }
 
     /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown: its words
@@ -414,7 +414,7 @@ impl Organizer {
             runs.push((format!("{}{}", lang.pick("，回收站 ", ", Recycle Bin "), size_text(bin, lang)), false));
         }
         if pick > 0 {
-            runs.push((format!("{}{}", lang.pick("，待清理 ", ", gathered "), size_text(pick, lang)), false));
+            runs.push((format!("{}{}", lang.pick("，待清理 ", ", queued"), size_text(pick, lang)), false));
         }
         let font = |bold: bool| body(12.0, if bold { 600.0 } else { 400.0 });
         let widths: Vec<f32> = runs.iter().map(|(text, bold)| frame.measure(text, font(*bold))).collect();
@@ -528,9 +528,9 @@ impl Organizer {
         // The filters from the right: each pressed while its own filter is on (the preset's two by it too).
         let preset = self.filter.old && self.filter.least == 1 << 30;
         let buttons: [(Target, Icon, String, bool, bool); 3] = [
-            (Target::FilterOld, Icon::Clock, lang.pick("超过一年未修改", "Not changed in a year").into(), self.filter.old, false),
+            (Target::FilterOld, Icon::Clock, lang.pick("超过一年未修改", "Not modified in a year").into(), self.filter.old, false),
             (Target::FilterSize, Icon::BySize, least_text(self.filter.least, lang), self.filter.least > 0, true),
-            (Target::FilterPreset, Icon::Archive, lang.pick("大且旧的文件", "Large and old").into(), preset, false),
+            (Target::FilterPreset, Icon::Archive, lang.pick("大且旧的文件", "Large and old files").into(), preset, false),
         ];
         let font = body(13.0, 400.0);
         let mut x = right;
@@ -923,7 +923,7 @@ impl Organizer {
         frame.unclip();
         // A folder holding nothing that takes room: told so where its map would be.
         if !animating && self.laid.is_empty() && self.shown.is_some() {
-            centred(frame, lang.pick("这个文件夹没有占用空间的内容", "Nothing in this folder takes up space"), body(13.0, 400.0), p.text3, map.x, map.y + map.h / 2.0 - 10.0, map.w);
+            centred(frame, lang.pick("这个文件夹没有占用空间的内容", "Nothing in this folder uses space"), body(13.0, 400.0), p.text3, map.x, map.y + map.h / 2.0 - 10.0, map.w);
         }
         // (What is dimmed no longer drawn is let go of.)
         if !animating {
@@ -1079,7 +1079,7 @@ impl Organizer {
         card(frame, p, side);
         let mut moving = false;
         // The tabs, the mark under the one shown sliding to it.
-        let tabs = [(Tab::Largest, lang.pick("最大的文件", "Largest files")), (Tab::Types, lang.pick("按类型", "By type")), (Tab::Ages, lang.pick("按时间", "By time"))];
+        let tabs = [(Tab::Largest, lang.pick("最大的文件", "Largest files")), (Tab::Types, lang.pick("按类型", "By type")), (Tab::Ages, lang.pick("按时间", "By date"))];
         let font = body(13.0, 600.0);
         let mut x = side.x + 8.0;
         let mut mark_to = None;
@@ -1135,7 +1135,7 @@ impl Organizer {
                 Lang::Zh => format!("{} 种扩展名", detail.extensions.len()),
                 Lang::En => format!("{} extensions", detail.extensions.len()),
             },
-            Tab::Ages => lang.pick("按最后修改的时间", "By when last changed").into(),
+            Tab::Ages => lang.pick("按最后修改的时间", "By date modified").into(),
         };
         let mut sum_right = side.x + side.w - 16.0;
         let addable = detail.rows.iter().any(|row| !self.gathered_at(&row.path));
@@ -1145,10 +1145,10 @@ impl Organizer {
             let label = if detail.passing.0 > listed as u64 {
                 match lang {
                     Lang::Zh => format!("加入前 {listed} 个"),
-                    Lang::En => format!("Gather top {listed}"),
+                    Lang::En => format!("Queue top {listed}"),
                 }
             } else {
-                lang.pick("全部加入", "Gather all").to_string()
+                lang.pick("全部加入", "Queue all").to_string()
             };
             let label = label.as_str();
             let link_font = body(13.0, 400.0);
@@ -1177,7 +1177,7 @@ impl Organizer {
             self.scroll = self.scroll_to;
         }
         if count == 0 {
-            let none = if self.filter.on() || self.light.is_some() { lang.pick("没有符合条件的文件", "No file matches") } else { lang.pick("这个文件夹没有文件", "No files in this folder") };
+            let none = if self.filter.on() || self.light.is_some() { lang.pick("没有符合条件的文件", "No matching files") } else { lang.pick("这个文件夹没有文件", "No files in this folder") };
             centred(frame, none, body(13.0, 400.0), p.text3, area.x, area.y + 40.0, area.w);
             return moving;
         }
@@ -1201,7 +1201,7 @@ impl Organizer {
                 Tab::Largest => {
                     let row = &detail.rows[at];
                     let gathered = self.gathered_at(&row.path);
-                    let sub = if gathered { lang.pick("已在待清理中", "Already gathered").to_string() } else { row.path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default() };
+                    let sub = if gathered { lang.pick("已在待清理中", "Already queued").to_string() } else { row.path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default() };
                     let release = self.in_onedrive(&row.path) && row.bytes > 0;
                     (Target::Row(at), kind_icon(row.kind), p.hue[row.kind.at()], row.name.clone(), sub, row.bytes, self.chosen.as_ref() == Some(&row.path), false, !gathered, release)
                 }
@@ -1348,16 +1348,8 @@ impl Organizer {
                 Canvas::stroke_rounded(frame, Fill::Solid(p.accent.alpha(ready)), foot.x, foot.y, foot.w, foot.h, CARD_RADIUS, 2.0);
             }
             frame.icon(Icon::Inbox, mark, 18.0, mix(p.text2, p.accent, ready));
-            frame.text(lang.pick("将文件或文件夹拖到这里，集中移至回收站", "Drag files or folders here to move them to the Recycle Bin together"), title_font, p.text, words_x, title_y, foot.w - 64.0, Align::Start);
-            frame.text(
-                lang.pick("也可以点方块或列表右侧的加号。删除以当前用户的权限执行，没有权限的项目会保留并列出。", "Or press the plus on a block or a row. They are deleted as you may: what you may not delete stays, and is listed."),
-                sub_font,
-                p.text2,
-                words_x,
-                sub_y,
-                foot.w - 64.0,
-                Align::Start,
-            );
+            let middle = frame.line_in(title_font, foot.y, foot.h);
+            frame.text(lang.pick("拖入文件或文件夹，集中移至回收站", "Drag files or folders here to move them to the Recycle Bin together"), title_font, p.text, words_x, middle, foot.w - 64.0, Align::Start);
             return moving;
         }
         card(frame, p, foot);
@@ -1372,7 +1364,7 @@ impl Organizer {
             // seconds left in it, and what goes as it was gathered (faint: no way out of it now).
             let undo = self.foot_button(frame, p, right, top, Some(Icon::Undo), lang.pick("撤销", "Undo"), Target::Undo, false, hot);
             let bytes: u64 = pending.items.iter().map(|item| item.bytes).sum();
-            let title = lang.pick("即将移至回收站", "Moving to the Recycle Bin");
+            let title = lang.pick("即将移至回收站", "About to move to the Recycle Bin");
             let sub = match lang {
                 Lang::Zh => format!("{} 项，共 {}", pending.items.len(), size_text(bytes, lang)),
                 Lang::En => format!("{} items, {}", pending.items.len(), size_text(bytes, lang)),
@@ -1411,7 +1403,7 @@ impl Organizer {
                     Lang::En => format!("Moved to the Recycle Bin: {} items, {}", went.0, size_text(went.1, lang)),
                 };
                 frame.text(&title, title_font, p.text, words_x, title_y, button.x - 12.0 - words_x, Align::Start);
-                frame.text(lang.pick("回收站仍在这个盘上，清空后才释放空间", "The Recycle Bin is on this drive: emptied, its space is freed"), sub_font, p.text2, words_x, sub_y, button.x - 12.0 - words_x, Align::Start);
+                frame.text(lang.pick("回收站仍在这个盘上，清空后才释放空间", "Empty the Recycle Bin to free this space"), sub_font, p.text2, words_x, sub_y, button.x - 12.0 - words_x, Align::Start);
                 return moving;
             }
         }
@@ -1420,7 +1412,7 @@ impl Organizer {
         let clear = self.foot_button(frame, p, commit.x - 12.0, top, None, lang.pick("全部移出", "Remove all"), Target::UngatherAll, false, hot);
         let bytes: u64 = self.gathered.iter().map(|item| item.bytes).sum();
         let frees = format!("{} {}", lang.pick("将释放", "Frees"), size_text(bytes, lang));
-        let later = lang.pick("清空回收站后生效", "once the Recycle Bin is emptied");
+        let later = lang.pick("清空回收站后生效", "after emptying the Recycle Bin");
         let total_font = body(14.0, 600.0);
         let total_w = frame.measure(&frees, total_font).max(frame.measure(later, sub_font)) + 2.0;
         let total_x = clear.x - 12.0 - total_w;
@@ -1601,7 +1593,7 @@ impl Organizer {
         let Some(drive) = self.drives.get(at) else { return };
         let (title, sub) = match lang {
             Lang::Zh => (format!("{}: 可用空间不足", drive.letter()), format!("仅余 {}，约为总容量的 {:.0}%", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
-            Lang::En => (format!("{}: is running out of space", drive.letter()), format!("Only {} free, about {:.0}% of it", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
+            Lang::En => (format!("{}: running out of space", drive.letter()), format!("Only {} free, about {:.0}% of it", size_text(drive.free, lang), drive.free as f64 * 100.0 / drive.total.max(1) as f64)),
         };
         let under = self.target_rect(&Target::Drive(at));
         let r = Rect { x: under.x, y: under.y + under.h, w: 240.0, h: 52.0 };
@@ -1626,18 +1618,18 @@ impl Organizer {
             facts.push((lang.pick("文件数", "Files").into(), count_text(about.files)));
         }
         if !unlisted && about.written > 0 {
-            facts.push((lang.pick("修改时间", "Changed").into(), date_text(about.written, lang)));
+            facts.push((lang.pick("修改时间", "Modified").into(), date_text(about.written, lang)));
         }
         let mut notes: Vec<(String, Color)> = Vec::new();
         if about.many_in.is_some() || matches!(about.what, Some(What::Rest)) {
-            notes.push((lang.pick("各项太小，图上画不出，合为一块", "Each too small to draw: shown as one block").into(), p.text2));
+            notes.push((lang.pick("各项太小，图上画不出，合为一块", "Too small to draw one by one, shown as one block").into(), p.text2));
         }
         if about.cloud > 0 {
-            notes.push((format!("{}{}{}", lang.pick("云端另有 ", "A further "), size_text(about.cloud, lang), lang.pick("，不占用本机空间", " is in the cloud alone, taking no space here")), p.text2));
+            notes.push((format!("{}{}{}", lang.pick("云端另有 ", "Another"), size_text(about.cloud, lang), lang.pick("，不占用本机空间", " is cloud-only and uses no space here")), p.text2));
         }
         let releasable = about.onedrive && about.bytes > 0 && matches!(about.what, Some(What::File { system: false } | What::Folder(Role::Plain)));
         if releasable {
-            notes.push((lang.pick("可以释放空间，文件只保留在 OneDrive 中", "Space can be freed: the files kept in OneDrive alone").into(), p.text2));
+            notes.push((lang.pick("可以释放空间，文件只保留在 OneDrive 中", "Space can be freed by keeping the files in OneDrive only").into(), p.text2));
         }
         let info_like = about.info.is_some() || matches!(about.what, Some(What::File { system: true }));
         if let Some(why) = &about.why_not {
@@ -1646,15 +1638,15 @@ impl Organizer {
             }
         }
         let hint = if info_like {
-            lang.pick("单击查看说明", "Click for what it is")
+            lang.pick("单击查看说明", "Click for details")
         } else if let Some((_, focus)) = &about.many_in {
-            if *focus { lang.pick("可以在右侧列表中逐个选择", "Choose them one by one in the list") } else { lang.pick("单击查看其中各项", "Click to see each") }
+            if *focus { lang.pick("可以在右侧列表中逐个选择", "Select them one by one in the list") } else { lang.pick("单击查看其中各项", "Click to see each") }
         } else if about.folder {
-            lang.pick("单击进入，双击在资源管理器中显示", "Click to open, double-click to show in Explorer")
+            lang.pick("单击进入，双击在文件资源管理器中显示", "Click to open, double-click to show in File Explorer")
         } else if matches!(about.what, Some(What::Rest)) {
             ""
         } else {
-            lang.pick("双击在资源管理器中显示", "Double-click to show in Explorer")
+            lang.pick("双击在文件资源管理器中显示", "Double-click to show in File Explorer")
         };
         let inner = TAG_W - 24.0;
         let note_font = body(12.0, 400.0);
@@ -1713,35 +1705,35 @@ impl Organizer {
             PlateOf::System { info, name, bytes, files, .. } => match info {
                 Some(Info::Pagefile) => (
                     lang.pick("页面文件", "Page file").into(),
-                    lang.pick("Windows 在内存不足时使用的空间，大小通常由系统自动管理。可以在虚拟内存设置中调整它的大小或位置。", "Space Windows uses when memory runs short, usually sized by the system. Its size and drive can be changed in the virtual memory settings.").into(),
+                    lang.pick("Windows 在内存不足时使用的空间，大小通常由系统自动管理。可以在虚拟内存设置中调整它的大小或位置。", "Space Windows uses when memory runs low, usually managed by the system. You can change its size or drive in the virtual memory settings.").into(),
                     None,
                     vec![(lang.pick("调整虚拟内存", "Adjust virtual memory").into(), PlateAct::Open(crate::disk::act::Page::Performance))],
                     vec![],
                 ),
                 Some(Info::Hiberfil) => (
                     lang.pick("休眠文件", "Hibernation file").into(),
-                    lang.pick("休眠和快速启动用它保存内存中的内容，大小约为内存的四成。关闭休眠后，Windows 会删除这个文件。", "Hibernation and fast startup keep what is in memory in it, about two-fifths of the memory's size. With hibernation off, Windows deletes it.").into(),
+                    lang.pick("休眠和快速启动用它保存内存中的内容，大小约为内存的四成。关闭休眠后，Windows 会删除这个文件。", "Hibernation and fast startup save what is in memory here. It is about two-fifths the size of memory. Turning off hibernation deletes it.").into(),
                     None,
                     vec![(lang.pick("关闭休眠", "Turn hibernation off").into(), PlateAct::Hibernation)],
                     vec![],
                 ),
                 Some(Info::Restore) => (
                     lang.pick("系统还原点", "Restore points").into(),
-                    lang.pick("系统还原点和卷影副本占用的空间。可以在系统保护设置中减少它的最大用量，或删除此盘的还原点。", "Space taken by restore points and shadow copies. Their most can be lowered, or this drive's restore points deleted, in the system protection settings.").into(),
+                    lang.pick("系统还原点和卷影副本占用的空间。可以在系统保护设置中减少它的最大用量，或删除此盘的还原点。", "Space used by restore points and shadow copies. Lower their maximum size or delete this drive's restore points in System Protection.").into(),
                     None,
                     vec![(lang.pick("管理还原点", "Manage restore points").into(), PlateAct::Open(crate::disk::act::Page::Protection))],
                     vec![],
                 ),
                 Some(Info::ComponentStore) => (
                     lang.pick("组件存储", "Component store").into(),
-                    lang.pick("Windows 组件的存储（WinSxS）。其中许多文件与 Windows 文件夹其他位置的文件共用同一份数据，这里每处都计入一次，所以显示的大小大于它实际占用的空间。可以在“存储”设置的清理建议中清理。", "Where Windows keeps its components (WinSxS). Many of its files share their data with files elsewhere in the Windows folder, counted here at each, so it shows larger than the space it really takes. It can be cleaned up in Storage's cleanup recommendations.").into(),
+                    lang.pick("Windows 组件的存储（WinSxS）。其中许多文件与 Windows 文件夹其他位置的文件共用同一份数据，这里每处都计入一次，所以显示的大小大于它实际占用的空间。可以在“存储”设置的清理建议中清理。", "Where Windows stores its components (WinSxS). Many of these files share data with files elsewhere in the Windows folder and are counted at each place, so it appears larger than the space it really uses. You can clean it up in Storage's cleanup recommendations.").into(),
                     None,
                     vec![(lang.pick("打开存储设置", "Open Storage settings").into(), PlateAct::Open(crate::disk::act::Page::Storage))],
                     vec![],
                 ),
                 Some(Info::Unlisted) => (
                     lang.pick("其他系统数据", "Other system data").into(),
-                    lang.pick("文件系统自身的数据（如主文件表和日志），以及无法读取的项目所占的空间，不对应任何单独的文件。", "The file system's own data (its master file table, its log) and what cannot be read: no file of its own.").into(),
+                    lang.pick("文件系统自身的数据（如主文件表和日志），以及无法读取的项目所占的空间，不对应任何单独的文件。", "The file system's own data (such as the master file table and log) and items that can't be read. Not a single file.").into(),
                     None,
                     vec![],
                     vec![],
@@ -1750,17 +1742,17 @@ impl Organizer {
                     lang.pick("回收站", "Recycle Bin").into(),
                     match lang {
                         Lang::Zh => format!("此盘的回收站中有 {} 个文件，共 {}。清空后才会释放这些空间。", count_text(*files), size_text(*bytes, lang)),
-                        Lang::En => format!("This drive's Recycle Bin holds {} files, {}. Its space is freed once it is emptied.", count_text(*files), size_text(*bytes, lang)),
+                        Lang::En => format!("This drive's Recycle Bin holds {} files, {}. Empty it to free the space.", count_text(*files), size_text(*bytes, lang)),
                     },
                     None,
                     vec![],
-                    vec![(lang.pick("查看内容", "Show what is in it").into(), PlateAct::OpenBin, false), (lang.pick("清空回收站", "Empty Recycle Bin").into(), PlateAct::AskEmpty, true)],
+                    vec![(lang.pick("查看内容", "Show contents").into(), PlateAct::OpenBin, false), (lang.pick("清空回收站", "Empty Recycle Bin").into(), PlateAct::AskEmpty, true)],
                 ),
-                None => (name.clone(), lang.pick("系统使用的文件，不可删除。", "A file the system uses: it cannot be deleted.").into(), None, vec![], vec![]),
+                None => (name.clone(), lang.pick("系统使用的文件，不可删除。", "A system file, can't be deleted.").into(), None, vec![], vec![]),
             },
             PlateOf::Hibernation { .. } => (
                 lang.pick("关闭休眠", "Turn hibernation off").into(),
-                lang.pick("在以管理员身份打开的终端中运行下面的命令，即可关闭休眠并删除休眠文件。快速启动也会随之关闭。", "Run the command below in a terminal opened as administrator: hibernation is turned off and its file deleted. Fast startup goes off with it.").into(),
+                lang.pick("在以管理员身份打开的终端中运行下面的命令，即可关闭休眠并删除休眠文件。快速启动也会随之关闭。", "Run the command below in a terminal opened as administrator to turn off hibernation and delete its file. Fast startup turns off too.").into(),
                 Some("powercfg /hibernate off"),
                 vec![],
                 vec![(lang.pick("打开电源选项", "Open Power Options").into(), PlateAct::Open(crate::disk::act::Page::PowerButtons), false), (lang.pick("复制命令", "Copy command").into(), PlateAct::CopyCommand, true)],
@@ -1771,7 +1763,7 @@ impl Organizer {
                     lang.pick("清空回收站", "Empty Recycle Bin").into(),
                     match lang {
                         Lang::Zh => format!("将永久删除此盘回收站中的 {} 个文件，共 {}。此操作无法撤销。", count_text(files), size_text(bytes, lang)),
-                        Lang::En => format!("The {} files in this drive's Recycle Bin, {}, are deleted for good. This cannot be undone.", count_text(files), size_text(bytes, lang)),
+                        Lang::En => format!("The {} files in this drive's Recycle Bin, {}, will be permanently deleted. This can't be undone.", count_text(files), size_text(bytes, lang)),
                     },
                     None,
                     vec![],

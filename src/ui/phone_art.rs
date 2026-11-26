@@ -332,7 +332,7 @@ impl Picture<'_> {
         self.say([X0 + 44.0 * U, Y0 + 18.0 * U, IN], (-122.0, -104.0), true, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
         self.say([X0 + 61.5 * U, Y0 + 18.0 * U, IN], (74.0, -34.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
         self.say([X0 + 42.5 * U, Y0 + 31.0 * U, IN], (-134.0, 64.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
-        self.say([X0 + 65.0 * U, Y0 + 31.0 * U, IN], (74.0, 66.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
+        self.say([X0 + 65.0 * U, Y0 + 31.0 * U, IN], (74.0, 66.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("磁盘", "Disk")), ""]);
         self.frame.place(self.screen);
     }
 
@@ -417,7 +417,7 @@ impl Picture<'_> {
         let fan = cpu_fan.map(|rpm| lang.pick(&format!("风扇 {rpm} 转"), &format!("Fan {rpm} rpm")).to_string()).unwrap_or_default();
         say([22.0, 36.0, 100.0], (66.0, -100.0), false, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
         say([42.0, 36.0, 68.0], (74.0, -30.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
-        say([40.0, 98.0, 28.0], (74.0, 62.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
+        say([40.0, 98.0, 28.0], (74.0, 62.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("磁盘", "Disk")), ""]);
         say([15.0, 70.0, 116.0], (-122.0, -124.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
         if let Some(rpm) = case_fan {
             say([w / 2.0, d, 38.0], (-134.0, 64.0), true, [&rpm.to_string(), lang.pick("机箱风扇", "Case fans"), lang.pick("转/分", "rpm")]);
@@ -663,7 +663,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     } else {
         picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
     }
-    let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
+    let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("磁盘", "Disk"))];
     let each = (wide - 24.0 - 3.0 * 8.0) / 4.0;
     for (place, (part, called)) in named.into_iter().enumerate() {
         let (x, y) = (side + 12.0 + place as f32 * (each + 8.0), top + 8.0 + drawing + 8.0);
@@ -714,16 +714,16 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     };
 
     // Night, the screens, the lights.
-    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 76.0 }, night, lang.pick("夜间模式", "Night mode"), if night { lang.pick("已开启，电脑仍在运行。再次点按即可结束", "On. The PC is still running. Tap again to end it") } else { lang.pick("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "The PC keeps running: screens off, lights off, sound muted, power saver") }, Part::Night);
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 76.0 }, night, lang.pick("夜间模式", "Night mode"), if night { lang.pick("已开启，电脑仍在运行。再次点按即可结束", "On. The PC keeps running. Tap again to turn it off") } else { lang.pick("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "Keeps the PC running with screens and lights off, sound muted and power saving on") }, Part::Night);
     y += 76.0 + 12.0;
     let half = if lights_there { (wide - 12.0) / 2.0 } else { wide };
-    tile(&picture, &mut parts, Rect { x: side, y, w: half, h: 88.0 }, screens != Some(false), lang.pick("屏幕", "Screens"), if screens == Some(false) { lang.pick("已关闭，点按开启", "Off. Tap to turn them on") } else { lang.pick("已开启，点按关闭全部屏幕", "On. Tap to turn them all off") }, Part::Screen);
+    tile(&picture, &mut parts, Rect { x: side, y, w: half, h: 88.0 }, screens != Some(false), lang.pick("屏幕", "Screens"), if screens == Some(false) { lang.pick("已关闭，点按开启", "Off. Tap to turn on") } else { lang.pick("已开启，点按关闭全部屏幕", "On. Tap to turn all off") }, Part::Screen);
     if lights_there {
         let how = match lights {
             Some(true) if colours_there => format!("{} · {effect_name}", lang.pick("已开启", "On")),
             Some(true) => lang.pick("已开启", "On").to_string(),
-            Some(false) => lang.pick("已关闭，点按开启", "Off. Tap to turn them on").to_string(),
-            None => lang.pick("点按关闭灯光", "Tap to turn them off").to_string(),
+            Some(false) => lang.pick("已关闭，点按开启", "Off. Tap to turn on").to_string(),
+            None => lang.pick("点按关闭灯光", "Tap to turn off").to_string(),
         };
         tile(&picture, &mut parts, Rect { x: side + half + 12.0, y, w: half, h: 88.0 }, lights != Some(false), if keys_alone { lang.pick("键盘背光", "Keyboard light") } else { lang.pick("灯光", "Lights") }, &how, Part::Lights);
     }
@@ -776,9 +776,9 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         let more = (rows - 1) as f32 * apart;
         let at = |place: usize| Vector2 { X: side + 16.0 + 18.0 + (place % across) as f32 * apart, Y: y + 62.0 + (place / across) as f32 * apart };
         picture.plate(Rect { x: side, y, w: wide, h: tall + more }, 20.0, CARD);
-        picture.words(lang.pick("灯光效果与颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
+        picture.words(lang.pick("灯光效果与颜色", "Lighting effect and color"), label, DIM, side + 16.0, y + 27.0, false);
         // How one is taken away, said at the card's other end; while they are, what ends that.
-        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色即可删除", "Hold a colour to remove it") };
+        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色可删除", "Press and hold a color to remove it") };
         picture.words(word, label, if removing { ACCENT } else { FAINT }, side + wide - 16.0, y + 27.0, true);
         if live && removing {
             let across = frame.gfx.measure(word, label);
@@ -832,7 +832,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         // (Every colour in turn has its own brightness: not slid.)
         let bright = light.get("brightness").and_then(Value::as_f64).unwrap_or(100.0) as f32;
         let at = along(&Part::Brightness, (bright - 5.0) / 95.0);
-        picture.words(lang.pick("亮度", "Light"), label, DIM, side + 16.0, y + 168.0, false);
+        picture.words(lang.pick("亮度", "Brightness"), label, DIM, side + 16.0, y + 168.0, false);
         slider(&picture, &mut parts, side + 64.0, y + 164.0, wide - 64.0 - 16.0 - 44.0, at, Part::Brightness, effect != "rainbow");
         picture.words(&format!("{:.0}%", 5.0 + at * 95.0), label, DIM, side + wide - 16.0, y + 168.0, true);
         // The ring: every hue round it, the colour itself in its middle; under it how much colour, then given up or kept.
@@ -856,14 +856,14 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             }
             let ink = if depth < 0.75 { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
             picture.middled(&format!("#{}", made.hex()), Font::new(Family::Segoe, 15.0, 600.0), ink, centre.X, centre.Y + 1.0);
-            picture.middled(lang.pick("当前颜色", "This colour"), Font::new(Family::Segoe, 11.0, 400.0), Color { a: 0.75, ..ink }, centre.X, centre.Y + 18.0);
+            picture.middled(lang.pick("当前颜色", "Current color"), Font::new(Family::Segoe, 11.0, 400.0), Color { a: 0.75, ..ink }, centre.X, centre.Y + 18.0);
             if live {
                 parts.extend(shown(Rect { x: centre.X - across / 2.0, y: centre.Y - across / 2.0, w: across, h: across }).map(|shown| (shown, Part::Hue)));
             }
             // How much colour: from none of it to all of it.
             let row = centre.Y + across / 2.0 + 16.0 + 14.0;
             let (x, width) = (side + 64.0, wide - 64.0 - 16.0 - 44.0);
-            picture.words(lang.pick("饱和度", "Depth"), label, DIM, side + 16.0, row + 4.0, false);
+            picture.words(lang.pick("饱和度", "Saturation"), label, DIM, side + 16.0, row + 4.0, false);
             if let Some(fading) = frame.gradient(Vector2 { X: x, Y: 0.0 }, hued(hue, 0.0), Vector2 { X: x + width, Y: 0.0 }, hued(hue, 1.0)) {
                 unsafe { frame.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, row - 4.0, width, 8.0), radiusX: 4.0, radiusY: 4.0 }, &fading) };
             }
@@ -873,7 +873,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             }
             picture.words(&format!("{:.0}%", depth * 100.0), label, INK, side + wide - 16.0, row + 4.0, true);
             let (top, each) = (row + 14.0 + 16.0, (wide - 32.0 - 12.0) / 2.0);
-            for (place, (word, part)) in [(lang.pick("取消", "Cancel"), Part::GiveUp), (lang.pick("使用此颜色", "Use this colour"), Part::Use)].into_iter().enumerate() {
+            for (place, (word, part)) in [(lang.pick("取消", "Cancel"), Part::GiveUp), (lang.pick("使用此颜色", "Use this color"), Part::Use)].into_iter().enumerate() {
                 let r = Rect { x: side + 16.0 + place as f32 * (each + 12.0), y: top, w: each, h: 44.0 };
                 let kept = part == Part::Use;
                 picture.plate(r, 14.0, if kept { INK } else { TILE });
@@ -890,7 +890,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     if let Some(keys) = said.get("keys").filter(|keys| !keys.is_null() && lights != Some(false) && !night) {
         let (level, most) = (keys.get("level").and_then(Value::as_u64), keys.get("most").and_then(Value::as_u64).unwrap_or(3));
         picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
-        picture.words(if keys_alone { lang.pick("背光亮度", "How bright") } else { lang.pick("键盘背光", "Keyboard light") }, label, DIM, side + 16.0, y + 27.0, false);
+        picture.words(if keys_alone { lang.pick("背光亮度", "Backlight") } else { lang.pick("键盘背光", "Keyboard light") }, label, DIM, side + 16.0, y + 27.0, false);
         // Out, then each step up to the brightest: named where there are the usual three, numbered otherwise.
         let names: Vec<String> = if most == 3 {
             [lang.pick("关", "Off"), lang.pick("低", "Low"), lang.pick("中", "Medium"), lang.pick("高", "High")].iter().map(|name| name.to_string()).collect()
@@ -928,7 +928,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             let size = format!("{} × {}", monitor.get("width").and_then(Value::as_i64).unwrap_or(0), monitor.get("height").and_then(Value::as_i64).unwrap_or(0));
             let part = Part::MonitorBrightness(index);
             let at = along(&part, brightness.unwrap_or(0.0) as f32 / 100.0);
-            let detail = if brightness.is_some() { format!("{size} · {} {:.0}%", lang.pick("亮度", "light"), at * 100.0) } else { size };
+            let detail = if brightness.is_some() { format!("{size} · {} {:.0}%", lang.pick("亮度", "brightness"), at * 100.0) } else { size };
             picture.words(&detail, under, DIM, side + 50.0, row + 36.0, false);
             // Its switch.
             let switch = Rect { x: side + wide - 16.0 - 44.0, y: row + 7.0, w: 44.0, h: 26.0 };
@@ -1008,7 +1008,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     }
 
     // Sleep says what it means where it is pressed (and is asked about again before it is done).
-    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 96.0 }, false, lang.pick("睡眠", "Sleep"), lang.pick("整台电脑暂停运行，最为省电。无法通过手机唤醒，需在电脑上按键盘或电源键", "The whole PC stops: the least power. A phone cannot wake it; press a key or the power button on the PC"), Part::Sleep);
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 96.0 }, false, lang.pick("睡眠", "Sleep"), lang.pick("最省电，手机无法唤醒", "Uses the least power. The phone can't wake it"), Part::Sleep);
     y += 96.0 + 24.0;
 
     unsafe { frame.dc.PopAxisAlignedClip() };

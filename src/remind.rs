@@ -240,7 +240,7 @@ pub fn says(notice: &Notice, now: Local, zh: bool) -> (String, String) {
                     } else if left > -60 {
                         pick("现在".into(), "Now".into())
                     } else {
-                        pick("已过时间".into(), "Past its time".into())
+                        pick("已过时间".into(), "Overdue".into())
                     }
                 }
             };

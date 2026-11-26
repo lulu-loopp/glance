@@ -180,11 +180,11 @@ impl Organizer {
         };
         let lang = self.lang;
         if self.gathered.iter().any(|gathered| gathered.path == row.path) {
-            about.why_not = Some(lang.pick("已在待清理中", "Already gathered").into());
+            about.why_not = Some(lang.pick("已在待清理中", "Already queued").into());
         } else if let Some(holder) = self.gathered.iter().find(|gathered| gathered.folder && row.path.starts_with(&gathered.path)) {
             about.why_not = Some(match lang {
                 Lang::Zh => format!("已包含在待清理的「{}」中", holder.name),
-                Lang::En => format!("Already in “{}”, gathered", holder.name),
+                Lang::En => format!("Already in “{}”, queued", holder.name),
             });
         }
         Some(about)

@@ -443,7 +443,7 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     let recall = crate::app().controller.widget_put_away();
     // Each choice, its icon, and whether a rule sets it off; no widget to
     // bring back, no choice for it.
-    let mut choices = vec![(OPEN, if zh { "打开面板" } else { "Open the panel" }, Icon::Panel, false)];
+    let mut choices = vec![(OPEN, if zh { "打开面板" } else { "Open panel" }, Icon::Panel, false)];
     if recall {
         choices.push((RECALL, if zh { "召回小组件" } else { "Bring the widget back" }, Icon::Restore, false));
     }

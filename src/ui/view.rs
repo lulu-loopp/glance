@@ -145,9 +145,9 @@ fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -
         return said(lang.pick("没有正在播放的歌曲", "Nothing is playing"), "");
     };
     match sung {
-        Sung::Untimed { netease: true } => said(lang.pick("网易云音乐没有提供播放进度", "NetEase Cloud Music does not say how far in it is"), lang.pick("可在设置的“音乐”页安装 InfLink-rs 插件以显示歌词", "Install the InfLink-rs plugin on the Music page of Settings to show lyrics")),
-        Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player does not say how far in it is"), lang.pick("无法跟着播放显示歌词", "so no line can be shown as it is sung")),
-        Sung::Asking => said(lang.pick("正在查找歌词…", "Finding the lyrics…"), ""),
+        Sung::Untimed { netease: true } => said(lang.pick("网易云音乐没有提供播放进度", "NetEase Cloud Music doesn't report its position"), lang.pick("可在设置的“音乐”页安装网易云音乐歌词插件", "Install the NetEase Cloud Music lyrics plugin on the Music page of Settings")),
+        Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player doesn't report its position"), lang.pick("无法跟着播放显示歌词", "so lyrics can't follow along")),
+        Sung::Asking => said(lang.pick("正在查找歌词…", "Finding lyrics…"), ""),
         Sung::Unknown => None,
         Sung::Instrumental => said(lang.pick("纯音乐", "Instrumental"), ""),
         Sung::Lines { lines, now, .. } => {
@@ -1252,7 +1252,7 @@ impl Choice {
                     recent::Filter::Downloads => lang.pick("下载", "Downloads"),
                     recent::Filter::Screenshots => lang.pick("截图", "Screenshots"),
                     recent::Filter::Documents => lang.pick("文档", "Documents"),
-                    _ => lang.pick("图片和视频", "Pictures"),
+                    _ => lang.pick("图片和视频", "Pictures and videos"),
                 };
                 choice(Tab::Recent(kind), name, false)
             })),
@@ -2172,7 +2172,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
     if notes.is_empty() {
         let middle = top + tall / 2.0;
         frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 20.0, theme.text3);
-        centred(frame, lang.pick("还没有便签，点加号新建一条", "No notes yet: the plus makes one"), theme.small, theme.text2, left, middle + 4.0, width);
+        centred(frame, lang.pick("还没有便签", "No notes yet"), theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
     let lit = |at: usize| notes.get(at).is_some_and(|note| scene.hover == Some(Hit::Note(note.number)));
@@ -2450,7 +2450,7 @@ const APP_ROWS: usize = 3;
 fn apps_lane(full: bool, named: bool, theme: &Theme, lang: Lang) -> Vec<Block> {
     let apps = crate::station::apps::named();
     let rows = if full { apps_rows(apps.len(), theme) } else { 1 };
-    vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full || named, over: crate::station::run::shown().apps_over }]
+    vec![head(lang.pick("快捷启动", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full || named, over: crate::station::run::shown().apps_over }]
 }
 
 /// The rows a whole quick launch lane takes for `count` things (and the place to add more) across a column's room in
@@ -2907,8 +2907,8 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     use crate::station::keep::Refused;
     let said = if let Some(refused) = shown.refused {
         Some(match refused {
-            Refused::Full => lang.pick("空间已满：请取消一些内容的固定和标签，或在设置中调大上限", "No room left: unpin and untag some, or allow more in the settings"),
-            Refused::Unwritten => lang.pick("未能保存副本：请检查磁盘空间，并确认文件未被其他程序占用", "A copy could not be kept: check the disk's free space, and that no other program holds the file"),
+            Refused::Full => lang.pick("空间已满：请取消一些内容的固定和标签，或在设置中调大上限", "Full. Unpin or untag some items, or raise the limit in Settings"),
+            Refused::Unwritten => lang.pick("未能保存副本：请检查磁盘空间，并确认文件未被其他程序占用", "Couldn't keep a copy. Check free disk space, and that no other program is using the file"),
         }.to_string())
     } else {
         None
@@ -3364,7 +3364,7 @@ pub fn sleeping(lang: Lang) -> &'static str {
 
 /// What a game asked for by hand says before its first frames.
 pub fn waiting(lang: Lang) -> String {
-    if front_is_game() { lang.pick("等待画面", "No frames yet").into() } else { String::new() }
+    if front_is_game() { lang.pick("等待画面", "Waiting for frames").into() } else { String::new() }
 }
 
 /// The lanes of the modules that are on and have something to show, all
@@ -4271,7 +4271,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             let (context, state, mut containers) = match &s.docker {
                 Some(DockerSample::Stopped { context }) => (context.clone(), lang.pick("未运行", "Not running").to_string(), Vec::new()),
-                Some(DockerSample::Unsupported { context, .. }) => (context.clone(), lang.pick("不支持这种连接", "Connection not supported").to_string(), Vec::new()),
+                Some(DockerSample::Unsupported { context, .. }) => (context.clone(), lang.pick("不支持这种连接", "Connection type not supported").to_string(), Vec::new()),
                 Some(DockerSample::Running { context, containers }) => {
                     let count = containers.len();
                     (context.clone(), if lang == Lang::Zh { format!("{count} 个容器") } else if count == 1 { "1 container".into() } else { format!("{count} containers") }, containers.iter().collect())
@@ -5577,9 +5577,9 @@ fn sending_said(sending: &crate::nearby::Sending, lang: Lang) -> String {
         Sending::Sent => lang.pick("已发送", "Sent").into(),
         Sending::Refused => lang.pick("对方已拒绝", "Declined").into(),
         Sending::Busy => lang.pick("对方正忙", "Busy").into(),
-        Sending::Pin { .. } => lang.pick("需要 PIN 码", "A PIN is needed").into(),
+        Sending::Pin { .. } => lang.pick("需要 PIN 码", "PIN required").into(),
         Sending::Cancelled => lang.pick("已取消", "Cancelled").into(),
-        Sending::Failed { .. } => lang.pick("发送失败", "Not sent").into(),
+        Sending::Failed { .. } => lang.pick("发送失败", "Couldn't send").into(),
     }
 }
 
@@ -5608,7 +5608,7 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
     let (name_font, kind_font) = chip_fonts(theme);
     if strip.chips.is_empty() {
         let middle = y + drop + STRIP_PAD.1 + STRIP_SAYS + STRIP_SAYS_GAP + chip_tall(theme) / 2.0;
-        centred(frame, lang.pick("正在查找附近的设备", "Looking for devices nearby"), theme.small, seen(theme.text3, 1.0), x, frame.line_top(theme.small, middle), w);
+        centred(frame, lang.pick("正在查找附近的设备", "Looking for nearby devices"), theme.small, seen(theme.text3, 1.0), x, frame.line_top(theme.small, middle), w);
     }
     for (chip, &(cx, cy, cw, ch)) in strip.chips.iter().zip(&chips) {
         let cy = cy + drop;
@@ -6627,8 +6627,8 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         let said = match page.tab {
             Tab::Recent(Filter::Pinned) => none_pinned(lang),
             Tab::Recent(Filter::Tagged(_)) => none_tagged(lang),
-            _ if nowhere => lang.pick("尚未选择要列出的文件夹", "No folders are chosen to list"),
-            Tab::Recent(Filter::All) => lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save show here"),
+            _ if nowhere => lang.pick("尚未选择要列出的文件夹", "No folders chosen"),
+            Tab::Recent(Filter::All) => lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save appear here"),
             _ => lang.pick("这一类没有新文件", "No new files of this kind"),
         };
         paint_none(frame, scene.theme, room, tall, page.tab, Icon::File, said);
@@ -6954,10 +6954,10 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     let (room, tall) = under_choices(frame, scene, (left, top, width), tall, page, hits);
     if tiles.is_empty() && page.groups.pinned == 0 {
         let said = match page.tab {
-            Tab::Copies(Filter::All) => lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"),
+            Tab::Copies(Filter::All) => lang.pick("复制的文字、图片和文件会出现在这里", "Text, pictures and files you copy appear here"),
             Tab::Copies(Filter::Pinned) => none_pinned(lang),
             Tab::Copies(Filter::Tagged(_)) => none_tagged(lang),
-            _ => lang.pick("这一类没有复制的内容", "Nothing of this kind was copied"),
+            _ => lang.pick("这一类没有复制的内容", "Nothing of this kind copied"),
         };
         paint_none(frame, scene.theme, room, tall, page.tab, Icon::Clipboard, said);
         return;

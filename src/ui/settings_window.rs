@@ -1376,7 +1376,7 @@ fn tone_of(status: &crate::reports::Status) -> super::ask::thread::Tone {
 fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread::Thread {
     use super::ask::thread::{Item, Thread};
     use crate::reports::{Kind, Status};
-    let attached = pick(lang, "附诊断信息", "With the diagnostics");
+    let attached = pick(lang, "附诊断信息", "Diagnostics attached");
     let mut items = vec![Item::Mine { when: thread_time(lang, report.sent), words: report.words.clone(), pictures: crate::reports::pictures(&report.id, 0, report.pictures), attached: attached.into() }];
     let mut before: Option<&crate::reports::Message> = None;
     for message in &report.thread {
@@ -1415,9 +1415,9 @@ fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread:
     let note = match &status {
         Status::Fixed(version) => match (update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
             (true, Lang::Zh) => format!("当前版本为 {}，更新到 {version} 即可获得此修复。", env!("CARGO_PKG_VERSION")),
-            (true, Lang::En) => format!("This is {}. Update to {version} to have the fix.", env!("CARGO_PKG_VERSION")),
+            (true, Lang::En) => format!("This is {}. Update to {version} to get the fix.", env!("CARGO_PKG_VERSION")),
             (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
-            (false, Lang::En) => "This version has the fix.".to_string(),
+            (false, Lang::En) => "This version includes the fix.".to_string(),
         },
         _ => String::new(),
     };
@@ -1437,9 +1437,9 @@ fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread:
 /// What a report's thread's window says besides the thread.
 fn thread_talk(lang: Lang, dark: bool) -> super::ask::thread::Talk<'static> {
     super::ask::thread::Talk {
-        hint: pick(lang, "输入补充说明，截图可拖入或粘贴（最多 3 张）", "Add to this report. Pictures may be dropped or pasted here (up to 3)"),
-        add: pick(lang, "添加截图", "Add a picture"),
-        paste: pick(lang, "粘贴截图", "Paste the picture"),
+        hint: pick(lang, "输入补充说明，截图可拖入或粘贴（最多 3 张）", "Add details. Drop or paste screenshots here (up to 3)"),
+        add: pick(lang, "添加截图", "Add screenshot"),
+        paste: pick(lang, "粘贴截图", "Paste screenshot"),
         kinds: pick(lang, "图片", "Pictures"),
         option: pick(lang, "附上当前的诊断信息", "Attach diagnostics"),
         send: pick(lang, "发送", "Send"),
@@ -2170,10 +2170,10 @@ struct Ui {
     fetching: Option<std::thread::JoinHandle<bool>>,
     fetch_failed: bool,
     /// Whether the lights are set with an administrator's rights, that being changed (on a thread: it may have to
-    /// fetch), and whether the last change failed.
+    /// fetch) with the state wanted, and the state the last change wanted if it failed.
     remote_raised: bool,
-    raising: Option<std::thread::JoinHandle<bool>>,
-    raise_failed: bool,
+    raising: Option<(bool, std::thread::JoinHandle<bool>)>,
+    raise_failed: Option<bool>,
     /// A switch that needs the sensors' rights, being turned (on another thread: their process is asked, and
     /// answers when the system has done it); what it is then.
     switching: Option<(SwitchAsked, std::thread::JoinHandle<bool>)>,
@@ -2237,8 +2237,8 @@ struct Ui {
     /// What the user adds to a report, being sent (on a thread of its own), and how the last went.
     adding: Option<(String, std::thread::JoinHandle<bool>)>,
     added: Option<(String, bool)>,
-    /// A report being closed by the user, or opened again (on a thread of its own): its id.
-    turning: Option<(String, std::thread::JoinHandle<bool>)>,
+    /// A report being closed by the user, or opened again (on a thread of its own): its id, and whether it is closed.
+    turning: Option<(String, bool, std::thread::JoinHandle<bool>)>,
     /// The report whose thread is open in its window (see `ask::thread`): its id, the window, and the report as the
     /// window was last given it.
     thread: Option<(String, HWND, crate::reports::Report)>,
@@ -2535,7 +2535,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             fetch_failed: false,
             remote_raised: false,
             raising: None,
-            raise_failed: false,
+            raise_failed: None,
             switching: None,
             reporting: None,
             netease_has: netease.as_ref().map_or(crate::netease::Installed::No, crate::netease::installed),
@@ -3089,10 +3089,10 @@ fn board_said(read: bool, laptop: bool, board: &str, lang: Lang) -> Option<Strin
         (true, _) => return (!board.is_empty()).then(|| board.to_string()),
         (false, true) => pick(
             lang,
-            "笔记本的主板温度与风扇转速由厂商的嵌入式控制器管理，多数机型不对外提供，因此无法显示。CPU、显卡与磁盘的温度不受影响",
-            "A laptop's board temperatures and fan speeds are kept by its maker's embedded controller, which most models do not open to other programs, so they cannot be shown. The temperatures of the CPU, the graphics and the drives are not affected",
+            "笔记本的主板温度与风扇转速由厂商的嵌入式控制器管理，多数机型不对外提供，因此无法显示。CPU、显卡与硬盘的温度不受影响",
+            "A laptop's board temperatures and fan speeds are managed by its maker's embedded controller, which most models don't open to other programs, so they can't be shown. CPU, graphics and drive temperatures are not affected",
         ),
-        (false, false) => pick(lang, "未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why"),
+        (false, false) => pick(lang, "未能读取主板传感器，原因见“通用”页中的诊断信息", "Couldn't read the motherboard sensors. See the diagnostics on the General page for why"),
     };
     Some(said.to_string())
 }
@@ -3102,13 +3102,13 @@ fn update_offer(state: update::State, lang: Lang) -> (String, Vec<(String, Targe
     let download = |kind| (p("前往下载", "Download"), Target::Download, kind);
     match state {
         update::State::Ready => (p("下载并运行安装程序", "Downloads and runs the installer"), vec![(p("更新", "Update"), Target::Update, Button::Accent)]),
-        update::State::Downloading => (p("正在下载安装程序…", "Downloading the installer…"), vec![(p("下载中", "Downloading"), Target::Update, Button::Quiet)]),
+        update::State::Downloading => (p("正在下载安装程序…", "Downloading the installer…"), vec![(p("更新", "Update"), Target::Update, Button::Quiet)]),
         update::State::Failed => (
-            p("下载失败，请重试或从官网下载", "The download failed. Retry, or download it from the website"),
+            p("下载失败", "Download failed"),
             vec![(p("重试", "Retry"), Target::Update, Button::Accent), download(Button::Plain)],
         ),
         update::State::Rejected => (
-            p("安装程序未通过验证，请从官网下载", "The installer did not pass its check. Download it from the website"),
+            p("安装程序未通过验证", "The installer failed verification"),
             vec![download(Button::Accent), (p("重试", "Retry"), Target::Update, Button::Plain)],
         ),
     }
@@ -3271,7 +3271,7 @@ impl Ui {
                 rows.push(Row::Note(pick(
                     self.lang,
                     "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
-                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position.",
+                    "To find lyrics online, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Synced lyrics need the player to report its position.",
                 )));
             }
             (Page::Devices, _) => self.device_rows(&mut rows),
@@ -3284,7 +3284,7 @@ impl Ui {
                 rows.push(Row::Note(pick(
                     self.lang,
                     "此处列出近 90 天内从本机发送的诊断信息。Glance 检查更新时一并获取开发者的回复与处理状态，有新消息时会提示。打开一份反馈可查看全部往来，并补充说明、截图或新的诊断信息。",
-                    "Here are the diagnostics sent from this PC in the last 90 days. As Glance checks for updates, it also fetches the developer's replies and how each report stands, and tells you of anything new. Open a report to read all that was said and to add words, pictures or fresh diagnostics.",
+                    "Diagnostics sent from this PC in the last 90 days. When Glance checks for updates, it also gets the developer's replies and each report's status, and lets you know of anything new. Open a report to read the whole conversation and add details, screenshots or new diagnostics.",
                 )));
             }
             (Page::General, _) => {
@@ -3472,13 +3472,13 @@ impl Ui {
     fn device_rows(&self, rows: &mut Vec<Row>) {
         let lang = self.lang;
         if !self.remote_there {
-            rows.push(Row::Note(pick(lang, "此版本的 Glance 未包含手机遥控与附近传输程序", "This copy of Glance came without the phone remote and nearby sharing")));
+            rows.push(Row::Note(pick(lang, "此版本的 Glance 未包含手机遥控与附近传输程序", "This version of Glance doesn't include Phone remote and Nearby sharing")));
             return;
         }
         rows.push(Row::PcName);
-        rows.push(Row::Group(pick(lang, "已配对的手机", "Phones paired")));
+        rows.push(Row::Group(pick(lang, "已配对的手机", "Paired phones")));
         if self.phones.is_empty() {
-            rows.push(Row::Note(pick(lang, "还没有配对的手机", "No phone is paired yet")));
+            rows.push(Row::Note(pick(lang, "还没有配对的手机", "No paired phones")));
         }
         for phone in &self.phones {
             rows.push(Row::Device(Known::Phone(phone.id.clone())));
@@ -3494,12 +3494,12 @@ impl Ui {
         }
         let trusted: Vec<Row> = self.known().into_iter().filter(|known| matches!(known, Known::Trusted(_))).map(Row::Device).collect();
         if !trusted.is_empty() {
-            rows.push(Row::Group(pick(lang, "已信任的设备", "Devices trusted")));
+            rows.push(Row::Group(pick(lang, "已信任的设备", "Trusted devices")));
             rows.extend(trusted);
         }
-        rows.push(Row::Group(pick(lang, "附近发现的设备", "Found nearby")));
+        rows.push(Row::Group(pick(lang, "附近发现的设备", "Nearby devices")));
         if self.found.is_empty() {
-            rows.push(Row::Note(pick(lang, "附近没有发现其他设备", "No other devices are found nearby")));
+            rows.push(Row::Note(pick(lang, "附近没有发现其他设备", "No other devices found nearby")));
         }
         rows.extend(self.found.iter().map(|device| Row::Found(device.fingerprint.clone())));
     }
@@ -3523,9 +3523,9 @@ impl Ui {
         match may {
             crate::phone::May::Control => (
                 pick(lang, "控制这台电脑", "Control this PC"),
-                pick(lang, "屏幕、灯光、音量、亮度与电源模式。关闭后，手机仅能查看状态", "Screens, lights, volume, brightness and the power mode. Off, the phone only sees how the PC is"),
+                pick(lang, "屏幕、灯光、音量、亮度与电源模式。关闭后，手机仅能查看状态", "Screens, lights, volume, brightness and power mode. When off, the phone can only view status"),
             ),
-            crate::phone::May::Files => (pick(lang, "直接接收文件", "Take its files without asking"), pick(lang, "关闭后，该手机发来的文件每次询问", "Off, what the phone sends is asked about each time")),
+            crate::phone::May::Files => (pick(lang, "直接接收文件", "Accept files automatically"), pick(lang, "关闭后，该手机发来的文件每次询问", "When off, you are asked each time this phone sends files")),
         }
     }
 
@@ -4055,7 +4055,7 @@ impl Ui {
                 Some(word) => (Cow::Owned(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
                 None => return 0.0,
             },
-            Row::PcName => (Cow::Borrowed(pick(self.lang, "在手机和附近设备上显示", "Shown on phones and devices nearby")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
+            Row::PcName => (Cow::Borrowed(pick(self.lang, "在手机和附近设备上显示", "Shown on phones and nearby devices")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
             // (Across the row under its name and its box: see `paint_list`.)
             Row::AiKey(id, field) => match self.ai_key_words(id, *field) {
                 Some((_, words)) => (Cow::Owned(words), width - ROW_SIDE - CHEVRON_ROOM - ITEM_INSET),
@@ -4085,6 +4085,10 @@ impl Ui {
                 None => return 0.0,
             },
         };
+        // (A row whose word is empty has none.)
+        if word.is_empty() {
+            return 0.0;
+        }
         // A 20 DIP line for the name, 2 apart, the word's lines, and room
         // above and below.
         22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, HINT, 400.0), room.max(40.0)) + 18.0
@@ -4182,11 +4186,11 @@ impl Ui {
                     update::Check::Checking => p("正在检查…", "Checking…"),
                     update::Check::Answered if update::available().is_some() => p("发现新版本", "A newer version is available"),
                     update::Check::Answered => p("已是最新版本", "Up to date"),
-                    update::Check::Unanswered => p("无法连接更新服务器，请稍后重试", "The update server could not be reached. Try again later"),
+                    update::Check::Unanswered => p("无法连接更新服务器", "Couldn't reach the update server"),
                     update::Check::Idle => p("尚未检查", "Not checked yet"),
                 };
                 let button = if update::check() == update::Check::Checking {
-                    (p("检查中", "Checking"), Target::CheckNow, Button::Quiet)
+                    (p("检查更新", "Check for updates"), Target::CheckNow, Button::Quiet)
                 } else {
                     (p("检查更新", "Check for updates"), Target::CheckNow, Button::Plain)
                 };
@@ -4194,23 +4198,23 @@ impl Ui {
             }
             &Row::Shortcut(which) => {
                 let (name, what, taken) = match which {
-                    Keys::Panel => (p("面板", "Panel"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
+                    Keys::Panel => (p("面板", "Panel"), p("打开或收起面板", "Opens or closes the panel"), crate::tray::hotkey_taken()),
                     Keys::Search => (p("搜索", "Search"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
-                    Keys::Preview => (p("预览", "Preview"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
+                    Keys::Preview => (p("预览", "Preview"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer or the selected search result"), crate::ui::look::key_taken()),
                 };
                 let recording = self.recording == Some(which);
                 let shortcut = self.shortcut(which);
                 let detail = match (recording, self.needs_modifier, shortcut) {
-                    (true, true, _) if which == Keys::Preview => p("组合键须包含 Ctrl 或 Alt", "Include Ctrl or Alt"),
-                    (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Include Ctrl, Alt or Win"),
-                    (true, false, _) => p("请按下组合键，按 Esc 取消", "Press the keys. Esc cancels"),
-                    (false, _, Some(_)) if taken => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
+                    (true, true, _) if which == Keys::Preview => p("组合键须包含 Ctrl 或 Alt", "Must include Ctrl or Alt"),
+                    (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Must include Ctrl, Alt or Win"),
+                    (true, false, _) => p("请按下组合键，按 Esc 取消", "Press a key combination. Esc to cancel"),
+                    (false, _, Some(_)) if taken => p("该组合键已被其他程序占用，请重新设置", "These keys are used by another program. Choose others"),
                     (false, _, _) => what,
                 };
                 let keys = match (recording, shortcut) {
                     (true, _) => (p("请按键…", "Press keys…"), Target::Shortcut(which), Button::Taking),
                     (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Target::Shortcut(which), Button::Plain),
-                    (false, None) => (p("未设置", "None"), Target::Shortcut(which), Button::Plain),
+                    (false, None) => (p("未设置", "Not set"), Target::Shortcut(which), Button::Plain),
                 };
                 // With a shortcut set, a button to clear it, right of its keys.
                 let mut buttons = Vec::new();
@@ -4226,16 +4230,16 @@ impl Ui {
                 let action = if copied { p("已复制", "Copied") } else { p("复制", "Copy") };
                 // What became of the last sending, once there was one.
                 let (detail, send) = match (&self.sending, &self.sent) {
-                    (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送中", "Sending"), Target::SendReport, Button::Quiet)),
+                    (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送", "Send"), Target::SendReport, Button::Quiet)),
                     (None, Some(Some(id))) => (
                         match lang {
                             Lang::Zh => format!("已发送，编号 {id}。反馈问题时请附上此编号"),
-                            Lang::En => format!("Sent as {id}. Quote it when reporting the problem"),
+                            Lang::En => format!("Sent as {id}. Include it when reporting the problem"),
                         },
                         (p("再发一次", "Send again"), Target::SendReport, Button::Plain),
                     ),
-                    (None, Some(None)) => (p("发送失败，可复制后附在反馈中", "Sending failed. Copy it into a report instead"), (p("重试", "Retry"), Target::SendReport, Button::Plain)),
-                    (None, None) => (p("硬件识别有误，或灯光、显示器无法控制时，可发送或复制诊断信息", "When hardware is read wrongly, or lights or monitors cannot be controlled, send or copy these"), (p("发送", "Send"), Target::SendReport, Button::Plain)),
+                    (None, Some(None)) => (p("发送失败，可复制后附在反馈中", "Couldn't send. You can copy it into a report instead"), (p("重试", "Retry"), Target::SendReport, Button::Plain)),
+                    (None, None) => (p("硬件识别有误，或无法控制灯光、显示器时使用", "Use when hardware is identified wrongly, or lights or monitors can't be controlled"), (p("发送", "Send"), Target::SendReport, Button::Plain)),
                 };
                 (p("诊断信息", "Diagnostics"), detail, vec![(action, Target::Diagnostics, Button::Plain), send])
             }
@@ -4243,9 +4247,9 @@ impl Ui {
                 let unread = self.followed.iter().filter(|report| report.unread()).count();
                 let detail = match (lang, unread) {
                     (Lang::Zh, 0) => format!("已发送 {} 份，可查看回复与处理状态", self.followed.len()),
-                    (Lang::En, 0) => format!("{} sent. See the replies and how each stands", self.followed.len()),
+                    (Lang::En, 0) => format!("{} sent. See the replies and status", self.followed.len()),
                     (Lang::Zh, unread) => format!("已发送 {} 份，其中 {unread} 份有新消息", self.followed.len()),
-                    (Lang::En, unread) => format!("{} sent, {unread} with news", self.followed.len()),
+                    (Lang::En, unread) => format!("{} sent, {unread} with updates", self.followed.len()),
                 };
                 let kind = if unread > 0 { Button::Accent } else { Button::Plain };
                 (p("我的反馈", "My reports"), detail, vec![(p("查看", "View"), Target::MyReports, kind)])
@@ -4256,14 +4260,14 @@ impl Ui {
                 let name = if first.is_empty() { id.clone() } else { format!("{id} · {first}") };
                 let sent = crate::ui::text::Local::at(report.sent).date(lang);
                 let detail = match (&self.adding, &self.added) {
-                    (Some((adding, _)), _) if adding == id => p("正在发送补充内容…", "Sending what you added…"),
-                    (None, Some((added, true))) if added == id => p("补充内容已发送", "What you added was sent"),
-                    (None, Some((added, false))) if added == id => p("补充内容发送失败，请稍后重试", "What you added could not be sent. Try again later"),
+                    (Some((adding, _)), _) if adding == id => p("正在发送补充内容…", "Sending the details you added…"),
+                    (None, Some((added, true))) if added == id => p("补充内容已发送", "Details sent"),
+                    (None, Some((added, false))) if added == id => p("补充内容未能发送", "Couldn't send the details"),
                     _ => {
                         let status = status_words(lang, &report.status());
                         match (lang, report.unread()) {
                             (Lang::Zh, true) => format!("有新消息 · {status} · {sent}发送"),
-                            (Lang::En, true) => format!("News · {status} · sent {sent}"),
+                            (Lang::En, true) => format!("Updated · {status} · sent {sent}"),
                             (Lang::Zh, false) => format!("{status} · {sent}发送"),
                             (Lang::En, false) => format!("{status} · sent {sent}"),
                         }
@@ -4278,31 +4282,31 @@ impl Ui {
                 let remove = (p("移除", "Remove"), Target::NetEase(NetEaseWork::Remove), Button::Plain);
                 let icon_row = |text| (text, Target::NetEase(NetEaseWork::IconRow), Button::Accent);
                 let (detail, buttons) = match (self.netease_work.as_ref().map(|(work, _)| *work), self.netease_failed) {
-                    (Some(NetEaseWork::Install), _) => (p("正在下载并安装…", "Downloading and installing…"), vec![(p("安装中", "Installing"), Target::NetEase(NetEaseWork::Install), Button::Quiet)]),
-                    (Some(NetEaseWork::Remove), _) => (p("正在移除…", "Removing…"), vec![(p("移除中", "Removing"), Target::NetEase(NetEaseWork::Remove), Button::Quiet)]),
-                    (Some(NetEaseWork::IconRow), _) => (p("正在更新…", "Updating…"), vec![(p("更新中", "Updating"), Target::NetEase(NetEaseWork::IconRow), Button::Quiet)]),
-                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Taken))) => (p("下载失败或文件未通过校验，请稍后重试", "The download failed or did not pass its check. Try again later"), vec![install(p("重试", "Retry"))]),
-                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Put))) => (p("未能写入插件文件，安装未完成", "The plugin's files could not be written. It was not installed"), vec![install(p("重试", "Retry"))]),
-                    (None, Some((NetEaseWork::Remove, _))) => (p("未能移除，请关闭网易云音乐后重试", "It could not be removed. Close NetEase Cloud Music and try again"), vec![remove]),
-                    (None, Some((NetEaseWork::IconRow, _))) => (p("未能写入插件文件，更新未完成", "The plugin's file could not be written. It was not updated"), vec![icon_row(p("重试", "Retry"))]),
+                    (Some(NetEaseWork::Install), _) => (p("正在下载并安装…", "Downloading and installing…"), vec![(p("安装", "Install"), Target::NetEase(NetEaseWork::Install), Button::Quiet)]),
+                    (Some(NetEaseWork::Remove), _) => (p("正在移除…", "Removing…"), vec![(p("移除", "Remove"), Target::NetEase(NetEaseWork::Remove), Button::Quiet)]),
+                    (Some(NetEaseWork::IconRow), _) => (p("正在更新…", "Updating…"), vec![(p("更新", "Update"), Target::NetEase(NetEaseWork::IconRow), Button::Quiet)]),
+                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Taken))) => (p("下载失败或文件未通过校验", "Download failed or the file failed verification"), vec![install(p("重试", "Retry"))]),
+                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Put))) => (p("未能写入插件文件，安装未完成", "Couldn't write the plugin files. Not installed"), vec![install(p("重试", "Retry"))]),
+                    (None, Some((NetEaseWork::Remove, _))) => (p("未能移除，请关闭网易云音乐后重试", "Couldn't remove it. Close NetEase Cloud Music and try again"), vec![remove]),
+                    (None, Some((NetEaseWork::IconRow, _))) => (p("未能写入插件文件，更新未完成", "Couldn't write the plugin file. Not updated"), vec![icon_row(p("重试", "Retry"))]),
                     (None, None) if self.netease_has == crate::netease::Installed::Yes && self.netease_restart => (
-                        p("已安装，重新启动网易云音乐后生效", "Installed. It works once NetEase Cloud Music starts again"),
-                        vec![(p("重启网易云音乐", "Restart NetEase"), Target::NetEaseRestart, Button::Accent), remove],
+                        p("已安装，重新启动网易云音乐后生效", "Installed. Takes effect after NetEase Cloud Music restarts"),
+                        vec![(p("重启网易云音乐", "Restart NetEase Cloud Music"), Target::NetEaseRestart, Button::Accent), remove],
                     ),
-                    (None, None) if self.netease_has == crate::netease::Installed::Yes => (p("已安装，网易云音乐可提供播放进度以显示同步歌词", "Installed. NetEase Cloud Music says how far into a track it is, for synced lyrics"), vec![remove]),
+                    (None, None) if self.netease_has == crate::netease::Installed::Yes => (p("已安装，网易云音乐可提供播放进度以显示同步歌词", "Installed. NetEase Cloud Music now reports its position for synced lyrics"), vec![remove]),
                     (None, None) if self.netease_has == crate::netease::Installed::NoIconRow => (
                         p(
                             "已安装。BetterNCM 按钮会使网易云音乐右上角的图标排成两行，更新后可排在同一行",
-                            "Installed. The BetterNCM button pushes NetEase Cloud Music's icons at the top right onto a second row. Updating puts them back on one",
+                            "Installed. The BetterNCM button moves NetEase Cloud Music's top-right icons onto a second row. Updating puts them back on one row",
                         ),
                         vec![icon_row(p("更新", "Update")), remove],
                     ),
                     (None, None) => {
                         let detail = match (lang, netease.tested()) {
                             (Lang::Zh, true) => "安装 InfLink-rs 插件后，网易云音乐可提供播放进度以显示同步歌词".to_string(),
-                            (Lang::En, true) => "With the InfLink-rs plugin, NetEase Cloud Music says how far into a track it is, for synced lyrics".to_string(),
+                            (Lang::En, true) => "With the InfLink-rs plugin, NetEase Cloud Music reports its position for synced lyrics".to_string(),
                             (Lang::Zh, false) => format!("安装 InfLink-rs 插件后可显示同步歌词。当前版本 {} 未经该插件测试", netease.version()),
-                            (Lang::En, false) => format!("With the InfLink-rs plugin, lyrics are synced. It was not tested on version {}", netease.version()),
+                            (Lang::En, false) => format!("With the InfLink-rs plugin, lyrics sync. Not tested on version {}", netease.version()),
                         };
                         (detail, vec![install(p("安装", "Install"))])
                     }
@@ -4313,24 +4317,24 @@ impl Ui {
                 let put_in = (p("接入", "Connect"), Target::ClaudeLimits(true), Button::Accent);
                 let take_out = (p("取消接入", "Disconnect"), Target::ClaudeLimits(false), Button::Plain);
                 let (detail, buttons) = match (self.claude_failed, self.claude_limits) {
-                    (true, crate::ai::statusline::Standing::In) => (p("未能写入 Claude Code 的设置文件，接入未取消", "Claude Code's settings could not be written. It is still connected"), vec![take_out]),
-                    (true, _) => (p("未能写入 Claude Code 的设置文件，接入未完成", "Claude Code's settings could not be written. It was not connected"), vec![(p("重试", "Retry"), Target::ClaudeLimits(true), Button::Accent)]),
-                    (false, crate::ai::statusline::Standing::In) => (p("已接入 Claude Code 状态栏，额度在 Claude Code 运行时更新", "Connected to Claude Code's status line. The limits are told as Claude Code runs"), vec![take_out]),
-                    (false, _) => (p("通过 Claude Code 状态栏读取 5 小时与每周额度，原有的状态栏照常显示", "The five-hour and weekly limits read through Claude Code's status line. Its own status line shows as before"), vec![put_in]),
+                    (true, crate::ai::statusline::Standing::In) => (p("未能写入 Claude Code 的设置文件，接入未取消", "Couldn't write Claude Code's settings. Still connected"), vec![take_out]),
+                    (true, _) => (p("未能写入 Claude Code 的设置文件，接入未完成", "Couldn't write Claude Code's settings. Not connected"), vec![(p("重试", "Retry"), Target::ClaudeLimits(true), Button::Accent)]),
+                    (false, crate::ai::statusline::Standing::In) => (p("已接入 Claude Code 状态栏，额度在 Claude Code 运行时更新", "Connected to Claude Code's status line. Limits update while Claude Code runs"), vec![take_out]),
+                    (false, _) => (p("通过 Claude Code 状态栏读取 5 小时与每周额度，原有的状态栏照常显示", "Reads the 5-hour and weekly limits through Claude Code's status line. Its own status line still shows"), vec![put_in]),
                 };
                 (p("Claude 订阅额度", "Claude plan limits"), detail, buttons)
             }
             Row::Uninstall => (
                 p("卸载 Glance", "Uninstall Glance"),
-                p("卸载程序并删除设置，执行前会再次确认", "Removes Glance and its settings, after asking"),
+                p("卸载程序并删除设置，执行前会再次确认", "Removes Glance and its settings. Asks first"),
                 vec![(p("卸载", "Uninstall"), Target::Uninstall, Button::Plain)],
             ),
             Row::Manage(managed) => {
                 let (count, title, detail) = match managed {
-                    Managed::Phones => (self.phones.len(), (("已配对 ", " 部手机"), ("", " phones paired")), p("添加手机和解除配对在“设备”页", "Phones are added and unpaired on the Devices page")),
+                    Managed::Phones => (self.phones.len(), (("已配对 ", " 部手机"), ("", " paired phones")), String::new()),
                     Managed::Trusted => {
                         let count = self.phones.iter().filter(|phone| phone.files && !phone.web).count() + self.known().iter().filter(|known| matches!(known, Known::Trusted(_))).count();
-                        (count, (("已信任 ", " 台设备"), ("", " devices trusted")), p("已配对的手机自动信任", "Phones paired are trusted"))
+                        (count, (("已信任 ", " 台设备"), ("", " trusted devices")), p("已配对的手机自动信任", "Paired phones are trusted"))
                     }
                 };
                 let ((zh_before, zh_after), (en_before, en_after)) = title;
@@ -4346,16 +4350,16 @@ impl Ui {
                 let phone = self.phone_of(id)?;
                 let name = if phone.name.is_empty() { p("未命名的手机", "Unnamed phone") } else { phone.name.clone() };
                 let mut said = vec![if phone.web { pick(lang, "网页", "Web page") } else { pick(lang, "Glance 手机", "Glance phone") }];
-                said.push(if phone.control { pick(lang, "可控制这台电脑", "Controls this PC") } else { pick(lang, "仅查看状态", "Sees status only") });
+                said.push(if phone.control { pick(lang, "可控制这台电脑", "Can control this PC") } else { pick(lang, "仅查看状态", "View status only") });
                 if phone.files && !phone.web {
-                    said.push(pick(lang, "直接接收文件", "Files without asking"));
+                    said.push(pick(lang, "直接接收文件", "Accepts files automatically"));
                 }
                 (name, said.join(" · "), Vec::new())
             }
             Row::Device(Known::Trusted(fingerprint)) => {
                 let trusted = self.trusted(fingerprint)?;
                 let name = if trusted.alias.is_empty() { p("未命名的设备", "Unnamed device") } else { trusted.alias.clone() };
-                let said = format!("{} · {}", maker(lang, trusted.glance, trusted.kind.as_deref()), pick(lang, "直接接收文件", "Files without asking"));
+                let said = format!("{} · {}", maker(lang, trusted.glance, trusted.kind.as_deref()), pick(lang, "直接接收文件", "Accepts files automatically"));
                 let detail = match (trusted.since, lang) {
                     (0, _) => said,
                     (since, Lang::Zh) => format!("{said} · {}起", day_said(lang, since)),
@@ -4365,7 +4369,7 @@ impl Ui {
             }
             Row::Unpair(id) => (
                 p("解除配对", "Unpair"),
-                p("解除后，该手机需重新添加才能使用", "Unpaired, the phone is to be added again before it is used"),
+                String::new(),
                 vec![(p("解除配对", "Unpair"), Target::Unpair(id.clone()), Button::Plain)],
             ),
             // A device found: whose it is (Glance's, or LocalSend's), what, and what trusting it does; being trusted,
@@ -4376,12 +4380,12 @@ impl Ui {
                 let what = device.model.clone().filter(|model| !model.trim().is_empty()).unwrap_or_else(|| kind_word(lang, device.kind.as_deref()).to_string());
                 let detail = match lang {
                     Lang::Zh => format!("{} · {what}。信任后，它发来的文件直接接收", maker(lang, device.glance, device.kind.as_deref())),
-                    Lang::En => format!("{} · {what}. Trusted, what it sends is taken without asking", maker(lang, device.glance, device.kind.as_deref())),
+                    Lang::En => format!("{} · {what}. Trusted, so its files are accepted automatically", maker(lang, device.glance, device.kind.as_deref())),
                 };
                 let trust = |text: String, kind: Button| vec![(text, Target::TrustFound(fingerprint.clone()), kind)];
                 match self.trusting.get(fingerprint) {
-                    Some(None) => (name, detail, trust(p("正在验证", "Checking"), Button::Quiet)),
-                    Some(Some(_)) => (name, p("未能验证这台设备，请确认它仍在附近并已打开", "This device could not be checked. See that it is still nearby and open"), trust(p("重试", "Try again"), Button::Plain)),
+                    Some(None) => (name, detail, trust(p("正在验证", "Verifying"), Button::Quiet)),
+                    Some(Some(_)) => (name, p("未能验证这台设备，请确认它仍在附近并已打开", "Couldn't verify this device. Make sure it is still nearby and turned on"), trust(p("重试", "Try again"), Button::Plain)),
                     None => (name, detail, trust(p("信任", "Trust"), Button::Plain)),
                 }
             }
@@ -4389,17 +4393,17 @@ impl Ui {
             Row::NearbyFolder => {
                 let quiet = |kind: Button| if self.dimmed(row) { kind.quieted() } else { kind };
                 let (detail, chosen) = match &self.settings.nearby_folder {
-                    None => (p("放入中转站，按其保留期限清理", "Put on the station, and cleared as the station keeps things"), p("中转站", "Station")),
+                    None => (p("放入中转站，按其保留期限清理", "Added to Station and cleared by its retention period"), p("中转站", "Station")),
                     Some(folder) => {
                         let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
                         let said = match lang {
                             Lang::Zh => format!("以原名存入 {}。中转站中同时列出，移除或到期只去掉那一项，文件保留", folder.display()),
-                            Lang::En => format!("Kept under their own names in {}. Listed on the station too: taken off it, or gone with time, only the entry goes and the files stay", folder.display()),
+                            Lang::En => format!("Saved under their own names in {}. Removing them from Station, or their expiry, keeps the files", folder.display()),
                         };
                         (said, name)
                     }
                 };
-                (p("保存位置", "Kept in"), detail, vec![(p("打开", "Open"), Target::OpenStation, quiet(Button::Plain)), (chosen, Target::KeptIn, quiet(Button::Menu))])
+                (p("保存位置", "Save to"), detail, vec![(p("打开", "Open"), Target::OpenStation, quiet(Button::Plain)), (chosen, Target::KeptIn, quiet(Button::Menu))])
             }
             // A folder by its name, where it is under it (a drive's top, by itself).
             Row::RecentFolder(folder) => (
@@ -4409,16 +4413,16 @@ impl Ui {
             ),
             Row::AddRecentFolder => (
                 p("添加文件夹", "Add a folder"),
-                p("所选文件夹的子文件夹一并列出，不列出的文件夹除外", "Their subfolders are listed too, but for folders not listed"),
-                vec![(if self.choosing_folders.is_some() { (p("选择中", "Choosing"), Target::AddRecentFolder, Button::Quiet) } else { (p("选择", "Choose"), Target::AddRecentFolder, Button::Plain) })],
+                p("包括其子文件夹", "Including subfolders"),
+                vec![(p("选择", "Choose"), Target::AddRecentFolder, if self.choosing_folders.is_some() { Button::Quiet } else { Button::Plain })],
             ),
             Row::AddFolder => (
                 p("文件夹", "Folders"),
                 match lang {
                     Lang::Zh => format!("在“存储”中显示文件夹的大小，最多 {} 个，也可将文件夹拖到“存储”上", crate::folders::MOST),
-                    Lang::En => format!("The sizes of folders, shown under Storage, {} at most. Folders can be dragged onto it too", crate::folders::MOST),
+                    Lang::En => format!("Folder sizes shown under Storage, {} at most. You can also drag folders onto Storage", crate::folders::MOST),
                 },
-                vec![(if self.choosing_folders.is_some() { p("选择中", "Choosing") } else { p("添加文件夹", "Add folders") }, Target::AddFolder, if self.may_add_folder() { Button::Plain } else { Button::Quiet })],
+                vec![(p("添加文件夹", "Add folders"), Target::AddFolder, if self.may_add_folder() && self.choosing_folders.is_none() { Button::Plain } else { Button::Quiet })],
             ),
             Row::Guide => (
                 p("使用引导", "Guide"),
@@ -4482,11 +4486,11 @@ impl Ui {
             ),
             Field::Adding => (pick(lang, "添加方式", "How to add"), vec![s("配对码", "Pairing code"), s("下载 APP", "Get the app")], Some(usize::from(self.stage_shows == CodeFor::App))),
             Field::NearbyOthers => (
-                pick(lang, "来自未信任设备的文件", "Files from devices not trusted"),
-                vec![s("每次询问", "Ask each time"), s("一律拒绝", "Refuse")],
+                pick(lang, "来自未信任设备的文件", "Files from untrusted devices"),
+                vec![s("每次询问", "Ask each time"), s("一律拒绝", "Always decline")],
                 self.nearby.as_ref().map(|nearby| usize::from(nearby.others_refused)),
             ),
-            Field::AiForm => (pick(lang, "划出时显示", "Shown from the edge"), vec![s("卡片", "Card"), s("边条", "Dock")], Some(usize::from(settings.ai_form == crate::settings::AiForm::Dock))),
+            Field::AiForm => (pick(lang, "划出时显示", "Edge style"), vec![s("卡片", "Card"), s("边条", "Dock")], Some(usize::from(settings.ai_form == crate::settings::AiForm::Dock))),
             Field::AiLeft => (pick(lang, "额度显示", "Limits shown"), vec![s("已用", "Used"), s("剩余", "Left")], Some(usize::from(prefs.ai_left))),
             Field::MusicSource => {
                 let mut options = vec![s("自动", "Automatic")];
@@ -4495,11 +4499,11 @@ impl Ui {
                     Some(source) => self.sources.iter().position(|(id, _)| *id == source.id).map(|at| at + 1),
                     None => Some(0),
                 };
-                (pick(lang, "音乐来源", "Music from"), options, chosen)
+                (pick(lang, "音乐来源", "Music source"), options, chosen)
             }
             Field::OverlayShow => (
                 pick(lang, "显示悬浮窗", "Show the overlay"),
-                vec![s("关闭", "Off"), s("游戏时", "While playing"), s("始终", "Always")],
+                vec![s("关闭", "Off"), s("游戏时", "While gaming"), s("始终", "Always")],
                 OVERLAY_SHOWN.iter().position(|&when| when == settings.overlay.shown()),
             ),
             Field::OverlayRows => (
@@ -4509,12 +4513,12 @@ impl Ui {
             ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
-                vec![s("鼠标处", "At the pointer"), s("边缘居中", "Centred")],
+                vec![s("鼠标处", "At the pointer"), s("边缘居中", "Centered on edge")],
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
             Field::OverFullscreen => (
-                pick(lang, "全屏游戏中呼出", "Over fullscreen games"),
-                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("快捷键与边缘", "Shortcut and edge")],
+                pick(lang, "全屏游戏中呼出", "In fullscreen games"),
+                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut only"), s("快捷键与边缘", "Shortcut and edge")],
                 [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both].iter().position(|&o| o == settings.over_fullscreen),
             ),
             Field::WebSearch => (
@@ -4528,24 +4532,24 @@ impl Ui {
                 [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns_of(self.previewed())),
             ),
             Field::Push => (
-                pick(lang, "推边缘呼出", "Push into the edge"),
+                pick(lang, "推边缘呼出", "Push strength"),
                 vec![s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
                 [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm].iter().position(|&p| p == settings.sensitivity),
             ),
             Field::CloseDelay => (
-                pick(lang, "离开后收起", "Close after"),
+                pick(lang, "离开后收起", "Hide after leaving"),
                 vec![s("立即", "At once"), seconds("0.5"), seconds("1")],
                 at(&[200, 500, 1000], settings.close_delay_ms),
             ),
             Field::RateUnit => (pick(lang, "网速单位", "Speed unit"), vec!["MB/s".into(), "Mbps".into()], Some(prefs.network.bits as usize)),
             Field::PingTarget => (
-                pick(lang, "延迟测试地址", "Latency measured to"),
+                pick(lang, "延迟测试地址", "Ping target"),
                 vec![s("网关", "Gateway"), s("阿里", "Alibaba"), s("腾讯", "Tencent"), "Cloudflare".into()],
                 prefs::PingTarget::ALL.iter().position(|&to| to == prefs.network.ping_to(lang)),
             ),
             Field::MusicGround => (
                 pick(lang, "背景", "Background"),
-                vec![s("封面", "Cover"), s("跟随外观", "Skin"), s("无", "None")],
+                vec![s("封面", "Cover"), s("跟随外观", "Match appearance"), s("无", "None")],
                 MusicGround::ALL.iter().position(|&ground| ground == prefs.music.ground),
             ),
             Field::ProcessCount => (
@@ -4554,7 +4558,7 @@ impl Ui {
                 at(&[5, 8, 12], prefs.processes.count as u64),
             ),
             Field::DevicesForm => (
-                pick(lang, "显示方式", "Shown as"),
+                pick(lang, "显示方式", "Display as"),
                 vec![s("圆环", "Rings"), s("列表", "List")],
                 DevicesForm::ALL.iter().position(|&form| form == prefs.devices.form),
             ),
@@ -4572,17 +4576,17 @@ impl Ui {
             // (Shown only while there are any: see `rows`.)
             Field::StationHidden => {
                 let n = settings.recent_hidden.len();
-                (pick(lang, "不列出的文件夹", "Folders not listed"), vec![if lang == Lang::Zh { format!("{n} 个") } else { format!("{n}") }, s("全部恢复", "List all again")], Some(0))
+                (pick(lang, "不列出的文件夹", "Folders not listed"), vec![if lang == Lang::Zh { format!("{n} 个") } else { format!("{n}") }, s("全部恢复", "Restore all")], Some(0))
             }
             Field::StationKeep => (
-                pick(lang, "未固定项目保留", "Unpinned items kept"),
+                pick(lang, "未固定项目保留", "Keep unpinned items"),
                 vec![s("1 天", "1 day"), s("7 天", "7 days"), s("30 天", "30 days")],
                 at(&STATION_DAYS.map(u64::from), u64::from(settings.station.keep_days)),
             ),
-            Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
-            Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
+            Field::StationCopy => (pick(lang, "拖入的文件", "Dropped files"), vec![s("仅记位置", "Link only"), s("保留副本", "Keep a copy")], Some(usize::from(settings.station.always_copy))),
+            Field::StationAfterDrag => (pick(lang, "拖出以后", "After dragging out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
             Field::TodoLead => (
-                pick(lang, "有时间的待办提前（分钟）", "Timed to-dos, minutes before"),
+                pick(lang, "有时间的待办提前（分钟）", "Remind before timed to-dos (minutes)"),
                 crate::settings::TODO_LEADS.iter().map(|&lead| if lead == 0 { s("准时", "On time") } else { lead.to_string() }).collect(),
                 at(&crate::settings::TODO_LEADS.map(u64::from), u64::from(settings.todo_lead)),
             ),
@@ -4591,7 +4595,7 @@ impl Ui {
                 let chosen = times.iter().position(|time| *time == settings.todo_day_at);
                 (pick(lang, "全天的待办", "All-day to-dos"), times, chosen)
             }
-            Field::RecentScope => (pick(lang, "列出范围", "Listed from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
+            Field::RecentScope => (pick(lang, "列出范围", "List from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
                 vec!["75 °C".into(), "85 °C".into(), "95 °C".into()],
@@ -4975,7 +4979,7 @@ impl Ui {
         let lang = self.lang;
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
-            Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
+            Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass transparency"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
     }
@@ -5019,43 +5023,37 @@ impl Ui {
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
-            Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "What devices trusted send is taken without asking")),
-            Field::AiLeft => Some(pick(self.lang, "按已用多少显示，或按还剩多少显示", "By how much of each limit is used, or how much is left")),
+            Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "Files from trusted devices are accepted automatically")),
             Field::DevicesForm => Some(pick(
                 self.lang,
                 "圆环仅在设备不超过四个且类型各不相同时使用，否则以列表显示",
-                "Rings are shown while there are four devices at most, each of a different kind. Otherwise they are listed",
+                "Rings are used when there are at most four devices, each of a different kind. Otherwise they are listed",
             )),
             Field::AiForm => Some(pick(
                 self.lang,
-                "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情。位于顶部边缘时横向排列",
-                "The dock lies along the screen's edge, a source's detail shown beside it as the pointer rests on it. Along a top edge, it lies across",
+                "鼠标停在某一来源上时显示其详情",
+                "Hover over a source to see its details",
             )),
             Field::MusicSource => Some(pick(
                 self.lang,
-                "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器。时间与媒体不受此项影响",
-                "Automatic follows music players only. For music in a web page, choose the browser. The time and media are not affected",
-            )),
-            Field::MusicGround => Some(pick(
-                self.lang,
-                "封面为模糊的专辑封面，跟随外观时与其他组件的底色、文字颜色一致，无背景时文字加描边",
-                "The cover blurred, the skin's ground and ink as every other widget has, or none with its words edged",
+                "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器",
+                "Automatic follows music players only. For music in a web page, choose the browser",
             )),
             Field::RecentScope => Some(pick(
                 self.lang,
                 "选择指定文件夹时，仅列出下列文件夹及其子文件夹中的文件",
-                "Chosen folders lists only the files in the folders below and their subfolders",
+                "With Chosen folders, only files in the folders below and their subfolders are listed",
             )),
-            Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
+            Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer against the screen edge to open the panel. Firmer means fewer accidental opens")),
             Field::WebSearch => Some(pick(
                 self.lang,
-                "在浏览器中搜索所输入的文字时使用的搜索引擎。选择结果之前不会发送任何内容",
-                "Where the words typed are searched for in the browser. Nothing is sent until that result is chosen",
+                "选择网页搜索结果之前，不会发送任何内容",
+                "Nothing is sent until you choose a web search result",
             )),
             Field::OverFullscreen => Some(pick(
                 self.lang,
                 "包括独占全屏与无边框全屏的游戏。独占全屏的游戏会暂时切出，收起面板后自动恢复",
-                "Exclusive and borderless fullscreen games alike. An exclusive one steps out until the panel closes",
+                "Includes exclusive and borderless fullscreen games. Exclusive fullscreen games step out until the panel closes",
             )),
             _ => None,
         }
@@ -5068,12 +5066,12 @@ impl Ui {
         let (name, hint, on) = match switch {
             Switch::Live => (
                 p("背景实时刷新", "Live background"),
-                Some(p("玻璃背后的画面随桌面实时更新，背景变化时会占用一定的处理器与显卡资源", "What shows through the glass follows the desktop as it changes, at some cost in processor and graphics time")),
+                Some(p("玻璃背后的画面随桌面实时更新，背景变化时会占用一定的处理器与显卡资源", "The glass follows the desktop as it changes, using some CPU and GPU time")),
                 self.settings.live_backdrop,
             ),
             Switch::TearOff => (
-                p("拖出面板成为小组件", "Drag the panel off as a widget"),
-                Some(p("按住面板拖离屏幕边缘，即可将其放在桌面上", "Drag the panel away from the screen's edge to keep it on the desktop")),
+                p("拖出面板成为小组件", "Drag panels out as widgets"),
+                Some(p("按住面板拖离屏幕边缘，即可将其放在桌面上", "Drag a panel away from the screen edge to keep it on the desktop")),
                 self.settings.tear_off,
             ),
             // Only a copy no ordinary program can replace (one the installer
@@ -5081,64 +5079,64 @@ impl Ui {
             Switch::Startup => (
                 p("开机时启动", "Start with Windows"),
                 (!self.may_autostart).then(|| {
-                    p("当前安装位置不受保护，无法启用。点击查看原因", "Unavailable in this location. Click for details")
+                    p("当前安装位置不受保护，无法启用。单击查看原因", "Unavailable in this location. Click for details")
                 }),
                 self.autostart,
             ),
             Switch::TrayHidden => (
                 p("隐藏托盘图标", "Hide the tray icon"),
-                Some(p("隐藏后，再次启动 Glance 即可打开设置，通知仍会显示", "With it hidden, starting Glance again opens the settings. Notifications still show")),
+                Some(p("隐藏后，再次启动 Glance 即可打开设置，通知仍会显示", "When hidden, start Glance again to open Settings. Notifications still show")),
                 self.settings.tray_hidden,
             ),
             Switch::OverlayOutline => (
                 p("文字描边", "Text outline"),
                 Some(p(
                     "玻璃调至透明时，为文字、标记与曲线添加细描边，使其在各类背景上保持清晰",
-                    "As the glass is made clearer, words, marks and the chart are finely outlined to stay legible over any background",
+                    "When the glass is more transparent, text, markers and charts get a fine outline to stay readable on any background",
                 )),
                 self.settings.overlay.outline,
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
-                Some(p("CPU 或 GPU 温度持续 30 秒达到警示值时，通过托盘通知", "A tray notice once the CPU or a GPU has been at the alert for 30 seconds")),
+                Some(p("CPU 或 GPU 温度持续 30 秒达到警示值时，通过托盘通知", "Notifies you when the CPU or GPU stays at the alert temperature for 30 seconds")),
                 self.settings.heat_alert,
             ),
             Switch::RemoteLights => {
                 let hint = if self.fetching.is_some() {
                     p("正在下载，请稍候…", "Downloading…")
                 } else if self.fetch_failed {
-                    p("下载失败，请稍后重试", "The download failed. Try again later")
+                    p("下载失败", "Download failed")
                 } else {
-                    p("主板、显卡等的 RGB 灯光通过开源软件 OpenRGB 控制。开启时从其官方地址下载（约 22 MB），关闭时删除", "Board and card RGB lights are set through OpenRGB, an open-source program. Turned on, it is downloaded from its project (about 22 MB). Turned off, it is removed")
+                    p("主板、显卡等的 RGB 灯光通过开源软件 OpenRGB 控制。开启时从其官方地址下载（约 22 MB），关闭时删除", "Motherboard and graphics card RGB lights are controlled through OpenRGB, an open-source program. Turning this on downloads it from its project (about 22 MB). Turning it off removes it")
                 };
                 return (p("RGB 灯光控制", "RGB lighting"), Some(Cow::Borrowed(hint)), self.remote_lights);
             }
             Switch::RemoteRaised => {
-                let hint = if self.raising.is_some() {
-                    p("正在处理，请稍候…", "Working…")
-                } else if self.raise_failed {
-                    p("操作失败，请稍后重试", "That failed. Try again later")
+                let hint = if let Some((wanted, _)) = self.raising {
+                    if wanted { p("正在开启…", "Turning on…") } else { p("正在关闭…", "Turning off…") }
+                } else if let Some(wanted) = self.raise_failed {
+                    if wanted { p("未能开启内存灯光控制", "Couldn't turn on memory lighting") } else { p("未能关闭内存灯光控制", "Couldn't turn off memory lighting") }
                 } else {
                     p(
                         "内存灯光须由具有管理员权限的 OpenRGB 控制。开启后，OpenRGB 将随 Glance 以管理员权限运行。其他厂商的灯光软件可能覆盖此处的设置",
-                        "Memory lights can only be set by OpenRGB with administrator rights. When on, OpenRGB runs with those rights alongside Glance. Other makers' lighting programs may override what is set here",
+                        "Memory lights can only be controlled by OpenRGB running as administrator. When on, OpenRGB runs as administrator alongside Glance. Other makers' lighting programs may override these settings",
                     )
                 };
                 return (p("内存灯光控制", "Memory lighting"), Some(Cow::Borrowed(hint)), self.remote_raised);
             }
             Switch::RemoteScreens => (
-                p("关屏时保持显示器连接", "Keep monitors connected while off"),
+                p("关屏时保持显示器连接", "Keep monitors connected when off"),
                 Some(p(
-                    "避免关屏后显示器切换输入源，或窗口移到其他屏幕。可单独关闭的显示器照常关闭，其余显示器改为黑屏并调至最暗，背光保持开启",
-                    "Keeps a monitor from switching its input, or windows from moving to other screens, while it is off. A monitor that can be turned off alone still is. The others go black and as dim as they go, their backlight on",
+                    "避免关屏后显示器切换输入源或窗口移到其他屏幕。无法单独关闭的显示器改为黑屏，背光保持开启",
+                    "Prevents monitors from switching inputs, and windows from moving to other screens. Monitors that can't be turned off alone go black, with the backlight on",
                 )),
                 self.remote_screens,
             ),
             Switch::Remote => {
                 let hint = if self.remote_there {
-                    p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
+                    p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Control screens, lights, volume and brightness from a phone, on the local network only")
                 } else {
-                    p("此版本的 Glance 未包含手机遥控程序", "This copy of Glance came without the phone remote")
+                    p("此版本的 Glance 未包含手机遥控程序", "This version of Glance doesn't include Phone remote")
                 };
                 return (p("开启手机遥控", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
             }
@@ -5146,19 +5144,19 @@ impl Ui {
             Switch::Nearby => {
                 let hint = match (self.remote_there, lang) {
                     (true, Lang::Zh) => Cow::Owned(format!("兼容 LocalSend 的设备可将文件发到这台电脑，在附近设备上显示为 {}", self.pc_called())),
-                    (true, Lang::En) => Cow::Owned(format!("Devices that work with LocalSend can send files to this PC, which they see as {}", self.pc_called())),
-                    (false, _) => Cow::Borrowed(p("此版本的 Glance 未包含附近传输程序", "This copy of Glance came without nearby sharing")),
+                    (true, Lang::En) => Cow::Owned(format!("Devices with LocalSend can send files to this PC, which appears to them as {}", self.pc_called())),
+                    (false, _) => Cow::Borrowed(p("此版本的 Glance 未包含附近传输程序", "This version of Glance doesn't include Nearby sharing")),
                 };
-                return (p("接收附近设备的文件", "Receive files from devices nearby"), Some(hint), self.nearby_on);
+                return (p("接收附近设备的文件", "Receive files from nearby devices"), Some(hint), self.nearby_on);
             }
             Switch::NearbyNotice => (
-                p("在屏幕边缘提示", "Show at the screen's edge"),
-                Some(p("有设备请求发送、正在接收和收到文件时，在工作台所在的屏幕边缘提示", "When a device asks to send, while its files come and once they have, at the edge of the screen the workbench is on")),
+                p("在屏幕边缘提示", "Show at the screen edge"),
+                Some(p("有设备请求发送、正在接收和收到文件时，在工作台所在的屏幕边缘提示", "When a device asks to send, while receiving and when files arrive, at the edge of the screen Workbench is on")),
                 self.settings.nearby_notice,
             ),
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。发送过诊断信息时，一并获取其回复。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count how many run it, and asked for replies to the diagnostics sent. Nothing that tells this PC from another"))), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。发送过诊断信息时，一并获取其回复。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count users, and asked for replies to diagnostics you sent. Nothing that identifies this PC"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)
@@ -5177,7 +5175,7 @@ impl Ui {
             Lang::En => (
                 "Start with Windows is unavailable".to_string(),
                 format!(
-                    "Glance is currently located in:\n{place}\n\nThis location is not protected: ordinary programs can change it or a folder above it, and so could replace Glance. Starting with Windows runs Glance with administrator rights without asking, which is safe only from a protected location.\n\nTo turn it on, use the installer to install Glance to Program Files, or to a new folder at the root of a drive (for example D:\\Glance). Once it is installed in the new location, the copy installed before is removed, and settings are kept."
+                    "Glance is currently located in:\n{place}\n\nThis location is not protected: ordinary programs can change it or a folder above it, and could replace Glance. Start with Windows runs Glance with administrator rights without asking, which is only safe from a protected location.\n\nTo turn it on, use the installer to install Glance to Program Files or to a new folder at the root of a drive (for example D:\\Glance). After it is installed in the new location, the old copy is removed and settings are kept."
                 ),
             ),
         };
@@ -5227,8 +5225,8 @@ impl Ui {
             Switch::RemoteRaised => {
                 if self.raising.is_none() {
                     let wanted = !self.remote_raised;
-                    self.raise_failed = false;
-                    self.raising = Some(std::thread::spawn(move || crate::phone::raise_lights(wanted) == wanted));
+                    self.raise_failed = None;
+                    self.raising = Some((wanted, std::thread::spawn(move || crate::phone::raise_lights(wanted) == wanted)));
                 }
                 self.next_frame = Instant::now();
                 return;
@@ -5273,16 +5271,16 @@ impl Ui {
             intro: pick(
                 lang,
                 "以下是将发送至 Glance（glancepc.com）的全部内容：问题描述、所添加的截图，以及底部的诊断信息（本机硬件、Glance 读取的数值及近期日志）。不包含任何文件、账号或网络地址。",
-                "Below is all that would be sent to Glance (glancepc.com): what you write, the pictures you add, and the diagnostics at the bottom (this PC's hardware, what Glance reads of it, and Glance's recent log). Nothing of your files, accounts or network address.",
+                "Everything below is sent to Glance (glancepc.com): your description, the screenshots you add, and the diagnostics at the bottom (this PC's hardware, the values Glance reads, and Glance's recent log). No files, accounts or network addresses.",
             ),
             own: Some(super::ask::Own {
-                words: pick(lang, "问题描述（选填）", "Your own words (may be left empty)"),
-                hint: pick(lang, "例如：主板温度未显示，或风扇转速与其他软件不一致", "For instance: the board's temperature is missing, or a fan's speed differs from another program's"),
-                pictures: pick(lang, "截图（选填，最多 3 张）", "Pictures (if you like, up to 3)"),
-                add: pick(lang, "添加截图", "Add a picture"),
-                ways: pick(lang, "点击选择、拖入窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
-                paste: pick(lang, "粘贴剪贴板中的截图", "Paste the clipboard's"),
-                waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
+                words: pick(lang, "问题描述（选填）", "Description (optional)"),
+                hint: pick(lang, "例如：主板温度未显示，或风扇转速与其他软件不一致", "For example: the motherboard temperature is missing, or a fan speed differs from another program"),
+                pictures: pick(lang, "截图（选填，最多 3 张）", "Screenshots (optional, up to 3)"),
+                add: pick(lang, "添加截图", "Add screenshot"),
+                ways: pick(lang, "单击选择、拖入窗口，或按 Ctrl+V 粘贴", "Click to choose, drop here, or paste with Ctrl+V"),
+                paste: pick(lang, "粘贴剪贴板中的截图", "Paste from clipboard"),
+                waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a screenshot on the clipboard. Press Ctrl+V to paste it"),
                 kinds: pick(lang, "图片", "Pictures"),
             }),
             option: None,
@@ -5352,7 +5350,7 @@ impl Ui {
         let lang = self.lang;
         self.added = None;
         if said.option {
-            super::ask::thread::sending(window, pick(lang, "正在收集诊断信息…", "Gathering the diagnostics…"));
+            super::ask::thread::sending(window, pick(lang, "正在收集诊断信息…", "Collecting diagnostics…"));
             self.adding_asked = Some((id, said));
             self.reporting = Some((ReportFor::Add, std::thread::spawn(crate::diagnostics::report)));
         } else {
@@ -5371,7 +5369,7 @@ impl Ui {
         }
         let Some(close) = self.followed.iter().find(|report| report.id == id).map(crate::reports::Report::closable) else { return };
         super::ask::thread::sending(window, if close { pick(self.lang, "正在关闭…", "Closing…") } else { pick(self.lang, "正在重新打开…", "Reopening…") });
-        self.turning = Some((id.clone(), std::thread::spawn(move || crate::reports::turn(&id, close))));
+        self.turning = Some((id.clone(), close, std::thread::spawn(move || crate::reports::turn(&id, close))));
         self.next_frame = Instant::now();
     }
 
@@ -5392,7 +5390,7 @@ impl Ui {
         let window = self.thread_window(&id);
         let intro = match lang {
             Lang::Zh => format!("以下诊断信息将连同补充说明与截图一并发送至反馈 {id}。不包含任何文件、账号或网络地址。"),
-            Lang::En => format!("These diagnostics go to report {id}, with the words and pictures you added. Nothing of your files, accounts or network address."),
+            Lang::En => format!("These diagnostics go to report {id}, with the details and screenshots you added. No files, accounts or network addresses."),
         };
         let asked = super::ask::Asked {
             title: pick(lang, "发送诊断信息", "Send diagnostics"),
@@ -5434,11 +5432,11 @@ impl Ui {
                 ),
                 Lang::En => (
                     "Connect to Claude Code's status line?",
-                    "Glance sets itself as Claude Code's status line command (the statusLine entry of its settings.json) to read the five-hour and weekly limits of a Claude plan. This is the way Claude Code's documentation gives, and the limits stay on this PC.
+                    "Glance will set itself as Claude Code's status line command (the statusLine entry in its settings.json) to read your Claude plan's 5-hour and weekly limits. This is the method Claude Code's documentation describes, and the limits stay on this PC.
 
-A status line command already set is kept: Glance runs it as before once it has read the limits, and the status line shows what it did. With none set, the status line shows nothing. Nothing else in the settings is changed.
+If a status line command is already set, it is kept: Glance runs it after reading the limits, so the status line looks the same. If none is set, the status line stays empty. Nothing else in the settings changes.
 
-It can be disconnected here at any time, and the status line command put back.",
+You can disconnect here at any time, and the original status line command will be restored.",
                     "Connect",
                 ),
             };
@@ -5479,15 +5477,15 @@ It can be disconnected here at any time, and the status line command put back.",
                 ("安装网易云音乐歌词插件？", intro, "安装")
             }
             (NetEaseWork::Install, Lang::En) => {
-                let mut intro = format!("These open-source projects (GPL-3.0) are installed, taken from Glance's site or from where each project publishes it on GitHub, and checked by SHA-256 first.\n\nInfLink-rs 3.4.0, the plugin that has NetEase Cloud Music say how far into a track it is, put in {plugins}.");
+                let mut intro = format!("These open-source projects (GPL-3.0) will be installed. Each is downloaded from Glance's site or from the project's releases on GitHub, and verified with SHA-256 first.\n\nInfLink-rs 3.4.0, the plugin that lets NetEase Cloud Music report its playback position, goes in {plugins}.");
                 if !netease.has_loader() {
-                    intro += &format!("\nBetterNCM 1.3.4, NetEase Cloud Music's plugin loader, put in its folder {folder} as msimg32.dll. Where that folder needs an administrator's rights, Windows asks first.");
+                    intro += &format!("\nBetterNCM 1.3.4, NetEase Cloud Music's plugin loader, goes in its folder {folder} as msimg32.dll. If that folder requires administrator rights, Windows asks first.");
                 }
-                intro += "\n\nGlance's own plugin Glance Icon Row (MIT, nothing is downloaded) is put in too. It keeps the BetterNCM button on one row with NetEase Cloud Music's other icons at the top right.";
+                intro += "\n\nGlance's own plugin, Glance Icon Row (MIT, nothing downloaded), goes there too. It keeps the BetterNCM button on the same row as NetEase Cloud Music's other top-right icons.";
                 if !netease.tested() {
-                    intro += &format!("\n\nInfLink-rs was not tested on this NetEase Cloud Music, version {}. It may not work.", netease.version());
+                    intro += &format!("\n\nInfLink-rs hasn't been tested with this version of NetEase Cloud Music ({}). It may not work.", netease.version());
                 }
-                intro += "\n\nIt can be removed here at any time.";
+                intro += "\n\nYou can remove it here at any time.";
                 ("Install the NetEase Cloud Music lyrics plugin?", intro, "Install")
             }
             (NetEaseWork::Remove, Lang::Zh) => {
@@ -5499,11 +5497,11 @@ It can be disconnected here at any time, and the status line command put back.",
                 ("移除网易云音乐歌词插件？", intro, "移除")
             }
             (NetEaseWork::Remove, Lang::En) => {
-                let mut intro = format!("The InfLink-rs and Glance Icon Row plugins are deleted from {plugins}.");
+                let mut intro = format!("The InfLink-rs and Glance Icon Row plugins will be deleted from {plugins}.");
                 if ours {
-                    intro += &format!("\nThe BetterNCM loader (msimg32.dll) Glance put in {folder} is deleted too. Where that folder needs an administrator's rights, Windows asks first.");
+                    intro += &format!("\nThe BetterNCM loader (msimg32.dll) that Glance put in {folder} will be deleted too. If that folder requires administrator rights, Windows asks first.");
                 }
-                intro += "\n\nNetEase Cloud Music, if running, is closed first and opened again after.";
+                intro += "\n\nIf NetEase Cloud Music is running, it will be closed first and reopened afterward.";
                 ("Remove the NetEase Cloud Music lyrics plugin?", intro, "Remove")
             }
             (NetEaseWork::IconRow, Lang::Zh) => (
@@ -5513,7 +5511,7 @@ It can be disconnected here at any time, and the status line command put back.",
             ),
             (NetEaseWork::IconRow, Lang::En) => (
                 "Update the NetEase Cloud Music lyrics plugin?",
-                format!("Glance's own plugin Glance Icon Row (MIT, nothing is downloaded) is put in {plugins}. It keeps the BetterNCM button on one row with NetEase Cloud Music's other icons at the top right, and is removed with the lyrics plugin.\n\nIt works once NetEase Cloud Music starts again."),
+                format!("Glance's own plugin, Glance Icon Row (MIT, nothing downloaded), will be placed in {plugins}. It keeps the BetterNCM button on the same row as NetEase Cloud Music's other top-right icons, and is removed along with the lyrics plugin.\n\nTakes effect after NetEase Cloud Music restarts."),
                 "Update",
             ),
         };
@@ -5541,30 +5539,30 @@ It can be disconnected here at any time, and the status line command put back.",
         let (lang, info) = (self.lang, &crate::app().info());
         let p = |zh, en| pick(lang, zh, en).to_string();
         match id {
-            "ai:today" => return (p("今日用量", "Today"), Some(p("各来源今日的令牌用量及其变化", "Tokens every source spent today, and how they mounted"))),
-            "ai:claude" => return ("Claude".into(), Some(p("Claude Code 的额度、令牌用量、模型与会话", "Claude Code's limits, tokens, models and sessions"))),
-            "ai:codex" => return ("ChatGPT".into(), Some(p("Codex 的额度、令牌用量、模型与会话", "Codex's limits, tokens, models and sessions"))),
-            "ai:qwen" => return ("Qwen".into(), Some(p("Qwen Code 的令牌用量、模型与会话", "Qwen Code's tokens, models and sessions"))),
-            "ai:deepseek" => return ("DeepSeek".into(), Some(p("DeepSeek 开放平台的余额与今日消费", "DeepSeek's platform: its balance, and what it spent today"))),
-            "ai:kimi" => return ("Kimi".into(), Some(p("Kimi Code 的额度、令牌用量、模型与会话", "Kimi Code's limits, tokens, models and sessions"))),
-            "ai:moonshot" => return ("Moonshot".into(), Some(p("Moonshot AI 开放平台的余额与今日消费", "Moonshot AI's platform: its balance, and what it spent today"))),
-            "ai:glm" => return ("GLM".into(), Some(p("智谱 GLM Coding Plan 的用量额度与账户余额，以及 ZCode 的令牌用量与会话", "Zhipu's GLM Coding Plan: its limits and the account's balance, and ZCode's tokens and sessions"))),
-            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费，以及 MiniMax Code 的令牌用量与会话", "MiniMax's Token Plan limits, or its platform's balance and what it spent today, and MiniMax Code's tokens and sessions"))),
-            "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("火山方舟 Coding Plan 的用量额度", "Volcengine Ark's Coding Plan limits"))),
-            "ai:openrouter" => return ("OpenRouter".into(), Some(p("OpenRouter 的余额、今日消费与密钥额度", "OpenRouter's credits, what it spent today, and the key's limit"))),
+            "ai:today" => return (p("今日用量", "Today"), Some(p("各来源今日的 Token 用量及其变化", "Today's tokens by source, and how they grew"))),
+            "ai:claude" => return ("Claude".into(), Some(p("来自 Claude Code", "From Claude Code"))),
+            "ai:codex" => return ("ChatGPT".into(), Some(p("来自 Codex", "From Codex"))),
+            "ai:qwen" => return ("Qwen".into(), Some(p("来自 Qwen Code", "From Qwen Code"))),
+            "ai:deepseek" => return ("DeepSeek".into(), Some(p("DeepSeek 开放平台的余额与今日消费", "DeepSeek platform balance and today's spending"))),
+            "ai:kimi" => return ("Kimi".into(), Some(p("来自 Kimi Code", "From Kimi Code"))),
+            "ai:moonshot" => return ("Moonshot".into(), Some(p("Moonshot AI 开放平台的余额与今日消费", "Moonshot AI platform balance and today's spending"))),
+            "ai:glm" => return ("GLM".into(), Some(p("智谱 GLM Coding Plan 的用量额度与账户余额，以及 ZCode 的 Token 用量与会话", "Zhipu GLM Coding Plan limits and account balance, plus ZCode tokens and sessions"))),
+            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费，以及 MiniMax Code 的 Token 用量与会话", "MiniMax Token Plan limits, or platform balance and today's spending, plus MiniMax Code tokens and sessions"))),
+            "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("火山方舟 Coding Plan 的用量额度", "Volcengine Ark Coding Plan limits"))),
+            "ai:openrouter" => return ("OpenRouter".into(), Some(p("OpenRouter 的余额、今日消费与密钥额度", "OpenRouter credits, today's spending and the key's limit"))),
             _ => {}
         }
         if let Some(group) = id.strip_prefix(OVERLAY) {
             return match group {
-                "frames" => (p("帧率", "Frame rate"), Some(p("没有游戏运行时显示“—”", "“—” while no game runs"))),
+                "frames" => (p("帧率", "Frame rate"), Some(p("没有游戏运行时显示“—”", "“—” when no game is running"))),
                 "cpu" => ("CPU".into(), None),
                 "gpu" => ("GPU".into(), None),
                 "memory" => (p("内存", "Memory"), None),
                 "vram" => (p("显存", "Video memory"), None),
-                "drives" => (p("磁盘温度", "Drive temperature"), Some(p("磁盘编号与“磁盘管理”中的一致", "Disks are numbered as Disk Management numbers them"))),
+                "drives" => (p("硬盘温度", "Drive temperature"), Some(p("硬盘编号与“磁盘管理”中的一致", "Drives are numbered as in Disk Management"))),
                 "network" => (p("网速", "Network"), None),
                 "clock" => (p("时间", "Time"), None),
-                "played" => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，精确到秒。没有游戏运行时显示“—”", "This session's length, to the second. “—” while no game runs"))),
+                "played" => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，精确到秒。没有游戏运行时显示“—”", "This session's length, to the second. “—” when no game is running"))),
                 "battery" => (p("电池", "Battery"), None),
                 _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
             };
@@ -5573,34 +5571,34 @@ It can be disconnected here at any time, and the status line command put back.",
             "cpu" => ("CPU".into(), Some(info.cpu_name.clone())),
             _ if id.starts_with("gpu:") => ("GPU".into(), info.gpu_of(id).map(|i| info.gpus[i].name.clone())),
             "memory" => (p("内存", "Memory"), info.memory_modules.clone()),
-            "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上传与下载速度", "Upload and download over every physical adapter")))),
+            "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上传与下载速度", "Upload and download across all physical adapters")))),
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
-            "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上点击表头即可排序", "The busiest programs. Click a heading on the panel to sort them"))),
-            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间，以及所选文件夹的大小", "Space left on each drive, and how large the folders you choose are"))),
+            "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上单击表头即可排序", "The busiest programs. Click a column heading on the panel to sort them"))),
+            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间，以及所选文件夹的大小", "Free space on each drive, and the size of folders you choose"))),
             "board" => (p("主板", "Motherboard"), board_said(crate::app().controller.seen.lock().unwrap().board.is_some(), crate::laptop::this_machine(), &info.board, lang)),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
-            "devices" => (p("设备", "Devices"), Some(p("已连接的蓝牙设备、罗技键鼠、2.4G 接收器键盘与 Xbox 手柄的剩余电量，仅在有设备连接时显示", "The charge left in connected Bluetooth devices, Logitech keyboards and mice, keyboards on a 2.4 GHz receiver, and Xbox controllers, shown only while one is connected"))),
-            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
-            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),
-            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，仅在其运行时显示，不会启动或唤醒发行版", "WSL 2's processor and memory use, shown only while it runs, without starting or waking a distribution"))),
-            "time" => (p("时间与媒体", "Time and media"), Some(p("时间、日期、音量与正在播放的内容", "The time, the date, the volume and what is playing"))),
-            "station" => (p("中转站", "Station"), Some(p("临时存放拖入的文件、图片、文字，以及最近复制的内容", "Files, pictures and text dropped in for a while, and what was copied lately"))),
+            "devices" => (p("设备", "Devices"), Some(p("已连接的蓝牙设备、罗技键鼠、2.4G 接收器键盘与 Xbox 手柄的剩余电量，仅在有设备连接时显示", "Battery levels of connected Bluetooth devices, Logitech keyboards and mice, keyboards on a 2.4 GHz receiver, and Xbox controllers. Shown only while one is connected"))),
+            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "Frame rate, frame times and resource use of a fullscreen game"))),
+            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "CPU, memory, network and disk use of each running container. Shown only while Docker runs"))),
+            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，仅在其运行时显示，不会启动或唤醒发行版", "WSL 2 CPU and memory use. Shown only while it runs, without starting or waking a distribution"))),
+            "time" => (p("时间与媒体", "Time and media"), Some(p("时间、日期、音量与正在播放的内容", "Time, date, volume and what is playing"))),
+            "station" => (p("中转站", "Station"), Some(p("临时存放拖入的文件、图片、文字，以及最近复制的内容", "Dropped files, pictures and text kept for a while, plus recently copied items"))),
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要安装歌词插件）",
+                    "What is playing: cover, progress, controls, volume, and lyrics that scroll as it plays. To find lyrics, the track title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. Local tracks use the lyrics in their files first. Lyrics need the player to report its position (NetEase Cloud Music needs the lyrics plugin)",
                 )),
             ),
-            "notes" => (p("便签", "Notes"), Some(p("想法与备忘，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and things to remember, each kept as a Markdown file, which can be put on the desktop"))),
+            "notes" => (p("便签", "Notes"), Some(p("想法与备忘，每条保存为一个 Markdown 文件，可放在桌面上", "Ideas and reminders, each saved as a Markdown file, which can be pinned to the desktop"))),
             "todo" => (
                 p("待办", "To-do"),
                 Some(p(
                     "要做的事项，可设定日期与时间，勾选后移入已完成。全部事项保存在便签文件夹的“待办.md”中",
-                    "Things to do, each with a day and a time if wanted, moved among the finished once ticked. All are kept in “To-do.md” in the notes folder",
+                    "Tasks with an optional date and time, moved to Done once checked. All are saved in “To-do.md” in the notes folder",
                 )),
             ),
-            "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Programs, files, folders and web addresses used often"))),
+            "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Frequently used programs, files, folders and websites"))),
             "search" => (p("搜索", "Search"), Some(p("搜索应用、设置、文件和便签", "Search apps, settings, files and notes"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程数、线程数与句柄数", "Uptime, processes, threads and handles"))),
         }
@@ -5803,9 +5801,9 @@ It can be disconnected here at any time, and the status line command put back.",
         let to = if provider.starts_with(|c: char| c.is_ascii()) { format!(" {provider}") } else { provider.to_string() };
         let words = match (kept, lang) {
             (crate::ai::keys::Kept::Env(variable), Lang::Zh) => format!("取自环境变量 {variable}，粘贴的密钥优先，仅发送给{to}"),
-            (crate::ai::keys::Kept::Env(variable), Lang::En) => format!("Taken from the variable {variable} unless a key is pasted, sent to {provider} alone"),
+            (crate::ai::keys::Kept::Env(variable), Lang::En) => format!("Uses the {variable} environment variable unless a key is pasted. Sent only to {provider}"),
             (_, Lang::Zh) => format!("加密保存在本机，仅发送给{to}"),
-            (_, Lang::En) => format!("Kept encrypted on this PC, sent to {provider} alone"),
+            (_, Lang::En) => format!("Stored encrypted on this PC. Sent only to {provider}"),
         };
         Some((name, words))
     }
@@ -5887,50 +5885,50 @@ It can be disconnected here at any time, and the status line command put back.",
         match (id.split(':').next().unwrap_or(id), name) {
             ("overlay", "fps") => (p("帧率", "Frame rate"), None),
             ("overlay", "time") => (p("时间", "Time"), None),
-            ("station", "history") => (p("记录最近复制", "Keep what is copied"), Some(p("关闭后不再记录，已有记录保留", "Off, nothing more is kept. What was is still there"))),
+            ("station", "history") => (p("记录最近复制", "Record copied items"), Some(p("关闭后不再记录，已有记录保留", "When off, nothing new is recorded. Existing items are kept"))),
             ("station", "recent") => (p("列出最近文件", "List recent files"), None),
-            ("apps", "names") => (p("始终显示名称", "Always show names"), Some(p("图标下方显示名称，不再显示角标", "Names under the icons, in place of tags"))),
-            ("todo", "remind") => (p("到时提醒", "Remind when due"), Some(p("通过 Windows 通知提醒设了日期的待办，Glance 运行时有效", "Windows notifications tell of to-dos with a day as they come due, while Glance runs"))),
-            ("time", "lunar") => (p("农历", "Lunar date"), Some(p("日期后显示农历日、节气与传统节日", "The lunar day, solar term and festival after the date"))),
+            ("apps", "names") => (p("始终显示名称", "Always show names"), Some(p("图标下方显示名称，不再显示角标", "Show names under icons instead of tags"))),
+            ("todo", "remind") => (p("到时提醒", "Remind when due"), Some(p("通过 Windows 通知提醒设了日期的待办，Glance 运行时有效", "Windows notifications remind you of dated to-dos while Glance runs"))),
+            ("time", "lunar") => (p("农历", "Lunar date"), Some(p("日期后显示农历日、节气与传统节日", "Shows the lunar day, solar term and festival after the date"))),
             ("time", "sound") => (p("音量", "Volume"), None),
             ("time", "media") => (p("正在播放", "Now playing"), None),
-            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在演唱的一句与下一句", "The line sung now and the next"))),
+            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在演唱的一句与下一句", "The current line and the next"))),
             ("ai", "models") => (p("模型", "Models"), Some(p("各模型今日的用量占比", "Each model's share of today's tokens"))),
-            ("ai", "sessions") => (p("会话", "Sessions"), Some(p("今日用过的会话，最近的在前", "Sessions that spent today, the latest first"))),
-            ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在当前歌词下方，否则显示下一句", "Under the line sung now where there is one, else the next line"))),
+            ("ai", "sessions") => (p("会话", "Sessions"), Some(p("今日用过的会话，最近的在前", "Sessions used today, most recent first"))),
+            ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在当前歌词下方，否则显示下一句", "Shown under the current line when available, otherwise the next line"))),
             ("lyrics", "cover") => (p("封面", "Cover"), None),
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
             ("lyrics", "spectrum") => (p("律动条", "Spectrum"), None),
-            ("lyrics", "controls") => (p("常驻播放控件", "Controls always shown"), Some(p("关闭时，播放控件在鼠标移入后出现", "Off, they show as the pointer comes over it"))),
-            ("overlay", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "The slowest 1% of frames of the last 10 seconds, as frames a second"))),
-            ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近 1 秒内最长一帧的耗时", "The longest frame of the last second"))),
+            ("lyrics", "controls") => (p("常驻播放控件", "Always show controls"), Some(p("关闭时，播放控件在鼠标移入后出现", "When off, controls appear when the pointer is over it"))),
+            ("overlay", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "Frame rate of the slowest 1% of frames in the last 10 seconds"))),
+            ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近 1 秒内最长一帧的耗时", "Longest frame in the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),
             ("overlay", "down") => (p("下载", "Download"), None),
             ("overlay", "up") => (p("上传", "Upload"), None),
             ("overlay", "battery") => (p("电量", "Charge"), None),
             ("overlay", "memory" | "vram") => (p("已用", "In use"), None),
             ("overlay", "memory_percent" | "vram_percent") => (p("占用百分比", "Percent used"), None),
-            ("overlay", "battery_power") => (p("功率", "Power"), Some(p("充电或放电的功率", "Watts going in or out"))),
+            ("overlay", "battery_power") => (p("功率", "Power"), Some(p("充电或放电的功率", "Charge or discharge rate in watts"))),
             ("overlay", _) if name.ends_with("_temp") => (p("温度", "Temperature"), None),
             ("overlay", _) if name.ends_with("_power") => (p("功耗", "Power"), None),
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
             ("battery", "chart") => (p("电量图表", "Charge chart"), None),
-            ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率，使用电池时即为整机功耗", "Watts going in or out. On battery, what the whole machine draws"))),
-            ("battery", "health") => (p("健康度", "Health"), Some(p("满电容量与设计容量之比", "Full charge against the design capacity"))),
+            ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率，使用电池时即为整机功耗", "Charge or discharge rate in watts. On battery, this is what the whole machine draws"))),
+            ("battery", "health") => (p("健康度", "Health"), Some(p("满电容量与设计容量之比", "Full charge capacity compared with design capacity"))),
             ("game", "chart") => (p("帧率图表", "Frame rate chart"), None),
-            ("game", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "The slowest 1% of frames of the last 10 seconds, as frames a second"))),
-            ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近 1 秒内最长一帧的耗时，卡顿时数值变大", "The longest frame of the last second. A stutter raises it"))),
-            ("game", "frametimes") => (p("帧时间图表", "Frame time chart"), Some(p("每秒最长一帧的走势，卡顿显示为尖峰", "The longest frame of each second. A stutter shows as a spike"))),
-            ("game", "usage") => (p("游戏占用", "Game's use"), Some(p("游戏进程自身的 CPU 与 GPU 占用", "The CPU and GPU the game itself uses"))),
-            ("game", "memory") => (p("游戏内存", "Game's memory"), Some(p("游戏进程自身占用的内存与显存", "The memory and video memory the game itself holds"))),
-            ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("NVIDIA 显卡的频率是否受功耗或温度限制", "Whether an NVIDIA GPU's clock is held back by its power or temperature limit"))),
+            ("game", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "Frame rate of the slowest 1% of frames in the last 10 seconds"))),
+            ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近 1 秒内最长一帧的耗时，卡顿时数值变大", "Longest frame in the last second. Rises when the game stutters"))),
+            ("game", "frametimes") => (p("帧时间图表", "Frame time chart"), Some(p("每秒最长一帧的走势，卡顿显示为尖峰", "Longest frame of each second. Stutters show as spikes"))),
+            ("game", "usage") => (p("游戏占用", "Game's use"), Some(p("游戏进程自身的 CPU 与 GPU 占用", "CPU and GPU used by the game itself"))),
+            ("game", "memory") => (p("游戏内存", "Game's memory"), Some(p("游戏进程自身占用的内存与显存", "Memory and video memory held by the game itself"))),
+            ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("NVIDIA 显卡的频率是否受功耗或温度限制", "Whether an NVIDIA GPU's clock is limited by power or temperature"))),
             ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
-            ("game", "time") => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，中断不足 5 分钟时继续计时", "This session's length. A break under 5 minutes carries on"))),
-            ("devices", "notice") => (p("低电量通知", "Low charge notification"), Some(p("设备电量降至 20% 与 10% 时，通过 Windows 通知提醒", "A Windows notification as a device comes down to 20%, and again at 10%"))),
-            ("wsl", "memory") => (p("内存", "Memory"), Some(p("已用内存与内存上限", "Memory used, and the most it may use"))),
-            ("wsl", "distros") => (p("运行中的发行版", "Distributions running"), None),
-            ("wsl", "gpu") => ("GPU", Some(p("WSL 中的程序占用的 GPU", "The GPU programs in WSL use"))),
-            (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后仅显示数值", "Off, the figures alone"))),
+            ("game", "time") => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，中断不足 5 分钟时继续计时", "This session's length. Breaks under 5 minutes don't reset it"))),
+            ("devices", "notice") => (p("低电量通知", "Low charge notification"), Some(p("设备电量降至 20% 与 10% 时，通过 Windows 通知提醒", "A Windows notification when a device drops to 20%, and again at 10%"))),
+            ("wsl", "memory") => (p("内存", "Memory"), Some(p("已用内存与内存上限", "Memory used and the most it may use"))),
+            ("wsl", "distros") => (p("运行中的发行版", "Running distributions"), None),
+            ("wsl", "gpu") => ("GPU", Some(p("WSL 中的程序占用的 GPU", "GPU used by programs in WSL"))),
+            (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后仅显示数值", "When off, only the numbers are shown"))),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),
             ("system", "threads") => (p("线程数", "Threads"), None),
@@ -5939,26 +5937,26 @@ It can be disconnected here at any time, and the status line command put back.",
             (_, "clock") => (p("频率", "Clock"), None),
             (_, "power") => (p("功耗", "Power"), None),
             (_, "ccds") => (p("各 CCD 温度", "Each CCD's temperature"), None),
-            (_, "threads") => (p("各线程占用", "Each thread"), None),
+            (_, "threads") => (p("各线程占用", "Each thread's usage"), None),
             (_, "vram") => (p("显存", "Video memory"), None),
             (_, "fan") => (p("风扇", "Fan"), None),
-            (_, "hotspot") => (p("热点温度", "Hot spot"), Some(p("芯片上最高一点的温度", "The warmest point of the chip"))),
+            (_, "hotspot") => (p("热点温度", "Hot spot"), Some(p("芯片上最高一点的温度", "The hottest point on the chip"))),
             (_, "shared") => (p("共享显存", "Shared memory"), Some(p("显卡占用的系统内存", "System memory the GPU uses"))),
             (_, "engines") => (p("各引擎", "Engines"), Some(p("3D、复制与视频编解码", "3D, copy and video"))),
             (_, "dimms") => (p("内存条温度", "Module temperatures"), None),
-            ("memory", "speed") => (p("内存速率", "Memory speed"), Some(p("低于额定速率时一并显示额定值", "With the rated speed too, where it runs below it"))),
+            ("memory", "speed") => (p("内存速率", "Memory speed"), Some(p("低于额定速率时一并显示额定值", "Also shows the rated speed when running below it"))),
             (_, "committed") => (p("已提交", "Committed"), None),
             (_, "cached") => (p("缓存", "Cached"), None),
             (_, "adapter") => (p("网卡型号", "Adapter"), None),
-            (_, "wifi") => (p("Wi-Fi 名称", "Wi-Fi name"), Some(p("需要开启 Windows 定位服务", "Needs Windows' location service on"))),
+            (_, "wifi") => (p("Wi-Fi 名称", "Wi-Fi name"), Some(p("需要开启 Windows 定位服务", "Requires Windows location services"))),
             (_, "address") => (p("IP 地址", "IP address"), None),
-            (_, "gateway") => (p("网关地址", "Gateway"), Some(p("访问互联网时经过的路由器", "The router traffic to the internet goes through"))),
+            (_, "gateway") => (p("网关地址", "Gateway"), Some(p("访问互联网时经过的路由器", "The router your internet traffic goes through"))),
             (_, "link") => (p("链路速度", "Link speed"), None),
             (_, "totals") => (p("开机以来的流量", "Traffic since boot"), None),
-            (_, "latency") => (p("网络延迟", "Latency"), Some(p("定时向下方所选地址发送 ping 并记录往返时间", "Pings the address chosen below at each refresh and shows the round trip"))),
-            (_, "loss") => (p("丢包率", "Packet loss"), Some(p("最近 60 次 ping 中未收到回应的比例", "The share of the last 60 pings that went unanswered"))),
+            (_, "latency") => (p("网络延迟", "Latency"), Some(p("定时向下方所选地址发送 ping 并记录往返时间", "Pings the address chosen below at each refresh and shows the round-trip time"))),
+            (_, "loss") => (p("丢包率", "Packet loss"), Some(p("最近 60 次 ping 中未收到回应的比例", "Share of the last 60 pings with no reply"))),
             (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
-            (_, "rates") => (p("各硬盘读写", "Each drive's rates"), Some(p("每块硬盘各自的读取与写入速度", "How fast each drive reads and writes"))),
+            (_, "rates") => (p("各硬盘读写", "Each drive's read and write"), Some(p("每块硬盘各自的读取与写入速度", "How fast each drive reads and writes"))),
             (_, "active") => (p("活动时间", "Active time"), None),
             _ => (p("其他", "Other"), None),
         }
@@ -6311,7 +6309,7 @@ It can be disconnected here at any time, and the status line command put back.",
                     intro: pick(
                         lang,
                         "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，请再次添加手机。",
-                        "Unpaired, the phone no longer controls this PC, and what it sends is asked about again. To use it again, add the phone once more.",
+                        "After unpairing, this phone can no longer control this PC, and files it sends need approval again. To use it again, add it again.",
                     ),
                     own: None,
                     option: None,
@@ -6948,7 +6946,7 @@ It can be disconnected here at any time, and the status line command put back.",
                 if sent {
                     super::ask::thread::sent(window);
                 } else {
-                    super::ask::thread::failed(window, pick(lang, "发送失败，请稍后重试", "It could not be sent. Try again later"));
+                    super::ask::thread::failed(window, pick(lang, "发送失败，请稍后重试", "Couldn't send. Try again later"));
                 }
             }
             self.added = Some((id, sent));
@@ -6959,14 +6957,14 @@ It can be disconnected here at any time, and the status line command put back.",
             self.next_frame = now + Duration::from_millis(300);
         }
         // A report closed or opened again: how that went, once it is over.
-        if self.turning.as_ref().is_some_and(|(_, turning)| turning.is_finished()) {
-            let (id, turning) = self.turning.take().unwrap();
+        if self.turning.as_ref().is_some_and(|(_, _, turning)| turning.is_finished()) {
+            let (id, close, turning) = self.turning.take().unwrap();
             let done = turning.join().unwrap_or(false);
             if let Some(window) = self.thread_window(&id) {
                 if done {
                     super::ask::thread::writing(window);
                 } else {
-                    super::ask::thread::failed(window, pick(lang, "操作失败，请稍后重试", "It could not be done. Try again later"));
+                    super::ask::thread::failed(window, if close { pick(lang, "未能关闭反馈", "Couldn't close the report") } else { pick(lang, "未能重新打开反馈", "Couldn't reopen the report") });
                 }
             }
             self.followed = crate::reports::list();
@@ -7075,9 +7073,9 @@ It can be disconnected here at any time, and the status line command put back.",
             self.fetch_failed = !done;
             self.ask_remote(|| ());
         }
-        if free && self.remote_asked.is_none() && self.raising.as_ref().is_some_and(|raising| raising.is_finished()) {
-            let done = self.raising.take().unwrap().join().unwrap_or(false);
-            self.raise_failed = !done;
+        if free && self.remote_asked.is_none() && self.raising.as_ref().is_some_and(|(_, raising)| raising.is_finished()) {
+            let (wanted, raising) = self.raising.take().unwrap();
+            self.raise_failed = (!raising.join().unwrap_or(false)).then_some(wanted);
             self.ask_remote(|| ());
         }
         if self.fetching.is_some() || self.raising.is_some() {
@@ -7507,7 +7505,7 @@ It can be disconnected here at any time, and the status line command put back.",
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let cy = y + row_height / 2.0;
                     let field = Rect { x: left + width - ROW_SIDE - NAME_FIELD, y: cy - 14.0, w: NAME_FIELD, h: 28.0 };
-                    let words = pick(lang, "在手机和附近设备上显示", "Shown on phones and devices nearby");
+                    let words = pick(lang, "在手机和附近设备上显示", "Shown on phones and nearby devices");
                     field_label_in(frame, (palette.text, palette.text2), pick(lang, "这台电脑的名称", "This PC's name"), Some(words), label, hint, left + ROW_SIDE, cy, field.x - 16.0 - left - ROW_SIDE);
                     if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::ThisPc) {
                         self.paint_rename(frame, palette, label, field.x + 8.0, cy, field.w - 8.0, now);
@@ -7712,7 +7710,7 @@ It can be disconnected here at any time, and the status line command put back.",
                         fill(frame, if lit { palette.hover } else { palette.control }, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
                         stroke_inside(frame, boxed, 6.0, palette.rule);
                         let (shown, color) = match kept {
-                            crate::ai::keys::Kept::Env(_) => (pick(lang, "环境变量", "Variable"), palette.text3),
+                            crate::ai::keys::Kept::Env(_) => (pick(lang, "环境变量", "Environment variable"), palette.text3),
                             crate::ai::keys::Kept::Given => (pick(lang, "已设置", "Set"), palette.text),
                             crate::ai::keys::Kept::None => (pick(lang, "粘贴密钥", "Paste the key"), palette.text3),
                         };
@@ -8208,11 +8206,11 @@ It can be disconnected here at any time, and the status line command put back.",
             Part::Sleep => {
                 let lang = self.lang;
                 let asked = super::ask::Asked {
-                    title: pick(lang, "让电脑睡眠？", "Put the PC to sleep?"),
+                    title: pick(lang, "让电脑进入睡眠？", "Put the PC to sleep?"),
                     intro: pick(
                         lang,
-                        "电脑上的一切都会停下：下载、远程连接、正在运行的程序。只想关屏关灯、让电脑继续运行，请用夜间模式。",
-                        "Everything on the PC stops: downloads, remote connections, programs at work. To turn off only the screens and the lights and leave the PC running, use night mode.",
+                        "下载、远程连接和正在运行的程序都将暂停。手机无法唤醒电脑，需在电脑上按键盘或电源键。只需关闭屏幕与灯光时，请使用夜间模式。",
+                        "Downloads, remote connections and running programs will pause. The phone can't wake the PC: press a key or the power button on the PC. To turn off only the screens and lights, use night mode.",
                     ),
                     own: None,
                     option: None,
@@ -8406,15 +8404,15 @@ It can be disconnected here at any time, and the status line command put back.",
         // How it is used: by an Android phone, and by an iPhone.
         let steps = match self.stage_shows {
             CodeFor::Pairing => [
-                (pick(lang, "安卓手机", "Android"), pick(lang, "在 Glance APP 中点“添加电脑”扫描", "In the Glance app, press Add a PC and scan it")),
+                (pick(lang, "安卓手机", "Android"), pick(lang, "在 Glance APP 中点按“添加电脑”扫描", "In the Glance app, tap Add a PC and scan this code")),
                 (
                     pick(lang, "iPhone 或未装 APP 的手机", "iPhone, or a phone without the app"),
-                    pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕", "Scan it with the camera to open the remote's page in the browser, which can be added to the home screen"),
+                    pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕", "Scan with the camera to open the remote in the browser. It can be added to the home screen"),
                 ),
             ],
             CodeFor::App => [
-                (pick(lang, "安卓手机", "Android"), pick(lang, "扫描下载 Glance APP，装好后在“配对码”中添加", "Scan it to get the Glance app, then add the phone by its pairing code")),
-                (pick(lang, "iPhone", "iPhone"), pick(lang, "无需安装，扫配对码即可在浏览器中使用", "Needs no app: scan the pairing code to use it in the browser")),
+                (pick(lang, "安卓手机", "Android"), pick(lang, "扫描下载 Glance APP，装好后在“配对码”中添加", "Scan to get the Glance app, then add the phone with the pairing code")),
+                (pick(lang, "iPhone", "iPhone"), pick(lang, "无需安装，扫配对码即可在浏览器中使用", "No app needed. Scan the pairing code to use it in the browser")),
             ],
         };
         let steps_w = STEPS.min(area.w - 48.0).max(120.0);
@@ -8441,13 +8439,13 @@ It can be disconnected here at any time, and the status line command put back.",
         fill(frame, Color::hex(0xFFFFFF, 1.0), square.x, square.y, square.w, square.h, 8.0);
         stroke_inside(frame, square, 8.0, palette.card_stroke);
         let (code, missing) = match self.stage_shows {
-            CodeFor::Pairing if !running => (None, pick(lang, "请先开启“手机遥控”或“附近传输”，再添加手机", "Turn on the phone remote or nearby sharing first, then add a phone")),
-            CodeFor::Pairing if self.offer_failed => (None, pick(lang, "未能生成配对码", "The pairing code could not be made")),
-            CodeFor::Pairing => (self.offer.as_ref().map(|(offer, _)| &offer.code), pick(lang, "正在生成配对码", "Making the pairing code")),
+            CodeFor::Pairing if !running => (None, pick(lang, "请先开启“手机遥控”或“附近传输”，再添加手机", "Turn on Phone remote or Nearby sharing first, then add a phone")),
+            CodeFor::Pairing if self.offer_failed => (None, pick(lang, "未能生成配对码", "Couldn't create the pairing code")),
+            CodeFor::Pairing => (self.offer.as_ref().map(|(offer, _)| &offer.code), pick(lang, "正在生成配对码", "Creating the pairing code")),
             CodeFor::App => match &self.app_code {
                 Some(Some(code)) => (Some(code), ""),
-                Some(None) => (None, pick(lang, "未能生成二维码", "The code could not be made")),
-                None => (None, pick(lang, "正在生成二维码", "Making the code")),
+                Some(None) => (None, pick(lang, "未能生成二维码", "Couldn't create the QR code")),
+                None => (None, pick(lang, "正在生成二维码", "Creating the QR code")),
             },
         };
         match code {
@@ -8482,13 +8480,13 @@ It can be disconnected here at any time, and the status line command put back.",
                     let left = crate::phone::OFFER_LASTS.saturating_sub(now.duration_since(*at)).as_secs();
                     let said = match lang {
                         Lang::Zh => format!("{} 分 {:02} 秒后刷新", left / 60, left % 60),
-                        Lang::En => format!("Renewed in {}:{:02}", left / 60, left % 60),
+                        Lang::En => format!("Refreshes in {}:{:02}", left / 60, left % 60),
                     };
                     let font = Font::new(Family::Segoe, 14.0, 400.0);
                     let w = 14.0 + 6.0 + frame.gfx.measure(&said, font);
                     frame.icon(Icon::Update, Point { x: cx - w / 2.0 + 7.0, y: y + 10.0 }, 14.0, palette.text2);
                     text_centred(frame, &said, font, palette.text, cx - w / 2.0 + 20.0, y + 10.0, w, Align::Start);
-                    centred(frame, pick(lang, "一部手机配对后立即刷新，离开此页后失效", "Renewed once a phone pairs, and void once this page is left"), hint, palette.text2, y + 32.0);
+                    centred(frame, pick(lang, "一部手机配对后立即刷新，离开此页后失效", "Refreshes after each pairing and expires when you leave this page"), hint, palette.text2, y + 32.0);
                     y += 42.0;
                 }
             }
@@ -8582,11 +8580,11 @@ It can be disconnected here at any time, and the status line command put back.",
         };
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = match self.page {
-            Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "The screens as Windows arranges them, over your wallpaper"),
+            Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "Screens are arranged as in Windows, over your wallpaper"),
             Page::Phone => pick(lang, "手机上的 Glance", "Glance on the phone"),
-            Page::Devices => pick(lang, "配对后，手机可控制这台电脑，发来的文件也直接接收", "Paired, a phone controls this PC and its files are taken without asking"),
-            Page::Nearby => pick(lang, "选择内容，再选择要发送到的设备", "Choose what to send, then the device to send it to"),
-            Page::Music => pick(lang, "正在播放的内容", "What plays now"),
+            Page::Devices => pick(lang, "配对后，手机可控制这台电脑，发来的文件也直接接收", "Once paired, the phone can control this PC and its files are accepted automatically"),
+            Page::Nearby => "",
+            Page::Music => pick(lang, "正在播放的内容", "Now playing"),
             _ => pick(lang, "实时数据", "Live readings"),
         };
         let title_w = frame.gfx.measure(title, head);
@@ -9042,10 +9040,10 @@ fn field_label(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>
 }
 
 /// A row's label and hint in the colours given (label, hint), the hint
-/// broken into as many lines as `width` makes it.
+/// broken into as many lines as `width` makes it (an empty hint is none).
 #[allow(clippy::too_many_arguments)]
 fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
-    match hint {
+    match hint.filter(|hint| !hint.is_empty()) {
         None => text_centred(frame, label, label_font, colors.0, x, cy, width, Align::Start),
         Some(hint) => {
             // A 20 DIP line, 2 apart, then the hint's lines.
@@ -9097,10 +9095,10 @@ fn maker(lang: Lang, glance: bool, kind: Option<&str>) -> &'static str {
     }
 }
 
-/// A row's label and hint, each on one line, cut short if they do not fit.
+/// A row's label and hint, each on one line, cut short if they do not fit (an empty hint is none).
 #[allow(clippy::too_many_arguments)]
 fn field_label_line(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
-    match hint {
+    match hint.filter(|hint| !hint.is_empty()) {
         None => text_centred(frame, label, label_font, palette.text, x, cy, width, Align::Start),
         Some(hint) => {
             // A 20 DIP line, 2 apart, then a 16 DIP one.

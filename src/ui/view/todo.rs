@@ -389,7 +389,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     frame.unclip();
     // Nothing to do: said where the items would be.
     if undone == 0 && done == 0 {
-        let says = lang.pick("没有待办事项", "Nothing to do");
+        let says = lang.pick("没有待办事项", "No to-dos");
         frame.text(says, small, theme.text3, left, frame.line_in(small, top, ROW), width, Align::Start);
     }
 }
@@ -432,7 +432,7 @@ fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f
     // (The caret, and what is chosen, as tall as a line of it, across the middle.)
     let (caret_top, caret_tall) = (middle - font.size * 0.65, font.size * 1.3);
     if field.text.is_empty() {
-        let says = scene.lang.pick("添加待办，回车保存", "Add a to-do, Enter to keep");
+        let says = scene.lang.pick("添加待办，回车保存", "Add a to-do, Enter to save");
         frame.text(&fitted(frame, says, font, room), font, theme.text3, words_left, line_y, room + 1.0, Align::Start);
     }
     // Scrolled so that the caret shows.
@@ -630,7 +630,7 @@ pub type BenchRow = (String, Option<String>, bool, u32, u64, u32);
 pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), rows: &[BenchRow], edit: Option<&Editing>, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     if rows.is_empty() {
-        let says = scene.lang.pick("没有待办事项", "Nothing to do");
+        let says = scene.lang.pick("没有待办事项", "No to-dos");
         let font = theme.small;
         frame.text(&fitted(frame, says, font, w), font, theme.text3, x, frame.line_in(font, y, h), w + 1.0, Align::Start);
         return;

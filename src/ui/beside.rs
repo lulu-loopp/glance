@@ -1911,7 +1911,7 @@ impl Beside {
         self.paint_ground(frame, (width, height));
         let Some(writing) = &self.writing else {
             let pad = super::note::PAD;
-            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, pad, pad, width - 2.0 * pad, Align::Start);
+            frame.text(lang.pick("没能打开编辑器", "Couldn't open the editor"), theme.body, theme.text2, pad, pad, width - 2.0 * pad, Align::Start);
             self.hits = hits;
             return;
         };
@@ -1941,7 +1941,7 @@ impl Beside {
         // Its head.
         let kept = crate::station::apps::shown();
         let inner = width - 2.0 * PAD;
-        let title = lang.pick("添加到快捷 App", "Add to quick launch");
+        let title = lang.pick("添加到快捷启动", "Add to Quick launch");
         let title_w = frame.measure(title, theme.title);
         frame.text(title, theme.title, theme.text, PAD, 16.0, inner, Align::Start);
         let said = match lang {
@@ -2051,8 +2051,8 @@ impl Beside {
         if words.is_empty() {
             let asked = match self.kind {
                 Kinds::Programs => lang.pick("搜索程序，可以用拼音首字母", "Search programs by name"),
-                Kinds::Files => lang.pick("搜索最近用过的文件", "Search the files used lately"),
-                Kinds::Folders => lang.pick("搜索最近用过的文件夹", "Search the folders used lately"),
+                Kinds::Files => lang.pick("搜索最近用过的文件", "Search recent files"),
+                Kinds::Folders => lang.pick("搜索最近用过的文件夹", "Search recent folders"),
             };
             frame.text(asked, theme.body, theme.text3, text_x, text_y, field.2 - super::view::FIELD_WORDS - 8.0, Align::Start);
         } else {
@@ -2079,7 +2079,7 @@ impl Beside {
         let mut y = 0.0;
         let mut letter = None;
         if self.kind != Kinds::Programs && !rows.is_empty() {
-            laid.push((y, Some(lang.pick("最近用过", "Used lately").to_string()), None));
+            laid.push((y, Some(lang.pick("最近用过", "Recent").to_string()), None));
             y += LETTER;
         }
         for row in &rows {
@@ -2096,11 +2096,11 @@ impl Beside {
         frame.clip(0.0, top, width, bottom - top);
         let mut waiting = false;
         let none = match self.kind {
-            Kinds::Programs if found::all().is_none() => Some(lang.pick("正在读取开始菜单中的程序…", "Reading the Start menu's programs…")),
-            Kinds::Programs => lang.pick("没有找到匹配的程序", "No program found by that").into(),
-            _ if !crate::station::recent::on() => Some(lang.pick("最近文件未开启，可以从电脑中选择", "Recent files is off: choose on the PC")),
-            Kinds::Files => Some(lang.pick("最近用过的文件中没有找到", "None of the files used lately")),
-            Kinds::Folders => Some(lang.pick("最近用过的文件夹中没有找到", "None of the folders used lately")),
+            Kinds::Programs if found::all().is_none() => Some(lang.pick("正在读取开始菜单中的程序…", "Loading Start menu programs…")),
+            Kinds::Programs => lang.pick("没有找到匹配的程序", "No matching programs").into(),
+            _ if !crate::station::recent::on() => Some(lang.pick("最近文件未开启，可以从电脑中选择", "Recent files is off. Choose files from this PC")),
+            Kinds::Files => Some(lang.pick("最近用过的文件中没有找到", "No matching recent files")),
+            Kinds::Folders => Some(lang.pick("最近用过的文件夹中没有找到", "No matching recent folders")),
         };
         if rows.is_empty() {
             if let Some(none) = none {
@@ -2196,17 +2196,19 @@ impl Beside {
             frame.stroke_rounded(super::canvas::Fill::Solid(edge), button.0, button.1, button.2, button.3, round(32.0), 1.0);
         }
         let (label, hint, icon) = match self.kind {
-            Kinds::Programs => (lang.pick("列表中没有？从电脑中选择程序", "Not listed? Choose a program on the PC"), lang.pick("可以选择 exe 或快捷方式", "A program or a shortcut to one"), Icon::File),
-            Kinds::Files => (lang.pick("从电脑中选择文件", "Choose files on the PC"), lang.pick("也可以把文件拖到此页面上", "Or drag files onto this page"), Icon::File),
-            Kinds::Folders => (lang.pick("从电脑中选择文件夹", "Choose folders on the PC"), lang.pick("也可以把文件夹拖到此页面上", "Or drag folders onto this page"), Icon::Folder),
+            Kinds::Programs => (lang.pick("列表中没有？从电脑中选择程序", "Not listed? Browse for a program"), None, Icon::File),
+            Kinds::Files => (lang.pick("从电脑中选择文件", "Browse for files"), Some(lang.pick("也可以把文件拖到此页面上", "Or drag files here")), Icon::File),
+            Kinds::Folders => (lang.pick("从电脑中选择文件夹", "Browse for folders"), Some(lang.pick("也可以把文件夹拖到此页面上", "Or drag folders here")), Icon::Folder),
         };
         let label_w = frame.measure(label, theme.body);
         let start = button.0 + (button.2 - 15.0 - 8.0 - label_w) / 2.0;
         frame.icon(icon, Point { x: start + 7.5, y: button.1 + button.3 / 2.0 }, 15.0, theme.text2);
         frame.text(label, theme.body, theme.text, start + 23.0, frame.line_in(theme.body, button.1, button.3), label_w + 2.0, Align::Start);
         hits.push((button.0, button.1, button.2, button.3, Hit::Choose));
-        let hint_w = frame.measure(hint, theme.small);
-        frame.text(hint, theme.small, theme.text3, (width - hint_w) / 2.0, bottom + 48.0, hint_w + 2.0, Align::Start);
+        if let Some(hint) = hint {
+            let hint_w = frame.measure(hint, theme.small);
+            frame.text(hint, theme.small, theme.text3, (width - hint_w) / 2.0, bottom + 48.0, hint_w + 2.0, Align::Start);
+        }
         // Something dragged over it to be added: the whole page says so.
         if self.dropping {
             self.paint_ground(frame, (width, height));
@@ -2217,12 +2219,9 @@ impl Beside {
             let middle = height / 2.0;
             frame.icon(Icon::ArrowDown, Point { x: width / 2.0, y: middle - 26.0 }, 28.0, mark);
             let bold = super::canvas::Font { weight: 650.0, ..theme.body };
-            let says = lang.pick("松开即可添加到快捷 App", "Let go to add it to quick launch");
+            let says = lang.pick("松开即可添加到快捷启动", "Release to add to Quick launch");
             let says_w = frame.measure(says, bold);
             frame.text(says, bold, mark, (width - says_w) / 2.0, middle, says_w + 2.0, Align::Start);
-            let more = lang.pick("可以添加程序、文件和文件夹", "Programs, files and folders");
-            let more_w = frame.measure(more, theme.small);
-            frame.text(more, theme.small, theme.text2, (width - more_w) / 2.0, middle + 24.0, more_w + 2.0, Align::Start);
         }
         self.waiting = waiting;
         self.hits = hits;

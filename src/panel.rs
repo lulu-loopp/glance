@@ -5540,7 +5540,7 @@ fn size_badge(frame: &gfx::Frame, theme: &Theme, size: f32, limit: Option<Limit>
         None => percent,
         Some(Limit::Smallest) => format!("{} {percent}", lang.pick("最小", "Smallest:")),
         Some(Limit::Largest) => format!("{} {percent}", lang.pick("最大", "Largest:")),
-        Some(Limit::Screen) => lang.pick("已占满屏幕", "As large as the screen holds").to_string(),
+        Some(Limit::Screen) => lang.pick("已占满屏幕", "Fills the screen").to_string(),
     };
     tag(frame, theme, &text, (area.0 / 2.0, area.1 / 2.0), limit.is_some());
 }
@@ -5732,7 +5732,7 @@ pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Op
             let players = crate::playing::now().map_or(0, |now| now.players);
             Some(match lang {
                 Lang::Zh => format!("切换到下一个播放器（共 {players} 个）"),
-                Lang::En => format!("Switch to the next player ({players} in all)"),
+                Lang::En => format!("Switch to the next player ({players} in total)"),
             })
         }
         Hit::PinThing(thing) => Some(if crate::station::marks(&[thing]).0 { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }.into()),

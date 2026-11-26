@@ -607,9 +607,9 @@ fn failed_words(failed: crate::ai::Failed, keyed: bool, lang: Lang) -> &'static 
     match failed {
         // (Codex is asked with the sign-in it keeps, not a key.)
         crate::ai::Failed::Key if !keyed => lang.pick("登录已过期", "Sign-in expired"),
-        crate::ai::Failed::Key => lang.pick("密钥无效", "Key refused"),
-        crate::ai::Failed::Limited => lang.pick("请求过于频繁", "Asked too often"),
-        crate::ai::Failed::Unavailable => lang.pick("暂时无法读取", "Unreachable"),
+        crate::ai::Failed::Key => lang.pick("密钥无效", "Invalid key"),
+        crate::ai::Failed::Limited => lang.pick("请求过于频繁", "Rate limited"),
+        crate::ai::Failed::Unavailable => lang.pick("暂时无法读取", "Temporarily unavailable"),
     }
 }
 
@@ -725,7 +725,7 @@ fn across(prefs: &Prefs, ids: &[&str], lang: Lang, usage: Option<&crate::ai::Usa
         let row: Vec<Lane> = opens
             .into_iter()
             .map(|(order, block)| {
-                let (kind, title) = [("pairs", lang.pick("今日构成", "Today by kind")), ("models", lang.pick("模型", "Models")), ("sessions", lang.pick("会话", "Sessions"))][order];
+                let (kind, title) = [("pairs", lang.pick("今日构成", "Today's breakdown")), ("models", lang.pick("模型", "Models")), ("sessions", lang.pick("会话", "Sessions"))][order];
                 let caption = Block::Ai(AiBlock::Head { source, title: title.into(), device: String::new(), aside: String::new(), opened: None, flag: None });
                 part(format!("{id}.{kind}"), vec![caption, block])
             })
@@ -856,7 +856,7 @@ pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai:
     let (sessions, working) = docked_sessions(prefs, lang, usage, now);
     let aside = match lang {
         Lang::Zh => format!("{working} 个进行中"),
-        Lang::En => format!("{working} at work"),
+        Lang::En => format!("{working} active"),
     };
     let mut blocks = vec![head(lang.pick("会话", "Sessions"), "", aside, false)];
     if sessions.is_empty() {
@@ -959,7 +959,7 @@ fn windows_of(limit: Option<&crate::ai::Limit>, now: u64, lang: Lang, told_left:
                 // (How long till it starts again, and so how much of it has gone, as of the minute: as it is told.)
                 let left = window.resets.filter(|_| !over).map(|resets| (resets - now).div_ceil(60_000));
                 let resets = match left {
-                    _ if over => lang.pick("已过重置时间，尚未取得新数据", "Past its reset, not read again yet").into(),
+                    _ if over => lang.pick("已过重置时间，尚未取得新数据", "Reset passed, waiting for new data").into(),
                     Some(left) => {
                         let left = left_in(left, lang);
                         match lang {
@@ -1264,7 +1264,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
             }
             let said = match lang {
                 Lang::Zh => format!("{at_work} 个会话进行中"),
-                Lang::En => format!("{at_work} {} at work", if *at_work == 1 { "session" } else { "sessions" }),
+                Lang::En => format!("{at_work} {} active", if *at_work == 1 { "session" } else { "sessions" }),
             };
             let all = match lang {
                 Lang::Zh => format!("今日共 {today} 个"),
@@ -1946,7 +1946,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         hits.push((sx, sy, sw, sh, Hit::AiSlot(spot)));
     };
     // What today's figure is of, in as many words as fit.
-    let ofs = [lang.pick("今日 tokens", "Tokens today"), lang.pick("今日", "Today")];
+    let ofs = [lang.pick("今日 Token", "Tokens today"), lang.pick("今日", "Today")];
     let told_as = ofs.iter().position(|of| frame.measure(of, label) <= width).unwrap_or(ofs.len() - 1);
     let of = ofs[told_as];
     let rows = count.div_ceil(columns) as f32;
@@ -2060,7 +2060,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         frame.fill_circle(ink.trace, Point { x: left + 3.5, y: row_y + LINE / 2.0 }, 3.5);
         let said = match lang {
             Lang::Zh => format!("{} 个会话进行中", dock.working),
-            Lang::En => format!("{} at work", dock.working),
+            Lang::En => format!("{} active", dock.working),
         };
         frame.text(&said, theme.small, theme.text2, left + 15.0, row_y, width - 15.0, Align::Start);
     }

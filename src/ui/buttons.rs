@@ -50,7 +50,7 @@ impl Button {
     pub fn says(self, lit: bool, lang: Lang, overlay: bool) -> &'static str {
         let p = |zh, en| lang.pick(zh, en);
         match (self, lit) {
-            (Button::Game, false) => p("显示当前窗口的帧率", "Show the front window's frame rate"),
+            (Button::Game, false) => p("显示当前窗口的帧率", "Show the active window's frame rate"),
             (Button::Game, true) => p("停止显示帧率", "Stop showing the frame rate"),
             (Button::Settings, _) => p("设置", "Settings"),
             (Button::Pin, false) if overlay => p("锁定位置", "Lock position"),
@@ -59,8 +59,8 @@ impl Button {
             (Button::Pin, true) => p("取消固定", "Unpin"),
             (Button::Through, false) => p("鼠标穿透", "Click-through"),
             (Button::Through, true) => p("关闭鼠标穿透", "Turn off click-through"),
-            (Button::Close, _) if overlay => p("关闭悬浮窗", "Close the overlay"),
-            (Button::Close, _) => p("收起", "Put away"),
+            (Button::Close, _) if overlay => p("关闭悬浮窗", "Close overlay"),
+            (Button::Close, _) => p("收起", "Hide"),
             (Button::Full, _) => p("全屏", "Full screen"),
         }
     }

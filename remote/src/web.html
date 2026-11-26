@@ -155,15 +155,15 @@ async function act(path, body, expect) {
   busy--; draw();
 }
 function failed(error) {
-  if (error.status === 401) { said(t("需要重新配对", "Pair again"), "bad"); unpaired(t("电脑已不再信任此浏览器", "The PC no longer takes this browser")); }
-  else said(error.status ? t("操作未完成", "Not done") : t("无法连接", "No answer"), "bad");
+  if (error.status === 401) { said(t("需要重新配对", "Pair again"), "bad"); unpaired(t("电脑已不再信任此浏览器", "The PC no longer trusts this browser")); }
+  else said(error.status ? t("操作未完成", "Not completed") : t("无法连接", "Can't connect"), "bad");
 }
 function unpaired(title) {
   main.hidden = true;
   document.getElementById("rig").hidden = true;
   document.getElementById("unpaired").hidden = false;
   document.getElementById("unpaired-title").textContent = title;
-  document.getElementById("unpaired-how").textContent = t("请在电脑上打开 Glance 设置中的“设备”页面，点击“显示配对码”，并用本手机的相机扫描。", "On the PC, open the Devices page of Glance's settings, press Show pairing code, and scan it with this phone's camera.");
+  document.getElementById("unpaired-how").textContent = t("在电脑的 Glance 设置中打开“设备”页，用相机扫描其中的配对码。", "On the PC, open the Devices page in Glance Settings and scan the pairing code there with the camera.");
 }
 
 const EFFECTS = [["steady", t("常亮", "Steady")], ["breathing", t("呼吸", "Breathing")], ["rainbow", t("彩虹", "Rainbow")], ["heat", t("跟随温度", "By heat")]];
@@ -208,7 +208,7 @@ function draw() {
   row.textContent = "";
   row.hidden = !reads;
   if (reads) {
-    for (const [id, name] of [["cpu", "CPU"], ["gpu", t("显卡", "Graphics")], ["ram", t("内存", "Memory")], ["disk", t("硬盘", "Disk")]]) {
+    for (const [id, name] of [["cpu", "CPU"], ["gpu", t("显卡", "Graphics")], ["ram", t("内存", "Memory")], ["disk", t("磁盘", "Disk")]]) {
       const read = reads[id] || {}, box = el("div");
       box.append(el("b", "", read.temp != null ? read.temp + "°" : read.load != null ? read.load + "%" : "—"), el("small", "", read.temp != null && read.load != null ? `${name} ${read.load}%` : name));
       row.append(box);
@@ -217,15 +217,15 @@ function draw() {
   // A phone the PC lets only read how it is: shown so, with nothing to press.
   if (state.control === false) {
     const c = card(t("仅查看状态", "Status only"));
-    c.append(el("span", "note", t("电脑已将此手机设为仅查看状态，无法从此处控制电脑。", "The PC lets this phone only see how it is: it cannot be controlled from here.")));
+    c.append(el("span", "note", t("电脑已将此手机设为仅查看状态，无法从此处控制电脑。", "This PC lets this phone view status only. It can't be controlled from here.")));
     main.append(c);
     return;
   }
   const tiles = el("div", "tiles");
   tiles.append(
-    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑仍在运行。再次点按即可结束", "On; the PC is still running. Tap again to end it") : t("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "The PC keeps running: screens off, lights off, sound muted, power saving"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
-    tile(t("屏幕", "Screens"), screen ? t("已开启，点按关闭全部屏幕", "On. Tap to turn them all off") : t("已关闭，点按开启", "Off. Tap to turn them on"), screen, () => act("/v1/screen", { on: !screen }, s => { s.screen = !screen; })),
-    ...(state.lights_there === false ? [] : [tile(t("灯光", "Lights"), lights === false ? t("已关闭，点按开启", "Off. Tap to turn them on") : t("已开启", "On"), lights !== false, () => act("/v1/lights", { on: lights === false }, s => { s.lights = lights === false; }))]),
+    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑仍在运行。再次点按即可结束", "On. The PC keeps running. Tap again to turn it off") : t("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "Keeps the PC running with screens and lights off, sound muted and power saving on"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
+    tile(t("屏幕", "Screens"), screen ? t("已开启，点按关闭全部屏幕", "On. Tap to turn all off") : t("已关闭，点按开启", "Off. Tap to turn on"), screen, () => act("/v1/screen", { on: !screen }, s => { s.screen = !screen; })),
+    ...(state.lights_there === false ? [] : [tile(t("灯光", "Lights"), lights === false ? t("已关闭，点按开启", "Off. Tap to turn on") : t("已开启", "On"), lights !== false, () => act("/v1/lights", { on: lights === false }, s => { s.lights = lights === false; }))]),
   );
   main.append(tiles);
   if ((state.power || []).length > 1) {
@@ -234,7 +234,7 @@ function draw() {
     main.append(c);
   }
   if (lights === true && !night && state.light && state.colours_there !== false) {
-    const light = state.light, c = card(t("灯光效果与颜色", "Lighting effect and colour"));
+    const light = state.light, c = card(t("灯光效果与颜色", "Lighting effect and color"));
     c.append(
       chips(EFFECTS.filter(([id]) => id !== "heat" || reads).map(([id, name]) => [name, light.effect === id, () => act("/v1/lights", { on: true, effect: id }, s => { s.light.effect = id; })])),
       chips(COLOURS.map(colour => ["", light.color.toUpperCase() === colour, () => act("/v1/lights", { on: true, color: colour }, s => { s.light.color = colour; }), colour]), "swatches"),
@@ -259,7 +259,7 @@ function draw() {
     const c = card(t("显示器", "Monitors")), rows = el("div", "rows");
     monitors.forEach((monitor, at) => {
       const row = el("div", "row"), text = el("div"), size = `${monitor.width} × ${monitor.height}`;
-      text.append(el("b", "", monitor.name), el("small", "", monitor.on == null ? `${size} · ${t("不支持单独开关", "cannot be turned off by itself")}` : size));
+      text.append(el("b", "", monitor.name), el("small", "", monitor.on == null ? `${size} · ${t("不支持单独开关", "can't be turned off separately")}` : size));
       row.append(text, toggle(monitor.on !== false && screen, monitor.on != null && screen, on => act("/v1/monitor", { index: at, on }, s => { s.monitors[at].on = on; })));
       rows.append(row);
       if (monitor.brightness != null) rows.append(slide(monitor.brightness, 0, monitor.on !== false && screen, level => act("/v1/monitor", { index: at, brightness: level }, s => { s.monitors[at].brightness = level; })));
@@ -278,17 +278,17 @@ function draw() {
       for (const [sign, what, cls, said] of [["previous", "previous", "", t("上一首", "Previous")], [media.playing ? "pause" : "play", "toggle", "main", media.playing ? t("暂停", "Pause") : t("播放", "Play")], ["next", "next", "", t("下一首", "Next")]]) { const b = el("button", cls || ""); b.setAttribute("aria-label", said); b.append(sign_of(sign)); b.onclick = () => act("/v1/media", { do: what }); keys.append(b); }
       row.append(text, keys); c.append(row);
       // A player known only by its sound: how it may be made to say what it plays.
-      if (!media.title) c.append(el("span", "note small", t("该播放器未向系统提供歌曲信息。网易云音乐可在其设置中开启“SMTC”。", "This player does not tell Windows what it plays. In NetEase Cloud Music, turn on “SMTC” in its settings.")));
+      if (!media.title) c.append(el("span", "note small", t("该播放器未向系统提供歌曲信息。网易云音乐可在其设置中开启“SMTC”。", "This player doesn't share what it's playing with Windows. In NetEase Cloud Music, turn on “SMTC” in its settings.")));
     }
     main.append(c);
   }
-  main.append(tile(t("睡眠", "Sleep"), t("整台电脑暂停运行，最为省电。无法通过手机唤醒，需在电脑上按键盘或电源键", "The whole PC stops: the least power. The phone cannot wake it; press a key or the power button on the PC"), false, () => { question = true; draw(); }, true));
+  main.append(tile(t("睡眠", "Sleep"), t("最省电，手机无法唤醒", "Uses the least power. The phone can't wake it"), false, () => { question = true; draw(); }, true));
   if (question) {
     const over = el("div", "ask"), box = el("div"), nav = el("nav"), no = el("button", "", t("取消", "Cancel")), yes = el("button", "do", t("睡眠", "Sleep"));
     no.onclick = () => { question = null; draw(); };
     yes.onclick = () => { question = null; act("/v1/sleep", {}); };
     nav.append(no, yes);
-    box.append(el("h3", "", t("使电脑进入睡眠？", "Put the PC to sleep?")), el("p", "", t("电脑上的所有活动都将暂停，包括下载、远程连接和正在运行的程序。进入睡眠后无法通过手机唤醒，需在电脑上按键盘或电源键。", "Everything on the PC stops: downloads, remote connections, programs at work. Asleep, it cannot be woken from the phone; press a key or the power button on the PC.")), el("p", "", t("如仅需关闭屏幕与灯光并保持电脑运行，请使用夜间模式。", "To turn off only the screens and the lights and leave the PC running, use night mode.")), nav);
+    box.append(el("h3", "", t("让电脑进入睡眠？", "Put the PC to sleep?")), el("p", "", t("下载、远程连接和正在运行的程序都将暂停。手机无法唤醒电脑，需在电脑上按键盘或电源键。", "Downloads, remote connections and running programs will pause. The phone can't wake the PC: press a key or the power button on the PC.")), el("p", "", t("只需关闭屏幕与灯光时，请使用夜间模式。", "To turn off only the screens and lights, use night mode.")), nav);
     over.append(box); main.append(over);
   }
 }
@@ -335,7 +335,7 @@ function fan(g, centre, u, v, r) {
 // Builds the picture once; what it gives back puts the PC's state into it.
 function rig(host) {
   const W = 56, D = 124, H = 128, R = 9;
-  const svg = svgEl("svg", { viewBox: "-190 -148 320 254", role: "img", "aria-label": t("电脑示意图及各部件温度", "The PC's case, and how warm its parts are") }, host);
+  const svg = svgEl("svg", { viewBox: "-190 -148 320 254", role: "img", "aria-label": t("电脑示意图及各部件温度", "A drawing of this PC, its parts colored by temperature") }, host);
   const scene = svgEl("g", {}, svg);
   const inside = svgEl("g", { color: "#3a424d" }, scene), walls = [];
   for (const points of [[[0, 0, 0], [W, 0, 0], [W, D, 0], [0, D, 0]], [[0, 0, 0], [0, D, 0], [0, D, H], [0, 0, H]], [[0, 0, 0], [W, 0, 0], [W, 0, H], [0, 0, H]]]) walls.push(svgEl("path", Object.assign({ d: loop(points, R), stroke: "currentColor", "stroke-width": 1 }, LINE), inside));
@@ -383,7 +383,7 @@ function rig(host) {
   say("disk", [40, 98, 28], [74, 62], "start");
   say("ram", [15, 70, 116], [-122, -124], "end");
   say("fan", [W / 2, D, 38], [-134, 64], "end");
-  const NAMES = { cpu: "CPU", gpu: t("显卡", "Graphics"), ram: t("内存", "Memory"), disk: t("硬盘", "Disk") };
+  const NAMES = { cpu: "CPU", gpu: t("显卡", "Graphics"), ram: t("内存", "Memory"), disk: t("磁盘", "Disk") };
   const spin = (blades, rpm, still) => { blades.style.transformOrigin = "0px 0px"; const now = !still && rpm > 0 ? `turn ${(60 / rpm * 16).toFixed(2)}s linear infinite` : "none"; if (blades.dataset.turn !== now) { blades.dataset.turn = now; blades.style.animation = now; } };
   return (pc) => {
     const reads = pc.reads || {}, dark = pc.night, lit = pc.lights === true && !dark && pc.colours_there !== false, light = "#" + ((pc.light || {}).color || "FFFFFF");
@@ -424,10 +424,10 @@ async function look() {
 if (/Android/.test(navigator.userAgent)) {
   document.getElementById("app").hidden = false;
   document.getElementById("app-title").textContent = t("下载 Glance APP", "Get the Glance app");
-  document.getElementById("app-how").textContent = t("安装后可在手机与电脑之间互传文件，并使用完整的遥控功能。", "With it, the phone and the PC send each other files, and the whole remote is there.");
+  document.getElementById("app-how").textContent = t("安装后可在手机与电脑之间互传文件，并使用完整的遥控功能。", "With the app, the phone and PC can send each other files, and every remote control is available.");
 }
 if (!key) { said(""); unpaired(t("此浏览器尚未与电脑配对", "This browser is not paired with the PC")); }
-else { said(t("正在连接…", "Reaching it…")); look(); setInterval(look, 2000); document.addEventListener("visibilitychange", look); }
+else { said(t("正在连接…", "Connecting…")); look(); setInterval(look, 2000); document.addEventListener("visibilitychange", look); }
 </script>
 </body>
 </html>

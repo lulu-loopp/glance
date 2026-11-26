@@ -221,7 +221,7 @@ const KNOB: f32 = 10.0;
 const SLIDER_FOR: Duration = Duration::from_millis(180);
 const OTHER: (f32, f32) = (400.0, 290.0);
 /// What is said of what cannot be played here.
-const UNPLAYABLE: (&str, &str) = ("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
+const UNPLAYABLE: (&str, &str) = ("无法在此播放该文件，按 Enter 用默认程序打开", "Can't play this file here. Press Enter to open it in its default app");
 const MOST: (f32, f32) = (0.6, 0.82);
 const GAP: f32 = 24.0;
 /// A page's shape (A4: its height to its width), and the room beside it.
@@ -2705,7 +2705,7 @@ impl Looker {
             Body::Played { picture, sound: false, .. } => self.paint_video(frame, body, picture.as_ref()),
             Body::Played { picture, sound: true, loudness } => self.paint_sound(frame, theme, body, picture.as_ref(), loudness.as_deref()),
             Body::Other(path) => {
-                let said = opens.then(|| self.lang.pick("没有可用的预览，按 Enter 用默认程序打开", "No preview is available. Press Enter to open it in its program"));
+                let said = opens.then(|| self.lang.pick("没有可用的预览，按 Enter 用默认程序打开", "No preview available. Press Enter to open it in its default app"));
                 self.paint_other(frame, theme, body, path.as_deref(), title, read.about.as_deref(), said);
             }
         }

@@ -422,7 +422,7 @@ impl Ui {
         let kinds = [
             (Icon::File, pick(lang, "文件", "Files"), 0u8),
             (Icon::Folder, pick(lang, "文件夹", "Folder"), 1),
-            (Icon::Text, pick(lang, "文字", "Words"), 2),
+            (Icon::Text, pick(lang, "文字", "Text"), 2),
             (Icon::Clipboard, pick(lang, "剪贴板", "Clipboard"), 3),
         ];
         let tile = (width - 3.0 * ROW_GAP) / 4.0;
@@ -457,11 +457,11 @@ impl Ui {
         let bytes: u64 = self.send.chosen.iter().filter_map(|chosen| chosen.size).sum();
         let count = self.send.chosen.len();
         let summed = match (count, lang) {
-            (0, _) => pick(lang, "还没有选择内容", "Nothing is chosen yet").to_string(),
+            (0, _) => pick(lang, "还没有选择内容", "Nothing selected").to_string(),
             (_, Lang::Zh) => format!("已选择 {count} 项 · {}", crate::ui::text::bytes(bytes as f64)),
             (_, Lang::En) => format!("{count} chosen · {}", crate::ui::text::bytes(bytes as f64)),
         };
-        let said = self.send.said.map_or_else(|| pick(lang, "也可以把文件从资源管理器拖到这里", "Files can be dragged here from File Explorer too"), |(said, _)| said);
+        let said = self.send.said.map_or_else(|| pick(lang, "也可以把文件从文件资源管理器拖到这里", "You can also drag files here from File Explorer"), |(said, _)| said);
         field_label(frame, palette, &summed, Some(said), label, hint, left + ROW_SIDE, cy, words_right - 8.0 - left - ROW_SIDE);
         let mut row = y + ROW;
         for chosen in self.send.chosen.iter().take(LISTED).cloned().collect::<Vec<_>>() {
@@ -481,7 +481,7 @@ impl Ui {
             }
             frame.icon(Icon::Close, Point { x: remove.x + 14.0, y: cy }, 14.0, palette.text2);
             self.targets.push((remove, target));
-            let size = chosen.size.map_or_else(|| pick(lang, "正在计算", "Measuring").to_string(), |size| crate::ui::text::bytes(size as f64));
+            let size = chosen.size.map_or_else(|| pick(lang, "正在计算", "Calculating").to_string(), |size| crate::ui::text::bytes(size as f64));
             let size_w = frame.gfx.measure(&size, hint);
             let size_x = remove.x - 12.0 - size_w;
             text_centred(frame, &size, hint, palette.text2, size_x, cy, size_w + 1.0, Align::Start);
@@ -501,7 +501,7 @@ impl Ui {
         // The devices, under their group's name (as the list's groups are), with what looks for them again.
         y += 20.0;
         let small = Font::new(Family::Segoe, 13.0, 600.0);
-        text_centred(frame, pick(lang, "附近的设备", "Devices nearby"), small, palette.text2, left + 4.0, y + GROUP / 2.0, width - 40.0, Align::Start);
+        text_centred(frame, pick(lang, "附近的设备", "Nearby devices"), small, palette.text2, left + 4.0, y + GROUP / 2.0, width - 40.0, Align::Start);
         let refresh = Rect { x: right - 28.0, y: y + GROUP / 2.0 - 14.0, w: 28.0, h: 28.0 };
         if hovered.as_ref() == Some(&Target::SendRefresh) {
             fill(frame, palette.hover, refresh.x, refresh.y, refresh.w, refresh.h, 6.0);
@@ -512,7 +512,7 @@ impl Ui {
         let shown = crate::nearby::shown();
         let devices = self.send_devices(&shown);
         if devices.is_empty() {
-            text_centred(frame, pick(lang, "正在查找附近的设备", "Looking for devices nearby"), hint, palette.text2, left + 4.0, y + 10.0, width - 8.0, Align::Start);
+            text_centred(frame, pick(lang, "正在查找附近的设备", "Looking for nearby devices"), hint, palette.text2, left + 4.0, y + 10.0, width - 8.0, Align::Start);
             y += 20.0;
         }
         for device in &devices {
@@ -542,7 +542,7 @@ impl Ui {
         if self.send.over {
             fill(frame, palette.window.alpha(0.88), area.x, area.y, area.w, area.h, CARD_RADIUS);
             frame.stroke_rounded_dashed(palette.selection, area.x, area.y, area.w, area.h, CARD_RADIUS, 2.0);
-            across(frame, pick(lang, "松开以添加到发送", "Let go to add it"), Font::new(Family::Segoe, 15.0, 600.0), palette.selection, area.x, area.y + area.h / 2.0, area.w);
+            across(frame, pick(lang, "松开以添加到发送", "Release to add"), Font::new(Family::Segoe, 15.0, 600.0), palette.selection, area.x, area.y + area.h / 2.0, area.w);
         }
     }
 
@@ -563,17 +563,17 @@ impl Ui {
             None => None,
             Some((_, None)) => Some((Cow::Borrowed(pick(lang, "正在准备", "Getting ready")), false, None, None)),
             Some((job, Some(state))) => Some(match state {
-                Sending::Waiting => (Cow::Borrowed(pick(lang, "等待对方接受", "Waiting to be taken")), false, Some(*job), None),
+                Sending::Waiting => (Cow::Borrowed(pick(lang, "等待对方接受", "Waiting for them to accept")), false, Some(*job), None),
                 Sending::Going { done, of } => {
                     let part = if *of == 0 { 0.0 } else { (*done as f32 / *of as f32).clamp(0.0, 1.0) };
                     (Cow::Owned(format!("{}%", (part * 100.0).round() as u32)), false, Some(*job), Some(part))
                 }
                 Sending::Sent => (Cow::Borrowed(pick(lang, "已发送", "Sent")), true, None, None),
-                Sending::Refused => (Cow::Borrowed(pick(lang, "对方已拒绝", "Turned down")), false, None, None),
-                Sending::Busy => (Cow::Borrowed(pick(lang, "对方正在接收其他文件", "Receiving something else")), false, None, None),
-                Sending::Pin { .. } => (Cow::Borrowed(pick(lang, "需要 PIN 码", "A PIN is needed")), false, Some(*job), None),
+                Sending::Refused => (Cow::Borrowed(pick(lang, "对方已拒绝", "Declined")), false, None, None),
+                Sending::Busy => (Cow::Borrowed(pick(lang, "对方正在接收其他文件", "Busy receiving other files")), false, None, None),
+                Sending::Pin { .. } => (Cow::Borrowed(pick(lang, "需要 PIN 码", "PIN required")), false, Some(*job), None),
                 Sending::Cancelled => (Cow::Borrowed(pick(lang, "已取消", "Cancelled")), false, None, None),
-                Sending::Failed { .. } => (Cow::Borrowed(pick(lang, "发送失败", "Not sent")), false, None, None),
+                Sending::Failed { .. } => (Cow::Borrowed(pick(lang, "发送失败", "Couldn't send")), false, None, None),
             }),
         };
         match state {
@@ -635,7 +635,7 @@ impl Ui {
         renaming.along = along;
         frame.clip(field.x, field.y, field.w, field.h);
         if text.is_empty() {
-            text_centred(frame, pick(lang, "输入要发送的文字", "Write what to send"), font, palette.text3, field.x, field.y + 9.0, field.w, Align::Start);
+            text_centred(frame, pick(lang, "输入要发送的文字", "Enter text to send"), font, palette.text3, field.x, field.y + 9.0, field.w, Align::Start);
         }
         let selection = renaming.typing.selection();
         if !selection.is_empty() {
@@ -700,10 +700,10 @@ impl Ui {
             }
             // Read once, as it is pressed: what may not leave this PC is not taken.
             Target::SendKind(_) => match crate::station::clipboard::read(self.hwnd, crate::station::clipboard::Why::Pasted) {
-                Ok(Some(copied)) if copied.stays_here => self.send.say(pick(self.lang, "剪贴板中的内容不允许发送到其他设备", "What is on the clipboard may not leave this PC")),
+                Ok(Some(copied)) if copied.stays_here => self.send.say(pick(self.lang, "剪贴板中的内容不允许发送到其他设备", "Clipboard content can't be sent to other devices")),
                 Ok(Some(copied)) => self.send.add_given(vec![copied.content], self.lang),
-                Ok(None) => self.send.say(pick(self.lang, "剪贴板中没有内容", "Nothing is on the clipboard")),
-                Err(_) => self.send.say(pick(self.lang, "剪贴板正被其他程序使用，请稍后再试", "Another program holds the clipboard. Try again in a moment")),
+                Ok(None) => self.send.say(pick(self.lang, "剪贴板中没有内容", "The clipboard is empty")),
+                Err(_) => self.send.say(pick(self.lang, "剪贴板正被其他程序使用，请稍后再试", "Another program is using the clipboard. Try again in a moment")),
             },
             Target::SendClear => self.send.chosen.clear(),
             Target::SendRemove(id) => self.send.chosen.retain(|chosen| chosen.id != id),

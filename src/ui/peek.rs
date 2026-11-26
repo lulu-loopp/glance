@@ -1211,12 +1211,12 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
                 (Got::Words { link, .. }, Lang::Zh) => (title, format!("{} · 来自 {from}", if *link { "链接" } else { "文字" })),
                 (Got::Words { link, .. }, Lang::En) => (title, format!("{} · From {from}", if *link { "Link" } else { "Text" })),
                 (_, Lang::Zh) => (title, format!("来自 {from} · 已放入中转站")),
-                (_, Lang::En) => (title, format!("From {from} · In the station")),
+                (_, Lang::En) => (title, format!("From {from} · In Station")),
             }
         }
         Says::Pin { to, .. } => match lang {
             Lang::Zh => (format!("{to} 需要 PIN 码"), "请输入对方设置的 PIN 码".to_string()),
-            Lang::En => (format!("{to} asks for a PIN"), "Enter the PIN set on that device".to_string()),
+            Lang::En => (format!("{to} requires a PIN"), "Enter the PIN set on that device".to_string()),
         },
     }
 }
@@ -1299,7 +1299,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
                 } else {
                     canvas.stroke_rounded(super::canvas::Fill::Solid(theme.text3), bx, by, side, side, 4.0, 1.5);
                 }
-                let said = lang.pick("以后直接接收这台设备的文件", "Accept files from this device without asking");
+                let said = lang.pick("以后直接接收这台设备的文件", "Always accept files from this device");
                 canvas.text(said, theme.small, if over == Some(Spot::Trust) { theme.text } else { theme.text2 }, bx + side + 8.0, canvas.line_in(theme.small, y, TRUST_ROW), inner - side - 9.0, Align::Start);
                 spots.push((PAD, y, inner, TRUST_ROW, Spot::Trust));
                 y += TRUST_ROW + SPACE;
@@ -1354,7 +1354,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             spots.push((PAD, y, inner, FIELD, Spot::Field));
             // Under it, what is sent, or that the PIN given was not right.
             let refused = *tried > 0 && !trying;
-            let (said, colour) = if refused { (lang.pick("PIN 码不正确", "That PIN is not right").to_string(), theme.signal) } else { (what.clone(), theme.text3) };
+            let (said, colour) = if refused { (lang.pick("PIN 码不正确", "Incorrect PIN").to_string(), theme.signal) } else { (what.clone(), theme.text3) };
             canvas.text(&said, theme.small, colour, PAD + 2.0, canvas.line_in(theme.small, y + FIELD, FIELD_LINE) + 1.0, inner - 4.0, Align::Start);
             let y = y + FIELD + FIELD_LINE + SPACE;
             buttons(canvas, theme, (accent, plate.highlight), title_font, y, [lang.pick("取消", "Cancel"), lang.pick("发送", "Send")], over, spots);

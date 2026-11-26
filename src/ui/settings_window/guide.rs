@@ -828,7 +828,7 @@ fn words(step: Step, edge: Edge, lang: Lang) -> Words {
                 Lang::Zh => (format!("将鼠标移到屏幕{side}边缘，再向外推动一下。"), format!("现在请在屏幕{side}边缘试一次")),
                 Lang::En => (format!("Move the pointer to the {side} edge of the screen, then push a little further."), format!("Now try it at the {side} edge")),
             };
-            Words { title: p("从屏幕边缘呼出面板", "Open a panel from the screen's edge"), body, wait, done: p("面板已呼出，鼠标移开后自动收起", "The panel is open. It closes as the pointer leaves it") }
+            Words { title: p("从屏幕边缘呼出面板", "Open a panel from the screen's edge"), body, wait, done: p("面板已呼出，鼠标移开后自动收起", "The panel is open. It closes when the pointer leaves") }
         }
         Step::Size => Words {
             title: p("调整面板大小", "Resize the panel"),
@@ -844,23 +844,23 @@ fn words(step: Step, edge: Edge, lang: Lang) -> Words {
             title: p("拖出成为小组件", "Drag out a widget"),
             body: p(
                 "按住某一块的标题拖出，这一块单独成为小组件。按住面板其他地方拖出，整个面板成为小组件。",
-                "Hold a block by its title and drag it out to make that block a widget of its own. Hold the panel anywhere else and drag it out to make the whole panel a widget.",
+                "Hold a block by its title and drag it out to make it a widget of its own. Hold anywhere else on the panel and drag it out to make the whole panel a widget.",
             )
             .into(),
             wait: p("现在请呼出面板，拖出一个小组件试一次", "Now open a panel and drag out a widget").into(),
             done: p("小组件已拖出", "A widget is dragged out"),
         },
         Step::Layout => Words {
-            title: p("将组件放到屏幕边缘", "Put components on the screen's edges"),
+            title: p("将组件放到屏幕边缘", "Place components on screen edges"),
             body: p(
                 "将左侧的组件拖到右侧屏幕的任意一条边缘，推动该边缘即可呼出它。边缘上的组件也可拖到另一条边缘，两者互换位置。",
-                "Drag a component on the left onto any edge of the screen on the right, then push that edge to open it. A component on an edge can be dragged onto another, and the two change places.",
+                "Drag a component from the left onto any edge of the screen on the right, then push that edge to open it. Drag a component from one edge to another to swap them.",
             )
             .into(),
             wait: p("现在请拖动一个组件", "Now drag a component").into(),
             done: p("已调整，推动该边缘即可呼出", "Done. Push that edge to open it"),
         },
-        Step::Keys => Words { title: p("两个快捷键", "Two shortcuts"), body: String::new(), wait: p("请点击按键各试一次", "Click each to try it once").into(), done: p("两个快捷键均已试过", "Both shortcuts are tried") },
+        Step::Keys => Words { title: p("两个快捷键", "Two shortcuts"), body: String::new(), wait: p("请单击按键各试一次", "Click each to try it").into(), done: p("两个快捷键均已试过", "Both shortcuts are tried") },
         Step::Ready => Words { title: p("准备就绪", "All set"), body: p("此引导可在通用页中再次查看。", "You can see this guide again on the General page.").into(), wait: String::new(), done: "" },
     }
 }
@@ -869,7 +869,7 @@ fn words(step: Step, edge: Edge, lang: Lang) -> Words {
 fn caps(shortcut: Option<crate::settings::Shortcut>, lang: Lang) -> Vec<String> {
     match shortcut {
         Some(shortcut) => crate::tray::shortcut_name(shortcut).split('+').map(str::to_string).collect(),
-        None => vec![pick(lang, "未设置", "None").to_string()],
+        None => vec![pick(lang, "未设置", "Not set").to_string()],
     }
 }
 

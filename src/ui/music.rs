@@ -469,10 +469,10 @@ fn moment() -> Moment {
             moment.now = now;
             moment.since = Some(since);
         }
-        Some(Sung::Untimed { netease: true }) => moment.said = Some(lang.pick("网易云音乐没有提供播放进度，可在设置的“音乐”页安装 InfLink-rs 插件以显示歌词", "NetEase Cloud Music does not say how far in it is. Install the InfLink-rs plugin on the Music page of Settings to show lyrics").into()),
-        Some(Sung::Untimed { netease: false }) => moment.said = Some(lang.pick("此播放器没有提供播放进度", "This player does not say how far into the track it is").into()),
-        Some(Sung::Asking) => moment.said = Some(lang.pick("正在查找歌词…", "Finding the lyrics…").into()),
-        Some(Sung::Unknown) => moment.said = Some(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track").into()),
+        Some(Sung::Untimed { netease: true }) => moment.said = Some(lang.pick("网易云音乐没有提供播放进度，可在设置的“音乐”页安装歌词插件以显示歌词", "NetEase Cloud Music doesn't report its position. Install the lyrics plugin on the Music page of Settings to show lyrics").into()),
+        Some(Sung::Untimed { netease: false }) => moment.said = Some(lang.pick("此播放器没有提供播放进度", "This player doesn't report its position").into()),
+        Some(Sung::Asking) => moment.said = Some(lang.pick("正在查找歌词…", "Finding lyrics…").into()),
+        Some(Sung::Unknown) => moment.said = Some(lang.pick("没有找到这首歌的歌词", "No lyrics found for this track").into()),
         Some(Sung::Instrumental) => moment.said = Some(lang.pick("这首歌是纯音乐", "This track is instrumental").into()),
         None => moment.said = Some(unsaid(heard.as_ref(), lang)),
     }

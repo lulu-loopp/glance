@@ -99,7 +99,7 @@ fn counted(text: &str, lang: Lang) -> String {
     let count = text.chars().filter(|c| !c.is_whitespace()).count();
     match lang {
         Lang::Zh => format!("{count} 字 · 自动保存"),
-        Lang::En => format!("{count} characters · kept as you write"),
+        Lang::En => format!("{count} characters · saved automatically"),
     }
 }
 
@@ -284,15 +284,15 @@ pub fn writing_menu(lang: Lang, spot: Spot) -> (Vec<super::menu::Item<'static>>,
 pub fn menu(lang: Lang, colour: crate::notes::Colour, named: bool, stuck: bool) -> (Vec<super::menu::Item<'static>>, Vec<Choice>) {
     use crate::notes::Colour;
     use super::menu::{Item, Mark};
-    let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
+    let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Gray"))];
     let mut rows: Vec<(Choice, &'static str, Mark, bool, bool)> = names.iter().map(|(each, name)| (Choice::Colour(*each), *name, Mark::Colour(super::view::note_colour(*each)), colour == *each, false)).collect();
     rows.push((Choice::Source, lang.pick("显示 Markdown 源码", "Show Markdown source"), Mark::Icon(Icon::Code), crate::notes::source(), true));
     if named {
         match stuck {
-            true => rows.push((Choice::Unstick, lang.pick("从桌面取下", "Take off the desktop"), Mark::Icon(Icon::PinOff), false, true)),
-            false => rows.push((Choice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true)),
+            true => rows.push((Choice::Unstick, lang.pick("从桌面取下", "Unpin from desktop"), Mark::Icon(Icon::PinOff), false, true)),
+            false => rows.push((Choice::Stick, lang.pick("贴到桌面", "Pin to desktop"), Mark::Icon(Icon::Pin), false, true)),
         }
-        rows.push((Choice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Trash), false, false));
+        rows.push((Choice::TakeAway, lang.pick("移到回收站", "Move to Recycle Bin"), Mark::Icon(Icon::Trash), false, false));
     }
     let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item::new(*label, Some(*mark), *checked, *rule_before)).collect();
     (items, rows.into_iter().map(|(choice, ..)| choice).collect())
@@ -1753,14 +1753,14 @@ impl Writing {
             Ok(crate::notes::Written::Apart(apart, stamp)) => {
                 self.said = Some(match lang {
                     Lang::Zh => format!("这条便签在别处被改过或删除，你写的已另存为“{apart}”"),
-                    Lang::En => format!("Changed or deleted elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
+                    Lang::En => format!("Changed or deleted elsewhere in the meantime. Your text is saved as \"{apart}\""),
                 });
                 // (Its stamp of the bytes written here: read again, another's change meanwhile would be taken for them.)
                 self.stamp = Some(stamp);
                 self.name = Some(apart);
             }
             Err(_) => {
-                self.said = Some(lang.pick("未能保存，请检查便签文件夹，稍后将再次尝试", "Could not be saved. Check the notes folder, it will be tried again").to_string());
+                self.said = Some(lang.pick("未能保存，请检查便签文件夹，稍后将再次尝试", "Couldn't save. Check the notes folder. Glance will try again").to_string());
                 return false;
             }
         }

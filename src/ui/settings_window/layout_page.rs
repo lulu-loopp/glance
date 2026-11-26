@@ -76,7 +76,7 @@ fn part_word(part: Part, lang: Lang) -> &'static str {
         Part::Monitor => pick(lang, "实时硬件数据", "Live readings"),
         Part::Workbench => pick(lang, "时间与工具", "Time and tools"),
         Part::Music => pick(lang, "歌曲与歌词", "Songs and lyrics"),
-        Part::Ai => pick(lang, "额度与令牌用量", "Limits and tokens"),
+        Part::Ai => pick(lang, "额度与 Token 用量", "Limits and token usage"),
     }
 }
 
@@ -102,8 +102,8 @@ impl Ui {
             pick(self.lang, "组件", "Components"),
             pick(
                 self.lang,
-                "将组件拖到右侧屏幕的边缘，即可从该边缘呼出。每条边缘放置一个组件，同一组件可放在多条边缘。拖到已有组件的边缘将替换原组件，在两条边缘之间拖动则互换位置",
-                "Drag a component onto a screen's edge on the right to open it from there. Each edge holds one, and a component can be on several. Dropped on an edge that holds one, it replaces it. Dragged between two edges, the two change places",
+                "将组件拖到屏幕边缘，推动该边缘即可呼出",
+                "Drag a component onto a screen edge, then push that edge to open it",
             ),
         )
     }
@@ -262,7 +262,7 @@ impl Ui {
                 self.button(frame, palette, &text, area.x + EDITOR_ROOM + x + w, cy, Target::View(view), kind, &hovered);
                 x += w + 8.0;
             }
-            let label = pick(lang, "所有屏幕同样布局", "Every screen alike");
+            let label = pick(lang, "所有屏幕同样布局", "Same layout on all screens");
             let label_w = frame.gfx.measure(label, font);
             let switch = label_w + 12.0 + 40.0;
             if x + 16.0 + switch > width {
@@ -278,7 +278,7 @@ impl Ui {
         // The words under the screens: how each kind of edge opens (a line each, side by side where they fit), and
         // under that what a press does, in as many lines as it takes. Measured first: the screens have the rest.
         let small = Font::new(Family::Segoe, HINT, 400.0);
-        let legends = [(false, pick(lang, "外边缘：向外推动呼出", "Outer edge: push past it")), (true, pick(lang, "屏幕相接处：停留片刻呼出", "Where screens meet: rest on it"))];
+        let legends = [(false, pick(lang, "外边缘：向外推动呼出", "Outer edge: push to open")), (true, pick(lang, "屏幕相接处：停留片刻呼出", "Between screens: hover to open"))];
         let mark = 18.0 + 6.0;
         let mut placed = Vec::new();
         let (mut x, mut row) = (0.0, 0usize);
@@ -291,9 +291,9 @@ impl Ui {
             x += w + 20.0;
         }
         let rest = if shown.is_some() {
-            pick(lang, "点击边缘可预览其面板，再次点击收起。底边为任务栏，不放置组件", "Click an edge to preview its panel, and again to close it. The bottom edge is the taskbar's")
+            pick(lang, "单击边缘可预览其面板。底边为任务栏，不放置组件", "Click an edge to preview its panel. The bottom edge is the taskbar")
         } else {
-            pick(lang, "点击屏幕可放大查看。底边为任务栏，不放置组件", "Click a screen to enlarge it. The bottom edge is the taskbar's")
+            pick(lang, "单击屏幕可放大查看。底边为任务栏，不放置组件", "Click a screen to enlarge it. The bottom edge is the taskbar")
         };
         let rest_h = frame.gfx.wrapped_height(rest, small, width);
         let foot_h = 12.0 + (row + 1) as f32 * LEGEND_ROW + 4.0 + rest_h + 14.0;

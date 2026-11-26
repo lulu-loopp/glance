@@ -282,7 +282,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     }
     rows.push((Choice::Preview, lang.pick("预览", "Preview"), Icon::Image, false));
     if in_explorer {
-        rows.push((Choice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false));
+        rows.push((Choice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false));
     }
     rows.push((Choice::Pin, if item.pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
     rows.push((Choice::Remove, lang.pick("移除", "Remove"), Icon::Trash, true));
@@ -415,8 +415,8 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
         .iter()
         .map(|choice| match choice {
             ManyChoice::Copy => row(lang.pick("全部复制", "Copy all"), Icon::Clipboard, false),
-            ManyChoice::Show => row(lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
-            ManyChoice::Station => row(lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
+            ManyChoice::Show => row(lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false),
+            ManyChoice::Station => row(lang.pick("全部放入中转站", "Add all to Station"), Icon::Inbox, false),
             ManyChoice::Pin(true) => row(lang.pick("全部固定", "Pin all"), Icon::Pin, false),
             ManyChoice::Pin(false) => row(lang.pick("全部取消固定", "Unpin all"), Icon::Pin, false),
             ManyChoice::Tags | ManyChoice::Tag(_) | ManyChoice::NewTag => tags.clone(),
@@ -488,18 +488,18 @@ pub fn recent_menu(entry: recent::Entry, at: windows::Win32::Foundation::POINT, 
     let mut rows: Vec<(RecentChoice, &str, Icon, bool)> = match entry {
         recent::Entry::File(_) => vec![
             (RecentChoice::Open, lang.pick("打开", "Open"), Icon::File, false),
-            (RecentChoice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
-            (RecentChoice::Station, lang.pick("放入中转站", "Put on the station"), Icon::Inbox, false),
-            (RecentChoice::CopyPath, lang.pick("复制路径", "Copy its path"), Icon::Clipboard, false),
+            (RecentChoice::Show, lang.pick("在文件资源管理器中显示", "Show in File Explorer"), Icon::Panel, false),
+            (RecentChoice::Station, lang.pick("放入中转站", "Add to Station"), Icon::Inbox, false),
+            (RecentChoice::CopyPath, lang.pick("复制路径", "Copy path"), Icon::Clipboard, false),
         ],
         recent::Entry::Burst(..) => vec![
-            (RecentChoice::Show, lang.pick("打开所在文件夹", "Open their folder"), Icon::Panel, false),
-            (RecentChoice::Station, lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
-            (RecentChoice::CopyPath, lang.pick("复制文件夹路径", "Copy the folder's path"), Icon::Clipboard, false),
+            (RecentChoice::Show, lang.pick("打开所在文件夹", "Open containing folder"), Icon::Panel, false),
+            (RecentChoice::Station, lang.pick("全部放入中转站", "Add all to Station"), Icon::Inbox, false),
+            (RecentChoice::CopyPath, lang.pick("复制文件夹路径", "Copy folder path"), Icon::Clipboard, false),
         ],
     };
     rows.push((RecentChoice::Pin, if marks(&[thing]).0 { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
-    rows.push((RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true));
+    rows.push((RecentChoice::Hide, lang.pick("不再列出这个文件夹", "Stop listing this folder"), Icon::EyeOff, true));
     let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     let mut choices: Vec<RecentChoice> = rows.into_iter().map(|(choice, ..)| choice).collect();
     // "标签" and "发送到" before the rule, their tags and devices chosen after all its rows (see `Menu::sub_choice`).
@@ -564,13 +564,13 @@ fn app_rows(app: &apps::App, lang: crate::ui::text::Lang) -> Vec<(AppChoice, &'s
     use crate::ui::icons::Icon;
     let mut rows = vec![(AppChoice::Open, lang.pick("打开", "Open"), Icon::File, false)];
     if app.location().is_some() {
-        rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
+        rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open file location"), Icon::Panel, false));
     }
     rows.push((AppChoice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false));
     if app.alias.is_some() {
-        rows.push((AppChoice::Restore, lang.pick("恢复原名", "Restore its name"), Icon::Restore, false));
+        rows.push((AppChoice::Restore, lang.pick("恢复原名", "Restore original name"), Icon::Restore, false));
     }
-    rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::PinOff, true));
+    rows.push((AppChoice::Remove, lang.pick("从快捷启动移除", "Remove from Quick launch"), Icon::PinOff, true));
     rows
 }
 
@@ -654,11 +654,11 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
         .map(|(shows, label, icon)| (HeadChoice::View(page, shows), label, icon, shows == view, false))
         .collect();
     rows.extend(match tab {
-        Tab::Shelf(_) => vec![(HeadChoice::Clear, lang.pick("全部清空（保留固定和带标签的内容）", "Clear all but the pinned and tagged"), Icon::Trash, false, true)],
+        Tab::Shelf(_) => vec![(HeadChoice::Clear, lang.pick("全部清空", "Clear all"), Icon::Trash, false, true)],
         Tab::Recent(_) => vec![(HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::EyeOff, false, true)],
         Tab::Copies(_) => vec![
-            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定和带标签的内容）", "Clear Recently copied but the pinned and tagged"), Icon::Trash, false, true),
-            (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
+            (HeadChoice::ClearCopies, lang.pick("清空最近复制", "Clear copied items"), Icon::Trash, false, true),
+            (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop recording copied items"), Icon::Clipboard, false, false),
         ],
     });
     rows.push((HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true));
@@ -725,9 +725,9 @@ mod tests {
     fn a_thing_kept_at_hand_is_offered_its_renaming() {
         let mut app = apps::App { target: "https://example.com/".into(), name: "example.com".into(), alias: None };
         let choices = |app: &apps::App| app_rows(app, crate::ui::text::Lang::Zh).into_iter().map(|(choice, label, ..)| (choice, label)).collect::<Vec<_>>();
-        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Remove, "从快捷 App 移除")]);
+        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Remove, "从快捷启动移除")]);
         app.alias = Some("样例".into());
-        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Restore, "恢复原名"), (AppChoice::Remove, "从快捷 App 移除")]);
+        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Restore, "恢复原名"), (AppChoice::Remove, "从快捷启动移除")]);
     }
 
     /// The menu of things chosen together offers what may be done with all of them: put on the clipboard ever, shown

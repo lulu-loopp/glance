@@ -324,7 +324,7 @@ impl Renaming {
     }
 
     fn hint(&self) -> &'static str {
-        self.lang.pick("回车确定，Esc 取消", "Enter to keep, Esc to cancel")
+        self.lang.pick("回车确定，Esc 取消", "Enter to save, Esc to cancel")
     }
 
     fn hint_font(&self) -> Font {

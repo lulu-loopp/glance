@@ -176,7 +176,7 @@ pub fn card(scene: &Scene, number: u64) -> Option<Lane> {
 
 fn card_of(folder: &Folder, today: i64, lang: Lang) -> Option<Card> {
     let told = if folder.away {
-        Err(lang.pick("找不到此文件夹，或此位置不支持统计。", "This folder cannot be found, or its sizes cannot be told here.").to_string())
+        Err(lang.pick("找不到此文件夹，或此位置不支持统计。", "Can't find this folder, or sizes can't be measured here.").to_string())
     } else {
         let held = folder.held.as_ref()?;
         let whole = text::bytes(held.bytes as f64);
@@ -211,7 +211,7 @@ fn changed(change: Change, lang: Lang) -> String {
         }
     };
     match (change, lang) {
-        (Change::Begun, _) => lang.pick("从今天开始记录", "Recorded from today on").into(),
+        (Change::Begun, _) => lang.pick("从今天开始记录", "Recording from today").into(),
         (Change::Week(to), Lang::Zh) => format!("近 7 天{}", by(to)),
         (Change::Week(to), Lang::En) => format!("{} in 7 days", by(to)),
         (Change::Since(day, to), Lang::Zh) => {
@@ -308,7 +308,7 @@ impl Card {
         }
         y += LARGEST;
         frame.key("storage.card.largest");
-        frame.text(scene.lang.pick("其中最大", "Largest in it"), theme.small, theme.text3, left, y, width, Align::Start);
+        frame.text(scene.lang.pick("其中最大", "Largest inside"), theme.small, theme.text3, left, y, width, Align::Start);
         y += LINE;
         for (at, (name, size)) in told.largest.iter().enumerate() {
             let row = y + FACT_GAP + at as f32 * (LINE + FACT_GAP);

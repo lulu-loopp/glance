@@ -5830,11 +5830,11 @@ pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool, f
     menu_choices(full)
         .into_iter()
         .map(|choice| match choice {
-            WidgetChoice::Pin => item("固定位置和大小", "Pin where it is", Icon::Pin, pinned, false),
-            WidgetChoice::ClickThrough => item("鼠标穿透", "Let clicks through", Icon::Pointer, through, false),
+            WidgetChoice::Pin => item("固定位置和大小", "Pin position and size", Icon::Pin, pinned, false),
+            WidgetChoice::ClickThrough => item("鼠标穿透", "Click-through", Icon::Pointer, through, false),
             WidgetChoice::AboveOthers => item("置于其他窗口之上", "Keep above other windows", Icon::Layers, above, false),
             WidgetChoice::Full => item("全屏播放", "Full screen", Icon::Maximize, false, false),
-            WidgetChoice::Close => item("收起", "Put away", Icon::Close, false, false),
+            WidgetChoice::Close => item("收起", "Hide", Icon::Close, false, false),
             WidgetChoice::Settings => item("设置…", "Settings…", Icon::Settings, false, true),
         })
         .collect()

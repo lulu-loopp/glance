@@ -1315,7 +1315,7 @@ impl Organizer {
                             self.put_gathered(item);
                         }
                     }
-                    self.say(format!("{} {}", count_text(count as u64), lang.pick("项未能移至回收站，可能没有权限或正在使用", "items could not be moved to the Recycle Bin: no permission, or in use")), crate::ui::icons::Icon::Info);
+                    self.say(format!("{} {}", count_text(count as u64), lang.pick("项未能移至回收站，可能没有权限或正在使用", "items couldn't be moved to the Recycle Bin (no permission, or in use)")), crate::ui::icons::Icon::Info);
                 }
                 // (What is shown at once as it is now: the drive's change comes in a moment.)
                 if let Some(chosen) = &self.chosen {
@@ -1326,17 +1326,17 @@ impl Organizer {
             }
             Acted::Released { bytes, marked } => {
                 if marked {
-                    self.say(format!("{} {}{}", lang.pick("将释放", "Freeing"), size_text(bytes, lang), lang.pick("，文件只保留在 OneDrive 中", ", the files kept in OneDrive alone")), crate::ui::icons::Icon::Cloud);
+                    self.say(format!("{} {}{}", lang.pick("将释放", "Frees"), size_text(bytes, lang), lang.pick("，文件只保留在 OneDrive 中", ", keeping the files in OneDrive only")), crate::ui::icons::Icon::Cloud);
                 } else {
-                    self.say(lang.pick("未能释放空间", "Space could not be freed").into(), crate::ui::icons::Icon::Info);
+                    self.say(lang.pick("未能释放空间", "Couldn't free space").into(), crate::ui::icons::Icon::Info);
                 }
             }
             Acted::Emptied { bytes, done } => {
                 if done {
                     self.went = None;
-                    self.say(format!("{}{}", lang.pick("已清空回收站，释放 ", "Recycle Bin emptied, freeing "), size_text(bytes, lang)), crate::ui::icons::Icon::CircleCheck);
+                    self.say(format!("{}{}", lang.pick("已清空回收站，释放 ", "Recycle Bin emptied, freed"), size_text(bytes, lang)), crate::ui::icons::Icon::CircleCheck);
                 } else {
-                    self.say(lang.pick("未能清空回收站", "The Recycle Bin could not be emptied").into(), crate::ui::icons::Icon::Info);
+                    self.say(lang.pick("未能清空回收站", "Couldn't empty the Recycle Bin").into(), crate::ui::icons::Icon::Info);
                 }
             }
         }

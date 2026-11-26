@@ -478,16 +478,16 @@ fn ask_gone(app: &super::apps::App) {
     let lang = crate::update::language();
     let title = match lang {
         crate::ui::text::Lang::Zh => format!("找不到“{}”", app.name),
-        crate::ui::text::Lang::En => format!("\"{}\" is not found", app.name),
+        crate::ui::text::Lang::En => format!("\"{}\" not found", app.name),
     };
     let asked = crate::ui::ask::Asked {
         title: &title,
-        intro: lang.pick("它可能已被移动、重命名或删除。可以将它从快捷 App 中移除。", "It may have been moved, renamed or deleted. It can be taken off quick launch."),
+        intro: lang.pick("它可能已被移动、重命名或删除。可以将它从快捷启动中移除。", "It may have been moved, renamed, or deleted. You can remove it from Quick launch."),
         own: None,
         option: None,
         sent: None,
         from_end: false,
-        yes: lang.pick("移除", "Take off"),
+        yes: lang.pick("移除", "Remove"),
         no: lang.pick("取消", "Cancel"),
         dark: crate::os::apps_dark(),
     };
