@@ -331,7 +331,7 @@ impl Organizer {
                 fill(frame, p.accent, bar.x, bar.y, used_w - pick_w - bin_w, bar.h, 0.0);
                 if bin_w > 0.0 {
                     let r = Rect { x: bar.x + used_w - pick_w - bin_w, w: bin_w, ..bar };
-                    fill(frame, p.text3.alpha(p.text3.a * 0.6), r.x, r.y, r.w, r.h, 0.0);
+                    fill(frame, p.text3.alpha(0.6), r.x, r.y, r.w, r.h, 0.0);
                     stripes(frame, r, p.stripe);
                 }
                 if pick_w > 0.0 {
@@ -458,7 +458,7 @@ impl Organizer {
         if can_go_up && *hot == Some(Target::Back) {
             fill(frame, p.hover, back.x, back.y, back.w, back.h, 6.0);
         }
-        frame.icon(Icon::ArrowLeft, Point { x: back.x + 16.0, y: back.y + 16.0 }, 16.0, if can_go_up { p.text } else { p.text3.alpha(p.text3.a * 0.6) });
+        frame.icon(Icon::ArrowLeft, Point { x: back.x + 16.0, y: back.y + 16.0 }, 16.0, if can_go_up { p.text } else { p.text3.alpha(0.6) });
         if can_go_up {
             self.spot(back, Target::Back);
         }
@@ -568,7 +568,7 @@ impl Organizer {
                 let faded = lighting.as_ref().is_some_and(|light| *light != Light::Kind(kind)) && matches!(lighting, Some(Light::Kind(_)));
                 let alpha = if faded { 0.5 } else { 1.0 };
                 fill(frame, p.fill[kind.at()].alpha(alpha), r.x + 8.0, r.y + 7.0, 10.0, 10.0, 2.0);
-                frame.text(&text, chip_font, p.text2.alpha(p.text2.a * alpha), r.x + 24.0, frame.line_in(chip_font, r.y, r.h), r.w - 28.0, Align::Start);
+                frame.text(&text, chip_font, p.text2.alpha(alpha), r.x + 24.0, frame.line_in(chip_font, r.y, r.h), r.w - 28.0, Align::Start);
                 self.spot(r, target);
                 x += w + 4.0;
             }
@@ -641,25 +641,25 @@ impl Organizer {
             let gathered = !matches!(about.what, Some(What::Unlisted)) && about.many_in.is_none() && self.gathered_at(&about.path);
             if group {
                 // A ground: its name above what it holds, its size at the right where there is room.
-                fill(frame, p.ground.alpha(p.ground.a * alpha * dim), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS);
+                fill(frame, p.ground.alpha(alpha * dim), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS);
                 if hovered {
-                    grounds_over.push((r, p.edge.alpha(p.edge.a * alpha), false));
+                    grounds_over.push((r, p.edge.alpha(alpha), false));
                 }
                 let font = body(12.0, 600.0);
                 let size = size_text(about.bytes, lang);
                 let size_w = frame.measure(&size, body(12.0, 400.0));
-                let ink = p.text.alpha(p.text.a * alpha * dim.max(0.5));
+                let ink = p.text.alpha(alpha * dim.max(0.5));
                 let y = frame.line_in(font, r.y, crate::disk::map::LABEL);
                 let room = r.w - 16.0;
                 if room > size_w + 48.0 {
                     frame.text(&about.name, font, ink, r.x + 8.0, y, room - size_w - 8.0, Align::Start);
-                    frame.text(&size, body(12.0, 400.0), p.text2.alpha(p.text2.a * alpha * dim.max(0.5)), r.x + 8.0, y, room, Align::End);
+                    frame.text(&size, body(12.0, 400.0), p.text2.alpha(alpha * dim.max(0.5)), r.x + 8.0, y, room, Align::End);
                 } else {
                     frame.text(&about.name, font, ink, r.x + 8.0, y, room, Align::Start);
                 }
                 if gathered {
                     within(frame, r, crate::disk::map::RADIUS, alpha, || stripes(frame, r, p.stripe));
-                    grounds_over.push((r, p.text2.alpha(p.text2.a * alpha), true));
+                    grounds_over.push((r, p.text2.alpha(alpha), true));
                 }
                 continue;
             }
@@ -723,17 +723,18 @@ impl Organizer {
                 }
             });
             if gathered {
-                frame.stroke_rounded_dashed(p.text.alpha(p.text.a * alpha * 0.7), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
+                frame.stroke_rounded_dashed(p.text.alpha(alpha * 0.7), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.0);
             }
             for at in &outlined {
-                frame.stroke_rounded_dashed(p.text.alpha(p.text.a * alpha * dim * 0.7), at.x, at.y, at.w, at.h, 0.0, 1.0);
+                frame.stroke_rounded_dashed(p.text.alpha(alpha * dim * 0.7), at.x, at.y, at.w, at.h, 0.0, 1.0);
             }
             if chosen.as_ref().is_some_and(|chosen| *chosen == about.path) && about.many_in.is_none() && !matches!(about.what, Some(What::Rest | What::Unlisted)) {
                 stroke_inside(frame, r, crate::disk::map::RADIUS, p.accent.alpha(alpha));
                 stroke_inside(frame, Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, crate::disk::map::RADIUS - 1.0, p.accent.alpha(alpha));
                 stroke_inside(frame, Rect { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 4.0 }, (crate::disk::map::RADIUS - 2.0).max(0.0), p.ring.alpha(alpha));
             } else if hovered {
-                Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(p.edge), r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5, crate::disk::map::RADIUS, 1.5);
+                // (The box given is the outline's outer edge: the line is drawn inside it.)
+                Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(p.edge), r.x, r.y, r.w, r.h, crate::disk::map::RADIUS, 1.5);
             }
         }
         for (r, color, dashed) in grounds_over {
@@ -1200,9 +1201,9 @@ impl Organizer {
             let alpha = (t / 0.15).min(1.0).min((SAID_FOR.as_secs_f32() - t) / 0.25).clamp(0.0, 1.0);
             frame.shadow(Color::hex(0, 0.16 * alpha), r.x, r.y, r.w, r.h, 8.0, 8.0, 3.0);
             fill(frame, p.fly.alpha(alpha), r.x, r.y, r.w, r.h, 8.0);
-            stroke_inside(frame, r, 8.0, p.fly_stroke.alpha(p.fly_stroke.a * alpha));
+            stroke_inside(frame, r, 8.0, p.fly_stroke.alpha(alpha));
             frame.icon(said.icon, Point { x: r.x + 16.0 + 8.0, y: r.y + 20.0 }, 16.0, p.accent.alpha(alpha));
-            frame.text(&said.words, font, p.text.alpha(p.text.a * alpha), r.x + 40.0, frame.line_in(font, r.y, r.h), r.w - 48.0, Align::Start);
+            frame.text(&said.words, font, p.text.alpha(alpha), r.x + 40.0, frame.line_in(font, r.y, r.h), r.w - 48.0, Align::Start);
         }
     }
 

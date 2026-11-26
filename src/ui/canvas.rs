@@ -309,8 +309,8 @@ pub trait Canvas {
     fn stroke_dashed(&self, points: &[Point], color: Color, width: f32);
     /// The shape `points` outline, closed.
     fn fill_shape(&self, points: &[Point], fill: Fill);
-    /// The outline of the rounded rectangle, a line `line` DIPs wide
-    /// centred on it.
+    /// The outline of the rounded rectangle, a line `line` DIPs wide inside its edge: the box given is the line's
+    /// outer edge, as a fill of the same box is.
     #[allow(clippy::too_many_arguments)]
     fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32);
     /// The outline of the rounded rectangle, dashed, a line `line` DIPs wide inside its edge: its corners each a

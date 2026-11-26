@@ -1,18 +1,19 @@
 //! The disk organizer's map: the folder shown laid out as a squarified treemap (Bruls, Huizing and van Wijk, 2000),
 //! two levels at a time. Its contents are the first level, rounded blocks with gaps between them; each folder among
-//! them large enough is a quiet ground with its name above what it holds, the second level, which reaches its sides and
-//! its foot as the first level's blocks beside it do (their edges in line). A folder drawn as one
+//! them large enough is a quiet ground with its name above what it holds, the second level, a narrow margin in from its
+//! sides and foot (the ground's own edges in line with the blocks beside it). A folder drawn as one
 //! block is drawn as what it holds all the way down, pieces split by one-DIP lines (see `pieces`). Deeper only by
 //! going in.
 
 use super::{Held, Kind, Tree, What};
 
 /// One corner radius for every block (Windows 11's for small controls), the gaps between blocks at the first level
-/// and the second, a first-level folder's name line.
+/// and the second, a first-level folder's name line and the margin of what it holds in from its sides and foot.
 pub const RADIUS: f32 = 4.0;
 pub const GAP_FIRST: f32 = 6.0;
 pub const GAP_SECOND: f32 = 3.0;
 pub const LABEL: f32 = 26.0;
+pub const INSET: f32 = 4.0;
 /// The least a block on the page is either way: about what a pointer hits surely.
 pub const SIDE_LEAST: f32 = 12.0;
 /// The least a folder's piece is either way to be split into what it holds, and how deep pieces go at most.
@@ -253,8 +254,7 @@ pub fn pieces(tree: &Tree, node: usize, at: Rect) -> (Vec<Piece>, Vec<Piece>) {
 
 /// The map of `tree`'s folder `width` × `height`: what it holds as the first level; each folder among them a ground
 /// with its name above what it holds, the second level, where it is large enough (else drawn as its pieces). Gaps are
-/// taken out of each block, half on each side, the outer edges flush with the map's, and a ground's second level flush
-/// with its sides and foot: in line with the blocks beside it. A block's level 2 come after it.
+/// taken out of each block, half on each side, the outer edges flush with the map's. A block's level 2 come after it.
 pub fn lay_out(tree: &Tree, width: f32, height: f32) -> Vec<Block> {
     let mut out = Vec::new();
     if tree.nodes.is_empty() {
@@ -287,7 +287,7 @@ fn place(tree: &Tree, folder: usize, area: Rect, level: u8, gap: f32, out: &mut 
         };
         if level == 1 && !tree.nodes[node].children.is_empty() && at.w >= GROUP_WIDTH && at.h >= GROUP_HEIGHT {
             out.push(Block { item, at, level, group: true, pieces: Vec::new(), folds: Vec::new() });
-            place(tree, node, Rect { x: at.x, y: at.y + LABEL, w: at.w, h: at.h - LABEL }, 2, GAP_SECOND, out);
+            place(tree, node, Rect { x: at.x + INSET, y: at.y + LABEL, w: at.w - 2.0 * INSET, h: at.h - LABEL - INSET }, 2, GAP_SECOND, out);
         } else {
             let (pieces, folds) = pieces(tree, node, at);
             out.push(Block { item, at, level, group: false, pieces, folds });
@@ -406,14 +406,14 @@ mod tests {
         let inner: Vec<&Block> = blocks.iter().filter(|block| block.level == 2).collect();
         assert_eq!(inner.len(), 3);
         for block in &inner {
-            assert!(block.at.x >= large.at.x - 1e-3 && block.at.y >= large.at.y + LABEL - 1e-3);
-            assert!(block.at.x + block.at.w <= large.at.x + large.at.w + 1e-3 && block.at.y + block.at.h <= large.at.y + large.at.h + 1e-3);
+            assert!(block.at.x >= large.at.x + INSET - 1e-3 && block.at.y >= large.at.y + LABEL - 1e-3);
+            assert!(block.at.x + block.at.w <= large.at.x + large.at.w - INSET + 1e-3 && block.at.y + block.at.h <= large.at.y + large.at.h - INSET + 1e-3);
         }
-        // What it holds reaches its sides and its foot, in line with the blocks beside it.
+        // What it holds fills the ground but for the margin: its sides and foot the same way in from the ground's.
         let most = |edge: fn(&&Block) -> f32| inner.iter().map(edge).fold(f32::MIN, f32::max);
-        assert!((most(|block| block.at.y + block.at.h) - (large.at.y + large.at.h)).abs() < 1e-3);
-        assert!((most(|block| block.at.x + block.at.w) - (large.at.x + large.at.w)).abs() < 1e-3);
-        assert!((inner.iter().map(|block| block.at.x).fold(f32::MAX, f32::min) - large.at.x).abs() < 1e-3);
+        assert!((most(|block| block.at.y + block.at.h) - (large.at.y + large.at.h - INSET)).abs() < 1e-3);
+        assert!((most(|block| block.at.x + block.at.w) - (large.at.x + large.at.w - INSET)).abs() < 1e-3);
+        assert!((inner.iter().map(|block| block.at.x).fold(f32::MAX, f32::min) - (large.at.x + INSET)).abs() < 1e-3);
         let small = blocks.iter().find(|block| block.item == Item::Node(5)).unwrap();
         assert!(!small.group);
         assert_eq!(small.pieces.len(), 3);
