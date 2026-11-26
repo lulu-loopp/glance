@@ -310,11 +310,10 @@ pub fn hit(blocks: &[Block], x: f32, y: f32) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::disk::{Node, Role};
-    use std::collections::HashMap;
 
     /// A tree of a folder holding `sizes` (a size; a folder: what it holds), its rest `rest` where that is not none.
     fn tree(sizes: &[(u64, &[u64])], rest: u64) -> Tree {
-        let mut tree = Tree { nodes: Vec::new(), by_place: HashMap::new(), rests: HashMap::new(), area: 0.0 };
+        let mut tree = Tree { nodes: Vec::new(), by_place: Default::default(), rests: Default::default(), area: 0.0 };
         let node = |place: u32, what: What, bytes: u64| {
             let mut held = Held { bytes, files: 1, ..Held::default() };
             held.kinds[Kind::Video.at()] = bytes;

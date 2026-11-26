@@ -640,6 +640,13 @@ pub struct Organizer {
     /// were asked so: going up to one is shown from it at once, as it is read anew.
     asked: Option<Ask>,
     read_above: Vec<(Ask, Rc<Shown>)>,
+    /// Each drive's root as it was last read (shown, or read ahead), as asked: turned to, a drive is shown from it at
+    /// once, as it is read anew. The drives asked to be read ahead (once, as the first reading comes), and as what.
+    drive_read: Vec<(Ask, Rc<Shown>)>,
+    ahead: Option<Vec<Ask>>,
+    /// How far what is shown has given way to its being read (0 to 1, eased in `paint`): a drive turned to before it
+    /// is read, what the one before showed fading out as the words saying it is read come.
+    reading: f32,
     /// The map as laid out (its size), moving from the last, and what each block and piece is dimmed to (eased).
     laid: Vec<Placed>,
     laid_size: (f32, f32),
@@ -742,6 +749,9 @@ impl Organizer {
             listing: false,
             asked: None,
             read_above: Vec::new(),
+            drive_read: Vec::new(),
+            ahead: None,
+            reading: 0.0,
             laid: Vec::new(),
             laid_size: (0.0, 0.0),
             anim: None,
@@ -848,9 +858,25 @@ impl Organizer {
         self.menu = None;
         self.change = Some(Change::Fade);
         self.listing = false;
+        self.scroll = 0.0;
+        self.scroll_to = 0.0;
         let root = root.to_string();
         crate::app().change(|settings| settings.disk_drive = Some(root));
+        // Read before as it is asked now: shown from that at once (fading in as the drive before fades out), the
+        // reading anew shown as it comes.
+        let asking = self.asking(0);
+        let read = self.drive_read.iter().find(|(asked, _)| same_but_area(asked, &asking)).map(|(_, shown)| shown.clone());
+        if let Some(read) = read {
+            self.shown = Some(read);
+            let change = self.change.take();
+            self.relay(change);
+        }
         self.ask();
+    }
+
+    /// Whether what is shown is of another drive than the one turned to (its reading awaited).
+    fn waiting(&self) -> bool {
+        self.shown.as_ref().is_none_or(|shown| !shown.root.eq_ignore_ascii_case(&self.root))
     }
 
     /// The folder at `path` shown (as soon as it is read).
@@ -945,8 +971,21 @@ impl Organizer {
 
     /// What the reading thread read, taken in: the map laid out anew from it, moving from the last.
     pub fn take_shown(&mut self) {
-        let Some(told) = self.worker.take() else { return };
+        for told in self.worker.take() {
+            self.take_told(told);
+        }
+        self.next_frame = Instant::now();
+    }
+
+    fn take_told(&mut self, told: Told) {
         match told {
+            Told::Ahead(shown) => {
+                let Some(asked) = self.ahead.as_ref().and_then(|ahead| ahead.iter().find(|ask| ask.root.eq_ignore_ascii_case(&shown.root))).cloned() else { return };
+                // (Read since as it is shown: that is kept.)
+                if !self.drive_read.iter().any(|(read, _)| read.root.eq_ignore_ascii_case(&asked.root)) {
+                    self.drive_read.push((asked, Rc::new(*shown)));
+                }
+            }
             // (Of what was asked before: what is asked now comes after.)
             Told::Listing(serial) | Told::Nowhere(serial) if serial != self.serial => {}
             Told::Listing(_) => {
@@ -983,11 +1022,28 @@ impl Organizer {
                     self.read_above.retain(|(above, _)| above.focus != asked.focus && asked.focus.starts_with(&above.focus) && Ask { focus: asked.focus.clone(), ..above.clone() } == asked);
                     self.read_above.push((asked, shown.clone()));
                 }
+                // A drive's root kept as read last; the other drives read ahead, once the first reading has come.
+                if shown.focus.as_os_str().len() <= shown.root.len() {
+                    if let Some(asked) = self.asked.clone().filter(|asked| asked.root.eq_ignore_ascii_case(&shown.root) && asked.focus == shown.focus) {
+                        self.drive_read.retain(|(read, _)| !read.root.eq_ignore_ascii_case(&shown.root));
+                        self.drive_read.push((asked, shown.clone()));
+                    }
+                }
+                if self.ahead.is_none() {
+                    let asking = self.asking(0);
+                    let ahead: Vec<Ask> = self
+                        .drives
+                        .iter()
+                        .filter(|drive| !drive.root.eq_ignore_ascii_case(&shown.root))
+                        .map(|drive| Ask { root: drive.root.clone(), focus: PathBuf::from(&drive.root), light: None, ..asking.clone() })
+                        .collect();
+                    self.worker.read_ahead(ahead.clone());
+                    self.ahead = Some(ahead);
+                }
                 self.shown = Some(shown);
                 self.relay(Some(change));
             }
         }
-        self.next_frame = Instant::now();
     }
 
     /// The map laid out anew for the reading shown, at the map's size, moving from the last as `change` says (none:
@@ -1270,6 +1326,11 @@ fn drawn_as(blocks: &[Placed], key: Key) -> Option<Rect> {
 fn anim_t(anim: &Anim, now: Instant) -> f32 {
     let t = (now.duration_since(anim.began).as_secs_f32() / anim.lasts.as_secs_f32()).clamp(0.0, 1.0);
     crate::ui::motion::Easing(0.1, 0.9, 0.2, 1.0).at(t)
+}
+
+/// Whether `a` asks what `b` does, but for the map's size.
+fn same_but_area(a: &Ask, b: &Ask) -> bool {
+    Ask { area: b.area, serial: b.serial, ..a.clone() } == *b
 }
 
 fn same_rect(a: Rect, b: Rect) -> bool {

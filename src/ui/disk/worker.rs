@@ -1,6 +1,7 @@
 //! The disk organizer's reading: on a thread of its own, the drive's index read for what the window asks to see (see
 //! `Ask`), and read again as the drive changes while the window is up, what is read handed to the window (see `Told`).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use crate::search::Since;
 
 /// How often the drive is looked at for changes while nothing is asked, and how long at least between two readings of
 /// it as it changes (a system drive changes all the time: read anew each second, the window was laid out anew as often).
+/// Asked nothing that long, a drive asked to be read ahead is read.
 const LOOKED_AT: Duration = Duration::from_millis(1000);
 const READ_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
@@ -71,9 +73,18 @@ pub struct Shown {
     pub changed: bool,
 }
 
+/// What the window asks of the reading thread: what is to be shown, or a drive's root to be read ahead of its being
+/// asked (once nothing else has been asked for a while), so it is shown at once as it is.
+enum Asked {
+    Show(Ask),
+    Ahead(Ask),
+}
+
 /// What reading an asking came to.
 pub enum Told {
     Shown(Box<Shown>),
+    /// A drive's root read ahead.
+    Ahead(Box<Shown>),
     /// Its drive's files are being found still.
     Listing(u64),
     /// Its drive is not searched (gone).
@@ -83,15 +94,15 @@ pub enum Told {
 /// The reading thread, as the window holds it: what it is asked, and where what it reads is left (the window told by
 /// `told_by` as it is).
 pub struct Worker {
-    asks: Sender<Ask>,
-    pub told: Arc<Mutex<Option<Told>>>,
+    asks: Sender<Asked>,
+    told: Arc<Mutex<Vec<Told>>>,
 }
 
 impl Worker {
     /// Started, `window` told `message` as each reading is left in `told`.
     pub fn start(window: HWND, message: u32) -> Worker {
         let (asks, asked) = std::sync::mpsc::channel();
-        let told = Arc::new(Mutex::new(None));
+        let told = Arc::new(Mutex::new(Vec::new()));
         let left = told.clone();
         let window = window.0 as isize;
         let _ = std::thread::Builder::new().name("glance: disk organizer reading".into()).spawn(move || {
@@ -102,11 +113,19 @@ impl Worker {
     }
 
     pub fn ask(&self, ask: Ask) {
-        let _ = self.asks.send(ask);
+        let _ = self.asks.send(Asked::Show(ask));
     }
 
-    pub fn take(&self) -> Option<Told> {
-        self.told.lock().unwrap().take()
+    /// Each of `asks` (a drive's root each) read ahead, one by one as nothing else is asked.
+    pub fn read_ahead(&self, asks: Vec<Ask>) {
+        for ask in asks {
+            let _ = self.asks.send(Asked::Ahead(ask));
+        }
+    }
+
+    /// What was read since it was last taken, as it was told.
+    pub fn take(&self) -> Vec<Told> {
+        std::mem::take(&mut *self.told.lock().unwrap())
     }
 }
 
@@ -118,29 +137,49 @@ struct Kept {
     survey: Survey,
 }
 
-fn run(asked: Receiver<Ask>, told: Arc<Mutex<Option<Told>>>, window: HWND, message: u32) {
+fn run(asked: Receiver<Asked>, told: Arc<Mutex<Vec<Told>>>, window: HWND, message: u32) {
     let places = Places::of_this_pc();
     let mut kept: Option<Kept> = None;
     let mut last: Option<Ask> = None;
+    let mut ahead: VecDeque<Ask> = VecDeque::new();
     let mut listing = false;
     let mut read_at = std::time::Instant::now();
     loop {
-        let ask = match asked.recv_timeout(LOOKED_AT) {
-            // (The latest asked of all asked meanwhile.)
-            Ok(ask) => Some(asked.try_iter().last().unwrap_or(ask)),
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => None,
+        let first = asked.recv_timeout(LOOKED_AT);
+        let idle = matches!(first, Err(RecvTimeoutError::Timeout));
+        if matches!(first, Err(RecvTimeoutError::Disconnected)) {
+            return;
+        }
+        // (The latest shown of all asked meanwhile.)
+        let mut ask = None;
+        for asking in first.into_iter().chain(asked.try_iter()) {
+            match asking {
+                Asked::Show(show) => ask = Some(show),
+                Asked::Ahead(root) => ahead.push_back(root),
+            }
+        }
+        let mut gone = false;
+        let mut tell = |reading: Told| {
+            told.lock().unwrap().push(reading);
+            gone |= unsafe { PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)) }.is_err();
         };
         let (ask, anew) = match (ask, &last) {
             (Some(ask), _) => (ask, true),
             // Asked nothing: read again as it changed, or as its files are found.
             (None, Some(last)) if listing || (read_at.elapsed() >= READ_AGAIN_AFTER && kept.as_ref().is_some_and(|kept| crate::search::read_since(kept.replaced, &kept.watch))) => (last.clone(), false),
-            (None, _) => continue,
-        };
-        let mut gone = false;
-        let mut tell = |reading: Told| {
-            *told.lock().unwrap() = Some(reading);
-            gone |= unsafe { PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)) }.is_err();
+            // Asked nothing for a while, and nothing changed: a drive read ahead (not the one shown), its survey not
+            // kept.
+            (None, _) => {
+                if let Some(root) = ahead.pop_front().filter(|_| idle).filter(|root| last.as_ref().is_none_or(|last| !last.root.eq_ignore_ascii_case(&root.root))) {
+                    if let Told::Shown(shown) = read(&root, &places, &mut None, true, &mut |_| {}) {
+                        tell(Told::Ahead(shown));
+                    }
+                }
+                if gone {
+                    return;
+                }
+                continue;
+            }
         };
         let reading = read(&ask, &places, &mut kept, anew, &mut tell);
         read_at = std::time::Instant::now();

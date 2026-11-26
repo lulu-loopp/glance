@@ -230,14 +230,14 @@ fn the_lists_hold_what_passes_and_is_lit_never_the_system_s_nor_the_bin_s() {
 
     let zips = Detail::take(&index, &survey, ROOT, Filter::default(), Some(&Light::Extension("zip".into())), &tree);
     assert_eq!(names(&zips), ["old.zip"]);
-    let lit: HashSet<u32> = ["", "Users", "Users\\me"].iter().map(|path| if path.is_empty() { ROOT } else { at(&index, path) }).collect();
+    let lit: QuickSet<u32> = ["", "Users", "Users\\me"].iter().map(|path| if path.is_empty() { ROOT } else { at(&index, path) }).collect();
     assert!(lit.is_subset(&zips.lit_folders));
     assert!(zips.lit_rests.is_empty());
     let pdfs = Detail::take(&index, &survey, ROOT, Filter::default(), Some(&Light::Extension("pdf".into())), &tree);
-    assert_eq!(pdfs.lit_rests, HashSet::from([at(&index, "Users\\me")]));
+    assert_eq!(pdfs.lit_rests, QuickSet::from_iter([at(&index, "Users\\me")]));
     // A row of the lists by type and by time lights the map as being lit by it would, among the folders drawn: read
     // with no light at all.
-    let drawn = |lit: &HashSet<u32>| lit.iter().copied().filter(|place| tree.by_place.contains_key(place)).collect::<HashSet<u32>>();
+    let drawn = |lit: &QuickSet<u32>| lit.iter().copied().filter(|place| tree.by_place.contains_key(place)).collect::<QuickSet<u32>>();
     assert_eq!(all.by_extension["zip"].folders, drawn(&zips.lit_folders));
     assert_eq!(all.by_extension["zip"].rests, zips.lit_rests);
     assert_eq!(all.by_extension["pdf"].rests, pdfs.lit_rests);

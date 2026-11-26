@@ -328,6 +328,11 @@ impl Organizer {
         };
         self.targets.clear();
         let mut moving = self.paint_head(frame, &palette, g, now);
+        // What is shown gives way to its being read (a drive turned to before it is read), and comes back as it is.
+        let to = if self.waiting() { 1.0 } else { 0.0 };
+        let step = dt / super::FADE.as_secs_f32();
+        self.reading = if to > self.reading { (self.reading + step).min(to) } else { (self.reading - step).max(to) };
+        moving |= self.reading != to;
         if self.root.is_empty() {
             self.paint_no_drive(frame, &palette, g);
         } else {
@@ -541,7 +546,7 @@ impl Organizer {
             self.spot(back, Target::Back);
         }
         let Some(shown) = self.shown.clone() else { return };
-        let crumbs = shown.crumbs.clone();
+        let crumbs = if self.waiting() { vec![(self.root.trim_end_matches('\\').to_string(), PathBuf::from(&self.root))] } else { shown.crumbs.clone() };
         let room = tools_left - 16.0 - (back.x + back.w + 8.0);
         let crumb_font = |last: bool| body(14.0, if last { 600.0 } else { 400.0 });
         let width_of = |at: usize| -> f32 {
@@ -608,12 +613,34 @@ impl Organizer {
     fn paint_map_card(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, dt: f32, hot: &Option<Target>) -> bool {
         let lang = self.lang;
         card(frame, p, g.card);
-        let shown = self.shown.clone().filter(|shown| shown.root.eq_ignore_ascii_case(&self.root));
-        let Some(shown) = shown else {
+        let gone = super::EASE.at(self.reading);
+        if gone > 0.0 {
+            let _faint = faint(frame, gone);
             let words = if self.listing { lang.pick("正在读取此盘的文件…", "Reading this drive's files…") } else { lang.pick("正在读取…", "Reading…") };
             centred(frame, words, body(13.0, 400.0), p.text2, g.card.x, frame.line_in(body(13.0, 400.0), g.card.y, g.card.h), g.card.w);
+        }
+        let Some(shown) = self.shown.clone().filter(|_| gone < 1.0) else {
+            self.map_at = Rect::default();
+            self.hover = None;
             return false;
         };
+        // (What was shown of the drive before, fading out: nothing of it to be pressed or pointed at.)
+        let spots = self.targets.len();
+        let faded = faint(frame, 1.0 - gone);
+        let moving = self.paint_map_shown(frame, p, g, now, dt, hot, shown);
+        drop(faded);
+        if self.waiting() {
+            self.targets.truncate(spots);
+            self.map_at = Rect::default();
+            self.hover = None;
+        }
+        moving
+    }
+
+    /// The map card's map and legend, of what is shown (see `paint_map_card`).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_map_shown(&mut self, frame: &Frame, p: &Palette, g: Geo, now: Instant, dt: f32, hot: &Option<Target>, shown: Rc<Shown>) -> bool {
+        let lang = self.lang;
         // The legend: each kind the folder shown holds, the largest first, in as many lines as it takes.
         let root = &shown.tree.nodes[0].held;
         let mut kinds: Vec<(Kind, u64)> = crate::disk::KINDS.iter().map(|&kind| (kind, root.kinds[kind.at()])).filter(|(_, bytes)| *bytes > 0).collect();
@@ -1051,7 +1078,22 @@ impl Organizer {
             let (from, to) = mark.at(now);
             fill(frame, p.accent, from, side.y + TABS_H - 5.0, to - from, 3.0, 1.5);
         }
-        let Some(shown) = self.shown.clone().filter(|shown| shown.root.eq_ignore_ascii_case(&self.root)) else { return moving };
+        let gone = super::EASE.at(self.reading);
+        let Some(shown) = self.shown.clone().filter(|_| gone < 1.0) else { return moving };
+        let spots = self.targets.len();
+        let faded = faint(frame, 1.0 - gone);
+        moving |= self.paint_list(frame, p, side, dt, hot, shown);
+        drop(faded);
+        if self.waiting() {
+            self.targets.truncate(spots);
+        }
+        moving
+    }
+
+    /// The list's sum line and rows, of what is shown (see `paint_side`).
+    fn paint_list(&mut self, frame: &Frame, p: &Palette, side: Rect, dt: f32, hot: &Option<Target>, shown: Rc<Shown>) -> bool {
+        let lang = self.lang;
+        let mut moving = false;
         let detail = &shown.detail;
         // The sum line, and gathering all that passes where the list is filtered or lit.
         let sum_font = body(12.0, 400.0);

@@ -1152,6 +1152,30 @@ mod tests {
         assert_eq!(at(r"A\b"), None);
     }
 
+    /// How long the disk organizer takes to show a drive's root as it was kept (its folder `GLANCE_INDEX`, its serial
+    /// `GLANCE_SERIAL` in hex, its root `GLANCE_ROOT`): the drive surveyed, then the root's map and lists taken from
+    /// that. Said, not judged: a measure taken on a machine with a drive indexed.
+    #[test]
+    #[ignore = "reads a drive's kept index: GLANCE_INDEX, GLANCE_SERIAL, GLANCE_ROOT"]
+    fn showing_a_drive_in_the_organizer_is_timed() {
+        let folder = std::env::var("GLANCE_INDEX").expect("GLANCE_INDEX: the folder indexes are kept in");
+        let serial = u32::from_str_radix(&std::env::var("GLANCE_SERIAL").expect("GLANCE_SERIAL: the drive's serial, in hex"), 16).unwrap();
+        let root = std::env::var("GLANCE_ROOT").expect("GLANCE_ROOT: the drive's root");
+        let (index, _) = store::kept_in(std::path::Path::new(&folder), serial).expect("kept");
+        let places = crate::disk::Places::of_this_pc();
+        let space = crate::disk::act::space(&root);
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let survey = crate::disk::Survey::take(&index, &root, &places, space, crate::disk::now());
+            let surveyed = started.elapsed();
+            let tree = crate::disk::Tree::take(&index, &survey, index::ROOT, 400_000.0);
+            let treed = started.elapsed();
+            let _detail = crate::disk::Detail::take(&index, &survey, index::ROOT, crate::disk::Filter::default(), None, &tree);
+            let all = started.elapsed();
+            println!("{} names, {} folders: surveyed {:.1} ms, map {:.1} ms, lists {:.1} ms, {:.1} ms in all", index.names(), survey.folders(), surveyed.as_secs_f64() * 1e3, (treed - surveyed).as_secs_f64() * 1e3, (all - treed).as_secs_f64() * 1e3, all.as_secs_f64() * 1e3);
+        }
+    }
+
     /// How long finding takes in each order over a whole drive as it was kept (its folder `GLANCE_INDEX`, its serial
     /// `GLANCE_SERIAL` in hex): each order puts all that meet in it, not a few, so a word met by most names is the
     /// slowest. Said, not judged: a measure taken on a machine with a drive indexed.

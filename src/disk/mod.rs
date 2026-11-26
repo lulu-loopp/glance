@@ -8,13 +8,63 @@
 //! from the index for that folder, as filtered (`Detail`). Each is made on a thread of its own, the index held from
 //! changing meanwhile, and made again as the drive changes (see `search::read_since`).
 
-use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::search::index::{flag, Index, ROOT};
 
 pub mod act;
 pub mod map;
+
+/// A map and a set hashed as `Quick` hashes: what a drive's every folder and file is looked up in as it is surveyed
+/// and listed (by its place, its extension).
+pub type QuickMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Quick>>;
+pub type QuickSet<K> = std::collections::HashSet<K, BuildHasherDefault<Quick>>;
+
+/// A hash quick to take of a number or a short name (as the Rust compiler's own is taken): each word of it added to
+/// what was taken, mixed by a multiplication. Not to be used of what anyone outside may choose.
+#[derive(Clone, Copy, Default)]
+pub struct Quick(u64);
+
+impl Quick {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0 ^ word).wrapping_mul(0xF135_7AEA_2E62_A9C5);
+    }
+}
+
+impl Hasher for Quick {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            self.add(u64::from_le_bytes(word.try_into().unwrap()));
+        }
+        let mut last = [0; 8];
+        let rest = words.remainder();
+        last[..rest.len()].copy_from_slice(rest);
+        self.add(u64::from_le_bytes(last) ^ (bytes.len() as u64) << 56);
+    }
+
+    fn write_u8(&mut self, n: u8) {
+        self.add(n as u64);
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.add(n as u64);
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.add(n as u64);
+    }
+
+    /// (The multiplication leaves its best mixed bits highest: turned to where a table takes its buckets from.)
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+}
 
 /// What a file is for, as the map colours it: as Explorer's own icons colour videos, pictures, music and documents,
 /// and Fluent's colours archives and disk images, programs and code, and games; the system's, and the rest.
@@ -59,11 +109,10 @@ const EXTENSIONS: [(Kind, &[&str]); 7] = [
 
 /// The kind of the file named `name` (case folded), by its extension.
 pub fn kind_of(name: &str) -> Kind {
-    let extension = extension_of(name);
-    if extension.is_empty() {
-        return Kind::Other;
-    }
-    EXTENSIONS.iter().find(|(_, extensions)| extensions.contains(&extension)).map_or(Kind::Other, |(kind, _)| *kind)
+    // (Every file of a drive is told so as it is surveyed and as it is listed: the extensions looked up at once.)
+    static KIND_OF: std::sync::OnceLock<QuickMap<&'static str, Kind>> = std::sync::OnceLock::new();
+    let kinds = KIND_OF.get_or_init(|| EXTENSIONS.iter().flat_map(|(kind, extensions)| extensions.iter().map(move |extension| (*extension, *kind))).collect());
+    kinds.get(extension_of(name)).copied().unwrap_or(Kind::Other)
 }
 
 /// The extension of the file named `name` (case folded), as the list of extensions groups files: none where it has none
@@ -186,6 +235,29 @@ impl Held {
         KINDS.iter().copied().max_by_key(|kind| (self.kinds[kind.at()], std::cmp::Reverse(kind.at()))).unwrap_or(Kind::Other)
     }
 
+    /// A file of it (its size and when it was written, `stat`), told as `is`, counted in; `old_before` when a file is
+    /// over a year old.
+    fn add_file(&mut self, stat: crate::search::index::Stat, is: FileIs, old_before: i64) {
+        self.bytes += stat.size;
+        self.files += 1;
+        self.written = self.written.max(stat.written);
+        self.kinds[is.kind.at()] += stat.size;
+        self.guarded |= is.system;
+        if !is.system {
+            self.largest = self.largest.max(stat.size);
+            if stat.written < old_before {
+                self.largest_old = self.largest_old.max(stat.size);
+            }
+        }
+    }
+
+    /// A file alone (see `add_file`).
+    fn of_file(stat: crate::search::index::Stat, is: FileIs, old_before: i64) -> Held {
+        let mut held = Held::default();
+        held.add_file(stat, is, old_before);
+        held
+    }
+
     fn add(&mut self, other: &Held, files_too: bool) {
         self.bytes += other.bytes;
         self.files += other.files;
@@ -230,8 +302,10 @@ pub enum Within {
 pub struct Survey {
     /// Its root ("C:\\").
     pub root: String,
-    /// Every folder on it the user may list, by its place in the index.
-    pub folders: HashMap<u32, Folder>,
+    /// Every folder on it the user may list (each after the one it is in), and where each is among them, by its place
+    /// in the index (see `folder`).
+    folders: Vec<Folder>,
+    slots: QuickMap<u32, u32>,
     /// What the drive holds and has free, as Windows tells it, and how much of what it holds is in no file listed
     /// (the file system's own, what may not be listed).
     pub total: u64,
@@ -241,7 +315,7 @@ pub struct Survey {
     pub bin: Option<u32>,
     pub windows: Option<u32>,
     /// The folders under OneDrive.
-    pub onedrive: HashSet<u32>,
+    pub onedrive: QuickSet<u32>,
     /// When it was surveyed, and before when a file was written "over a year ago".
     pub at: i64,
     pub old_before: i64,
@@ -249,10 +323,27 @@ pub struct Survey {
 
 /// How a file of `name` (folded), with `flags`, in a folder whose things are told as `within`, is told.
 fn file_is(name: &str, flags: u16, within: Within) -> FileIs {
+    told_as(kind_of(name), flags, within)
+}
+
+/// How a file of the kind its extension tells (`by_name`), with `flags`, in a folder whose things are told as
+/// `within`, is told.
+fn told_as(by_name: Kind, flags: u16, within: Within) -> FileIs {
     if within == Within::System || flags & flag::SYSTEM != 0 {
         return FileIs { kind: Kind::System, system: true };
     }
-    FileIs { kind: if within == Within::Game { Kind::Game } else { kind_of(name) }, system: false }
+    FileIs { kind: if within == Within::Game { Kind::Game } else { by_name }, system: false }
+}
+
+/// What the files of an extension come to as the lists are read: their bytes and count, how much is of each kind,
+/// where they light the map, and the kind the extension itself tells.
+#[derive(Default)]
+struct OfExtension {
+    bytes: u64,
+    files: u64,
+    kinds: [u64; 9],
+    lit: Lit,
+    by_name: Option<Kind>,
 }
 
 impl Survey {
@@ -261,8 +352,8 @@ impl Survey {
     pub fn take(index: &Index, root: &str, places: &Places, (total, free): (u64, u64), now: i64) -> Survey {
         let place_of = |path: &Path| on_drive(path, root).and_then(|rest| if rest.as_os_str().is_empty() { Some(ROOT) } else { index.place_of(rest) });
         let windows = places.windows.as_deref().and_then(place_of);
-        let onedrive_roots: HashSet<u32> = places.onedrive.iter().filter_map(|path| place_of(path)).collect();
-        let mut kept: HashSet<u32> = places.kept.iter().filter_map(|path| place_of(path)).chain(onedrive_roots.iter().copied()).collect();
+        let onedrive_roots: QuickSet<u32> = places.onedrive.iter().filter_map(|path| place_of(path)).collect();
+        let mut kept: QuickSet<u32> = places.kept.iter().filter_map(|path| place_of(path)).chain(onedrive_roots.iter().copied()).collect();
         // (Each user's profile: what is in the drive's Users folder.)
         if let Some(users) = index.place_of(Path::new("Users")) {
             index.each_in(users, |place, entry| {
@@ -278,14 +369,16 @@ impl Survey {
             }
         });
         let old_before = days_before(now, 365);
-        let mut folders: HashMap<u32, Folder> = HashMap::new();
-        let mut onedrive = HashSet::new();
+        let mut folders: Vec<Folder> = Vec::new();
+        let mut slots: QuickMap<u32, u32> = QuickMap::default();
+        let mut onedrive = QuickSet::default();
         // Each folder found, from the root down (each told how its files are told, and whether it is under OneDrive),
-        // its own files counted as it is; then each, deepest first, counted into the one it is in. (Windows' own
-        // folder's files are the system's, and all in it but its Temp; a game library's are a game's.)
-        let mut order = Vec::new();
-        let mut stack = vec![(ROOT, Within::Plain, false)];
-        while let Some((folder, within, under_onedrive)) = stack.pop() {
+        // its own files counted as it is; then each, the last found first, counted into the one it is in (found before
+        // it: where that is among them kept in `above`). (Windows' own folder's files are the system's, and all in it
+        // but its Temp; a game library's are a game's.)
+        let mut above: Vec<u32> = Vec::new();
+        let mut stack = vec![(ROOT, Within::Plain, false, 0)];
+        while let Some((folder, within, under_onedrive, up)) = stack.pop() {
             let flags = index.entry(folder).flags;
             let role = if folder == ROOT || kept.contains(&folder) || Some(folder) == windows {
                 Role::Kept
@@ -303,7 +396,7 @@ impl Survey {
                 onedrive.insert(folder);
             }
             let mut held = Held { guarded: role != Role::Plain, ..Held::default() };
-            order.push(folder);
+            let slot = folders.len() as u32;
             index.each_in(folder, |place, entry| {
                 if entry.folder() {
                     if entry.flags & flag::LINK != 0 {
@@ -319,7 +412,7 @@ impl Survey {
                     } else {
                         within
                     };
-                    stack.push((place, inner, under_onedrive));
+                    stack.push((place, inner, under_onedrive, slot));
                     return;
                 }
                 let stat = index.stat(place);
@@ -327,24 +420,29 @@ impl Survey {
                     held.cloud += stat.size;
                     return;
                 }
-                held.add(&file_held(stat, file_is(index.folded_name(place), entry.flags, within), old_before), true);
+                held.add_file(stat, file_is(index.folded_name(place), entry.flags, within), old_before);
             });
-            folders.insert(folder, Folder { held, role, parent: index.entry(folder).parent, within });
+            folders.push(Folder { held, role, parent: index.entry(folder).parent, within });
+            slots.insert(folder, slot);
+            above.push(up);
         }
-        for &folder in order.iter().rev().filter(|&&folder| folder != ROOT) {
-            let Folder { held, role, parent, .. } = folders[&folder];
-            if let Some(above) = folders.get_mut(&parent) {
-                // (What is in the Recycle Bin is no file to pick by a filter anywhere above it.)
-                above.held.add(&held, role != Role::Bin);
-            }
+        for slot in (1..folders.len()).rev() {
+            let Folder { held, role, .. } = folders[slot];
+            // (What is in the Recycle Bin is no file to pick by a filter anywhere above it.)
+            folders[above[slot] as usize].held.add(&held, role != Role::Bin);
         }
-        let counted = folders.get(&ROOT).map_or(0, |root| root.held.bytes);
+        let counted = folders.first().map_or(0, |root| root.held.bytes);
         let used = total.saturating_sub(free);
-        Survey { root: root.to_string(), other: used.saturating_sub(counted), folders, total, free, bin, windows, onedrive, at: now, old_before }
+        Survey { root: root.to_string(), other: used.saturating_sub(counted), folders, slots, total, free, bin, windows, onedrive, at: now, old_before }
     }
 
     pub fn folder(&self, place: u32) -> Option<&Folder> {
-        self.folders.get(&place)
+        self.slots.get(&place).map(|&slot| &self.folders[slot as usize])
+    }
+
+    /// How many folders it surveyed.
+    pub fn folders(&self) -> usize {
+        self.folders.len()
     }
 
     /// Whether `place` (a folder's) is in the Recycle Bin, or is it.
@@ -354,7 +452,7 @@ impl Survey {
             if place == bin {
                 return true;
             }
-            match self.folders.get(&place) {
+            match self.folder(place) {
                 Some(folder) if place != ROOT => place = folder.parent,
                 _ => return false,
             }
@@ -366,7 +464,7 @@ impl Survey {
         let mut chain = vec![place];
         let mut at = place;
         while at != ROOT {
-            let Some(folder) = self.folders.get(&at) else { break };
+            let Some(folder) = self.folder(at) else { break };
             at = folder.parent;
             chain.push(at);
         }
@@ -477,8 +575,8 @@ impl Node {
 pub struct Tree {
     pub nodes: Vec<Node>,
     /// Each node's index, by its place (a folder's rest apart, by the folder's: see `rests`).
-    pub by_place: HashMap<u32, usize>,
-    pub rests: HashMap<u32, usize>,
+    pub by_place: QuickMap<u32, usize>,
+    pub rests: QuickMap<u32, usize>,
     /// The area it was copied for.
     pub area: f32,
 }
@@ -490,7 +588,7 @@ pub const OPENED_LEAST: f32 = 25.0;
 impl Tree {
     /// `focus` of the drive `survey` surveyed, whose index is `index`, for a map of `area` square DIPs.
     pub fn take(index: &Index, survey: &Survey, focus: u32, area: f32) -> Tree {
-        let mut tree = Tree { nodes: Vec::new(), by_place: HashMap::new(), rests: HashMap::new(), area };
+        let mut tree = Tree { nodes: Vec::new(), by_place: QuickMap::default(), rests: QuickMap::default(), area };
         let Some(top) = survey.folder(focus) else { return tree };
         let unlisted = if focus == ROOT { survey.other } else { 0 };
         let per_dip = (top.held.bytes + unlisted) as f64 / area.max(1.0) as f64;
@@ -517,7 +615,7 @@ impl Tree {
                         return;
                     }
                     let is = file_is(index.folded_name(place), entry.flags, within);
-                    Node::of(place, What::File { system: is.system }, file_held(index.stat(place), is, survey.old_before))
+                    Node::of(place, What::File { system: is.system }, Held::of_file(index.stat(place), is, survey.old_before))
                 };
                 if node.held.bytes == 0 {
                     return;
@@ -586,18 +684,6 @@ impl Tree {
 }
 
 /// What a file of `stat`, told as `is`, holds (see `Held`), surveyed with files written before `old_before` old.
-fn file_held(stat: crate::search::index::Stat, is: FileIs, old_before: i64) -> Held {
-    let mut held = Held { bytes: stat.size, files: 1, written: stat.written, guarded: is.system, ..Held::default() };
-    held.kinds[is.kind.at()] = stat.size;
-    if !is.system {
-        held.largest = stat.size;
-        if stat.written < old_before {
-            held.largest_old = stat.size;
-        }
-    }
-    held
-}
-
 /// A file as the list of the largest shows it.
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -630,17 +716,17 @@ pub struct Detail {
     pub passing: (u64, u64),
     pub extensions: Vec<Extension>,
     pub ages: [(u64, u64); AGES],
-    pub lit_folders: HashSet<u32>,
-    pub lit_rests: HashSet<u32>,
-    pub by_extension: HashMap<String, Lit>,
+    pub lit_folders: QuickSet<u32>,
+    pub lit_rests: QuickSet<u32>,
+    pub by_extension: QuickMap<String, Lit>,
     pub by_age: [Lit; AGES],
 }
 
 /// The folders drawn on the map holding a file lit, and the folders whose rest holds one (by their places).
 #[derive(Clone, Debug, Default)]
 pub struct Lit {
-    pub folders: HashSet<u32>,
-    pub rests: HashSet<u32>,
+    pub folders: QuickSet<u32>,
+    pub rests: QuickSet<u32>,
     /// The folder a file was last marked in, and whether its rest was marked then: the files of a folder come
     /// together, and once one is marked another marks nothing more (unless it marks the rest).
     last: Option<(u32, bool)>,
@@ -650,7 +736,7 @@ impl Lit {
     /// A file lit in `folder` (`drawn` telling how that is drawn, `drawn_up` the nearest folder drawn it is in or is,
     /// `up` each drawn folder's own), the file itself drawn or not: the folders drawn from `drawn_up` up told as
     /// holding one (those above one told already are), and the rest it is drawn in.
-    fn mark(&mut self, up: &HashMap<u32, u32>, folder: u32, drawn: Drawn, drawn_up: u32, file_drawn: bool) {
+    fn mark(&mut self, up: &QuickMap<u32, u32>, folder: u32, drawn: Drawn, drawn_up: u32, file_drawn: bool) {
         let rest = match drawn {
             Drawn::Opened if !file_drawn => Some(folder),
             Drawn::InRestOf(owner) => Some(owner),
@@ -688,11 +774,11 @@ impl Detail {
         let mut detail = Detail::default();
         let in_bin = survey.in_bin(focus);
         let marks = filter.on() || matches!(light, Some(Light::Extension(_) | Light::Age(_)));
-        let mut largest: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32)>> = std::collections::BinaryHeap::new();
-        let mut kinds: HashMap<u32, Kind> = HashMap::new();
-        let mut extensions: HashMap<&str, (u64, u64, [u64; 9], Lit)> = HashMap::new();
+        // (The largest kept as they come, each with its kind: the least of them let go of as a larger one comes.)
+        let mut largest: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32, usize)>> = std::collections::BinaryHeap::new();
+        let mut extensions: QuickMap<&str, OfExtension> = QuickMap::default();
         // Each folder drawn's own (by their places): a file lit told of in each folder drawn it is in.
-        let mut up: HashMap<u32, u32> = HashMap::new();
+        let mut up: QuickMap<u32, u32> = QuickMap::default();
         for node in &tree.nodes {
             for &child in &node.children {
                 if matches!(tree.nodes[child].what, What::Folder(_)) {
@@ -719,48 +805,56 @@ impl Detail {
                     return;
                 }
                 let name = index.folded_name(place);
-                let is = file_is(name, entry.flags, within);
+                // (Its extension looked up once: the kind it tells kept with what its files come to.)
+                let extension = extensions.entry(extension_of(name)).or_default();
+                let by_name = *extension.by_name.get_or_insert_with(|| kind_of(name));
+                let is = told_as(by_name, entry.flags, within);
                 if filter.on() && !filter.passes(stat.size, stat.written, is.system, survey.old_before) {
                     return;
                 }
-                let extension = extensions.entry(extension_of(name)).or_default();
-                extension.0 += stat.size;
-                extension.1 += 1;
-                extension.2[is.kind.at()] += stat.size;
+                extension.bytes += stat.size;
+                extension.files += 1;
+                extension.kinds[is.kind.at()] += stat.size;
                 let age_at = age_of(stat.written, survey.at);
                 let age = &mut detail.ages[age_at];
                 age.0 += 1;
                 age.1 += stat.size;
                 let file_drawn = tree.by_place.contains_key(&place);
-                extension.3.mark(&up, folder, drawn, drawn_up, file_drawn);
+                extension.lit.mark(&up, folder, drawn, drawn_up, file_drawn);
                 detail.by_age[age_at].mark(&up, folder, drawn, drawn_up, file_drawn);
                 if !light.is_none_or(|light| light.lights(name, is.kind, stat.written, survey.at)) {
                     return;
                 }
                 if marks {
-                    detail.mark(survey, focus, folder, drawn, tree.by_place.contains_key(&place));
+                    detail.mark(survey, focus, folder, drawn, file_drawn);
                 }
                 if is.system {
                     return;
                 }
                 detail.passing.0 += 1;
                 detail.passing.1 += stat.size;
-                kinds.insert(place, is.kind);
-                largest.push(std::cmp::Reverse((stat.size, place)));
-                if largest.len() > ROWS {
-                    if let Some(std::cmp::Reverse((_, gone))) = largest.pop() {
-                        kinds.remove(&gone);
+                let row = std::cmp::Reverse((stat.size, place, is.kind.at()));
+                if largest.len() < ROWS {
+                    largest.push(row);
+                } else if let Some(mut least) = largest.peek_mut() {
+                    if row < *least {
+                        *least = row;
                     }
                 }
             });
         }
-        let mut rows: Vec<(u64, u32)> = largest.into_iter().map(|std::cmp::Reverse(row)| row).collect();
+        let mut rows: Vec<(u64, u32, usize)> = largest.into_iter().map(|std::cmp::Reverse(row)| row).collect();
         rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         detail.rows = rows
             .into_iter()
-            .filter_map(|(bytes, place)| Some(Row { place, name: index.name(place).to_string_lossy().into_owned(), path: index.path(place, &survey.root)?, bytes, written: index.stat(place).written, kind: kinds[&place] }))
+            .filter_map(|(bytes, place, kind)| Some(Row { place, name: index.name(place).to_string_lossy().into_owned(), path: index.path(place, &survey.root)?, bytes, written: index.stat(place).written, kind: KINDS[kind] }))
             .collect();
-        let mut extensions: Vec<(Extension, Lit)> = extensions.into_iter().map(|(extension, (bytes, files, kinds, lit))| (Extension { extension: extension.to_string(), bytes, files, kind: Held { kinds, ..Held::default() }.kind() }, lit)).collect();
+        // (An extension met only by files filtered out is none to list.)
+        let mut extensions: Vec<(Extension, Lit)> = extensions
+            .into_iter()
+            .filter(|(_, of)| of.files > 0)
+            .map(|(extension, of)| (Extension { extension: extension.to_string(), bytes: of.bytes, files: of.files, kind: Held { kinds: of.kinds, ..Held::default() }.kind() }, of.lit))
+            .collect();
         extensions.sort_by(|a, b| b.0.bytes.cmp(&a.0.bytes).then(a.0.extension.cmp(&b.0.extension)));
         extensions.truncate(EXTENSIONS_LISTED);
         let (extensions, lit): (Vec<Extension>, Vec<Lit>) = extensions.into_iter().unzip();
