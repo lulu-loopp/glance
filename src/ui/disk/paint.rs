@@ -154,6 +154,16 @@ pub(super) struct About {
     pub why_not: Option<String>,
 }
 
+/// What is past where a folder is shown from (see `Ask`), `count` things, `files` where each is a file.
+fn within_name(count: u64, files: bool, lang: Lang) -> String {
+    match (lang, files) {
+        (Lang::Zh, true) => format!("其余 {} 个文件", count_text(count)),
+        (Lang::Zh, false) => format!("其余 {} 项", count_text(count)),
+        (Lang::En, true) => format!("{} more files", count_text(count)),
+        (Lang::En, false) => format!("{} more items", count_text(count)),
+    }
+}
+
 impl Organizer {
     /// What a block of `shown` (its item `item`) is.
     pub(super) fn about(&self, shown: &Shown, item: &Item) -> About {
@@ -169,7 +179,13 @@ impl Organizer {
         let info = if many { None } else { shown.infos[node] };
         let (count, only_files) = item.count(tree);
         let name = if many {
-            if only_files { format!("{} {}", count_text(count), lang.pick("个小文件", "small files")) } else { format!("{} {}", count_text(count), lang.pick("个小项目", "small items")) }
+            if item.bound(tree).is_some() {
+                within_name(count, only_files, lang)
+            } else if only_files {
+                format!("{} {}", count_text(count), lang.pick("个小文件", "small files"))
+            } else {
+                format!("{} {}", count_text(count), lang.pick("个小项目", "small items"))
+            }
         } else {
             match (info, what) {
                 (Some(Info::Unlisted), _) => lang.pick("其他系统数据", "Other system data").into(),
@@ -183,7 +199,7 @@ impl Organizer {
         };
         let folder = matches!(what, Some(What::Folder(_)));
         let onedrive = !many && shown.onedrive[node];
-        let many_in = many.then(|| (path.clone(), node == 0));
+        let many_in = many.then(|| (path.clone(), node == 0 && item.bound(tree).is_none()));
         let why_not = self.why_not(shown, node, many, what, info, &path, held.guarded);
         About { name, path, bytes: held.bytes, files: held.files, cloud: held.cloud, written: held.written, kind: held.kind(), folder, what, info, onedrive, many_in, why_not }
     }
@@ -191,7 +207,7 @@ impl Organizer {
     fn why_not(&self, shown: &Shown, node: usize, many: bool, what: Option<What>, info: Option<Info>, path: &Path, guarded: bool) -> Option<String> {
         let lang = self.lang;
         if many {
-            return Some(lang.pick("若干小项目的合计，请在其所在的文件夹中逐个选择", "Several small items together: choose them one by one in their folder").into());
+            return Some(lang.pick("若干小项目的合计，请单击查看其中各项", "Several small items together: click to see each").into());
         }
         let said = |zh: &str, en: &str| Some(lang.pick(zh, en).to_string());
         match (what, info) {
@@ -546,7 +562,14 @@ impl Organizer {
             self.spot(back, Target::Back);
         }
         let Some(shown) = self.shown.clone() else { return };
-        let crumbs = if self.waiting() { vec![(self.root.trim_end_matches('\\').to_string(), PathBuf::from(&self.root))] } else { shown.crumbs.clone() };
+        // The folders down to the one shown, then each way taken into what was too small to draw in it.
+        let crumbs: Vec<(String, Step)> = if self.waiting() {
+            vec![(self.root.trim_end_matches('\\').to_string(), Step { path: PathBuf::from(&self.root), within: 0 })]
+        } else {
+            let folders = shown.crumbs.iter().map(|(name, path)| (name.clone(), Step { path: path.clone(), within: 0 }));
+            let within = shown.within.iter().enumerate().map(|(at, &(count, files))| (within_name(count, files, self.lang), Step { path: shown.focus.clone(), within: at + 1 }));
+            folders.chain(within).collect()
+        };
         let room = tools_left - 16.0 - (back.x + back.w + 8.0);
         let crumb_font = |last: bool| body(14.0, if last { 600.0 } else { 400.0 });
         let width_of = |at: usize| -> f32 {
@@ -592,7 +615,7 @@ impl Organizer {
             }
             // (After the drive, the button listing those between.)
             if at == 0 && hidden > 0 {
-                let between: Vec<(String, PathBuf)> = crumbs[1..1 + hidden].iter().rev().cloned().collect();
+                let between: Vec<(String, Step)> = crumbs[1..1 + hidden].iter().rev().cloned().collect();
                 let r = Rect { x, y: top, w: MORE, h: 32.0 };
                 let target = Target::CrumbMore(between);
                 let lit = self.fade(&target, Look::Hot, *hot == Some(target.clone()), 0.12);
@@ -759,7 +782,7 @@ impl Organizer {
             let mut piece_dims = Vec::with_capacity(pieces.len());
             for piece in pieces {
                 let to = if lights && !self.lit(shown, &piece.item, lighting) { 1.0 } else { 0.0 };
-                piece_dims.push(eased(&mut self.dims, key_of(shown, &piece.item), to, k, &mut dims_moving));
+                piece_dims.push(eased(&mut self.dims, piece_key(shown, item, &piece.item), to, k, &mut dims_moving));
             }
             let hovered = hover_key == Some(placed.key);
             let as_block = alpha * (1.0 - ground);
@@ -902,7 +925,7 @@ impl Organizer {
             let mut keys: std::collections::HashSet<Key> = std::collections::HashSet::new();
             for placed in &self.laid {
                 keys.insert(placed.key);
-                keys.extend(placed.block.pieces.iter().map(|piece| key_of(&placed.shown, &piece.item)));
+                keys.extend(placed.block.pieces.iter().map(|piece| piece_key(&placed.shown, &placed.block.item, &piece.item)));
             }
             self.dims.retain(|key, _| keys.contains(key));
         }
@@ -1595,7 +1618,7 @@ impl Organizer {
         }
         let mut notes: Vec<(String, Color)> = Vec::new();
         if about.many_in.is_some() || matches!(about.what, Some(What::Rest)) {
-            notes.push((lang.pick("这些项目各自太小，图上画不出，合为一块显示", "Each of these is too small to draw: they are shown as one block").into(), p.text2));
+            notes.push((lang.pick("各项太小，图上画不出，合为一块", "Each too small to draw: shown as one block").into(), p.text2));
         }
         if about.cloud > 0 {
             notes.push((format!("{}{}{}", lang.pick("云端另有 ", "A further "), size_text(about.cloud, lang), lang.pick("，不占用本机空间", " is in the cloud alone, taking no space here")), p.text2));
@@ -1606,14 +1629,14 @@ impl Organizer {
         }
         let info_like = about.info.is_some() || matches!(about.what, Some(What::File { system: true }));
         if let Some(why) = &about.why_not {
-            if !info_like {
+            if !info_like && about.many_in.is_none() {
                 notes.push((why.clone(), p.text3));
             }
         }
         let hint = if info_like {
             lang.pick("单击查看说明", "Click for what it is")
         } else if let Some((_, focus)) = &about.many_in {
-            if *focus { lang.pick("可以在右侧列表中逐个选择", "Choose them one by one in the list") } else { lang.pick("单击进入所在文件夹，再逐个选择", "Click to open their folder, then choose them one by one") }
+            if *focus { lang.pick("可以在右侧列表中逐个选择", "Choose them one by one in the list") } else { lang.pick("单击查看其中各项", "Click to see each") }
         } else if about.folder {
             lang.pick("单击进入，双击在资源管理器中显示", "Click to open, double-click to show in Explorer")
         } else if matches!(about.what, Some(What::Rest)) {
@@ -1833,7 +1856,7 @@ impl Organizer {
                     (None, label, None, Target::MenuSize(least), self.filter.least == least)
                 })
                 .collect(),
-            MenuOf::Crumbs(crumbs) => crumbs.iter().map(|(name, path)| (Some(Icon::Folder), name.clone(), None, Target::MenuCrumb(path.clone()), false)).collect(),
+            MenuOf::Crumbs(crumbs) => crumbs.iter().map(|(name, step)| (Some(if step.within > 0 { Icon::LayoutGrid } else { Icon::Folder }), name.clone(), None, Target::MenuCrumb(step.clone()), false)).collect(),
             MenuOf::Drives(hidden) => hidden
                 .iter()
                 .filter_map(|&at| self.drives.get(at).map(|drive| (Some(Icon::Disk), format!("{} ({}:)", drive.label, drive.letter()), drive.low().then(|| lang.pick("空间不足", "Low on space").to_string()), Target::MenuDrive(at), false)))

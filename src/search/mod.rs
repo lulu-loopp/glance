@@ -1168,7 +1168,7 @@ mod tests {
             let started = std::time::Instant::now();
             let survey = crate::disk::Survey::take(&index, &root, &places, space, crate::disk::now());
             let surveyed = started.elapsed();
-            let tree = crate::disk::Tree::take(&index, &survey, index::ROOT, 400_000.0);
+            let tree = crate::disk::Tree::take(&index, &survey, index::ROOT, None, 400_000.0);
             let treed = started.elapsed();
             let _detail = crate::disk::Detail::take(&index, &survey, index::ROOT, crate::disk::Filter::default(), None, &tree);
             let all = started.elapsed();

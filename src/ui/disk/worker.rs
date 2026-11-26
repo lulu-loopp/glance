@@ -10,7 +10,7 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::disk::{self, Detail, Filter, Light, Places, Survey, Tree, What};
+use crate::disk::{self, Detail, Filter, Light, Places, Rank, Survey, Tree, What};
 use crate::search::index::{Index, ROOT};
 use crate::search::Since;
 
@@ -21,11 +21,13 @@ const LOOKED_AT: Duration = Duration::from_millis(1000);
 const READ_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
 /// What the window asks to see: a folder of a drive (by its path), filtered and lit so, for a map about `area` square
-/// DIPs; `serial` tells one asking from the next.
+/// DIPs; `serial` tells one asking from the next. Of the folder, all it holds, or what is past the last of `after` in
+/// its order (each before it went into what was too small to draw past the one before: see `Rank`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub root: String,
     pub focus: PathBuf,
+    pub after: Vec<Rank>,
     pub filter: Filter,
     pub light: Option<Light>,
     pub area: f32,
@@ -49,8 +51,11 @@ pub struct Shown {
     pub root: String,
     /// The folder shown: the one asked for, or, gone, the nearest still there above it.
     pub focus: PathBuf,
-    /// The folders from the drive's root to it: each's name and path.
+    /// The folders from the drive's root to it: each's name and path. And where in it what is shown starts (as
+    /// asked: see `Ask`), with how many things are past each, and whether each is a file.
     pub crumbs: Vec<(String, PathBuf)>,
+    pub after: Vec<Rank>,
+    pub within: Vec<(u64, bool)>,
     pub tree: Tree,
     /// Each node's (see `Tree`): its path (a rest's, or what is in no file, its folder's), whether it is in a OneDrive
     /// folder (what is in one may be left in the cloud alone), whether it is in the Recycle Bin or is it, and what system
@@ -259,7 +264,10 @@ fn shown(index: &Index, survey: &Survey, ask: &Ask) -> Shown {
     let (focus, focus_path) = nearest(index, &ask.root, &ask.focus);
     let focus = if survey.folder(focus).is_some() { focus } else { ROOT };
     let focus_path = if focus == ROOT { PathBuf::from(&ask.root) } else { focus_path };
-    let tree = Tree::take(index, survey, focus, ask.area);
+    // (The folder asked for gone, what was asked of it goes too.)
+    let after = if focus_path == ask.focus { ask.after.clone() } else { Vec::new() };
+    let within = after.iter().map(|&bound| disk::count_past(index, survey, focus, bound)).collect();
+    let tree = Tree::take(index, survey, focus, after.last().copied(), ask.area);
     let detail = Detail::take(index, survey, focus, ask.filter, ask.light.as_ref(), &tree);
     let mut parents = vec![0; tree.nodes.len()];
     for (at, node) in tree.nodes.iter().enumerate() {
@@ -327,6 +335,8 @@ fn shown(index: &Index, survey: &Survey, ask: &Ask) -> Shown {
         root: ask.root.clone(),
         focus: focus_path,
         crumbs,
+        after,
+        within,
         tree,
         paths,
         onedrive,

@@ -11,7 +11,7 @@
 use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::search::index::{flag, Index, ROOT};
+use crate::search::index::{flag, Entry, Index, NONE, ROOT};
 
 pub mod act;
 pub mod map;
@@ -569,6 +569,56 @@ impl Node {
     }
 }
 
+/// Where an item is in its folder's order: its size, and (of those as large) its place, the largest first. A folder
+/// may be shown from past one (see `Tree::take`): what is too small to draw in it, seen as a map of its own.
+pub type Rank = (u64, u32);
+
+/// Whether what is at `rank` comes past `bound` in its folder's order.
+pub fn past(rank: Rank, bound: Rank) -> bool {
+    rank.0 < bound.0 || (rank.0 == bound.0 && rank.1 > bound.1)
+}
+
+/// The thing at `place` (its entry `entry`) in a folder whose files are told as `within`, as the map has it: a folder
+/// the user may list (not through a link) with all it holds, a file not in the cloud alone; none where it holds
+/// nothing.
+fn item_of(index: &Index, survey: &Survey, within: Within, place: u32, entry: Entry) -> Option<Node> {
+    let node = if entry.folder() {
+        let inner = survey.folder(place).filter(|_| entry.flags & flag::LINK == 0)?;
+        Node::of(place, What::Folder(inner.role), inner.held)
+    } else {
+        if entry.flags & flag::CLOUD != 0 {
+            return None;
+        }
+        let is = file_is(index.folded_name(place), entry.flags, within);
+        Node::of(place, What::File { system: is.system }, Held::of_file(index.stat(place), is, survey.old_before))
+    };
+    (node.held.bytes > 0).then_some(node)
+}
+
+/// What the drive's root holds in no file listed, as one item (the system's).
+fn unlisted_held(bytes: u64) -> Held {
+    let mut held = Held { bytes, guarded: true, ..Held::default() };
+    held.kinds[Kind::System.at()] = bytes;
+    held
+}
+
+/// How many things `folder` of the drive `survey` surveyed holds past `bound` in its order (see `Rank`), and whether
+/// each is a file.
+pub fn count_past(index: &Index, survey: &Survey, folder: u32, bound: Rank) -> (u64, bool) {
+    let Some(top) = survey.folder(folder) else { return (0, true) };
+    let (mut count, mut files) = (0, true);
+    index.each_in(folder, |place, entry| {
+        if let Some(node) = item_of(index, survey, top.within, place, entry).filter(|node| past((node.held.bytes, place), bound)) {
+            count += 1;
+            files &= !node.folder();
+        }
+    });
+    if folder == ROOT && survey.other > 0 && past((survey.other, NONE), bound) {
+        count += 1;
+    }
+    (count, files)
+}
+
 /// The folder shown and what it holds, as far down as a map of `area` square DIPs could draw (anything drawn smaller
 /// than a DIP square is put together with others like it into its folder's rest; a folder drawn smaller than
 /// `OPENED_LEAST` square DIPs is drawn as one), copied out of the index: what the map is laid out from.
@@ -577,6 +627,8 @@ pub struct Tree {
     /// Each node's index, by its place (a folder's rest apart, by the folder's: see `rests`).
     pub by_place: QuickMap<u32, usize>,
     pub rests: QuickMap<u32, usize>,
+    /// Where in the folder shown what it shows starts: past this in its order (none: all of it).
+    pub after: Option<Rank>,
     /// The area it was copied for.
     pub area: f32,
 }
@@ -586,15 +638,30 @@ pub struct Tree {
 pub const OPENED_LEAST: f32 = 25.0;
 
 impl Tree {
-    /// `focus` of the drive `survey` surveyed, whose index is `index`, for a map of `area` square DIPs.
-    pub fn take(index: &Index, survey: &Survey, focus: u32, area: f32) -> Tree {
-        let mut tree = Tree { nodes: Vec::new(), by_place: QuickMap::default(), rests: QuickMap::default(), area };
+    /// `focus` of the drive `survey` surveyed, whose index is `index`, for a map of `area` square DIPs: all it holds,
+    /// or what it holds past `after` in its order (see `Rank`).
+    pub fn take(index: &Index, survey: &Survey, focus: u32, after: Option<Rank>, area: f32) -> Tree {
+        let mut tree = Tree { nodes: Vec::new(), by_place: QuickMap::default(), rests: QuickMap::default(), after, area };
         let Some(top) = survey.folder(focus) else { return tree };
-        let unlisted = if focus == ROOT { survey.other } else { 0 };
-        let per_dip = (top.held.bytes + unlisted) as f64 / area.max(1.0) as f64;
+        let shows = |rank: Rank| after.is_none_or(|bound| past(rank, bound));
+        let unlisted = if focus == ROOT && shows((survey.other, NONE)) { survey.other } else { 0 };
+        // What is shown of it: all it holds, or what it holds past `after` summed.
+        let held = match after {
+            None => top.held,
+            Some(_) => {
+                let mut held = Held::default();
+                index.each_in(focus, |place, entry| {
+                    if let Some(node) = item_of(index, survey, top.within, place, entry).filter(|node| shows((node.held.bytes, place))) {
+                        held.add(&node.held, node.what != What::Folder(Role::Bin));
+                    }
+                });
+                held
+            }
+        };
+        let per_dip = (held.bytes + unlisted) as f64 / area.max(1.0) as f64;
         let least = per_dip.ceil() as u64;
         let opened_least = (per_dip * OPENED_LEAST as f64).ceil() as u64;
-        let mut first = Node::of(focus, What::Folder(top.role), top.held);
+        let mut first = Node::of(focus, What::Folder(top.role), held);
         first.name = if focus == ROOT { survey.root.trim_end_matches('\\').to_string() } else { index.name(focus).to_string_lossy().into_owned() };
         first.folded = index.folded_name(focus).to_string();
         first.held.bytes += unlisted;
@@ -607,17 +674,8 @@ impl Tree {
             let mut children = Vec::new();
             let mut rest = Node::of(folder, What::Rest, Held::default());
             index.each_in(folder, |place, entry| {
-                let node = if entry.folder() {
-                    let Some(inner) = survey.folder(place).filter(|_| entry.flags & flag::LINK == 0) else { return };
-                    Node::of(place, What::Folder(inner.role), inner.held)
-                } else {
-                    if entry.flags & flag::CLOUD != 0 {
-                        return;
-                    }
-                    let is = file_is(index.folded_name(place), entry.flags, within);
-                    Node::of(place, What::File { system: is.system }, Held::of_file(index.stat(place), is, survey.old_before))
-                };
-                if node.held.bytes == 0 {
+                let Some(node) = item_of(index, survey, within, place, entry) else { return };
+                if at == 0 && !shows((node.held.bytes, place)) {
                     return;
                 }
                 if node.held.bytes < least {
@@ -629,9 +687,7 @@ impl Tree {
                 }
             });
             if at == 0 && unlisted > 0 {
-                let mut held = Held { bytes: unlisted, guarded: true, ..Held::default() };
-                held.kinds[Kind::System.at()] = unlisted;
-                children.push(Node::of(crate::search::index::NONE, What::Unlisted, held));
+                children.push(Node::of(NONE, What::Unlisted, unlisted_held(unlisted)));
             }
             if rest.items > 0 {
                 children.push(rest);
@@ -792,16 +848,18 @@ impl Detail {
                 continue;
             }
             let Some(within) = survey.folder(folder).map(|folder| folder.within) else { continue };
+            // (Of the folder shown, only what the map shows of it: past where it starts in its order.)
+            let shows = |rank: Rank| folder != focus || tree.after.is_none_or(|bound| past(rank, bound));
             index.each_in(folder, |place, entry| {
                 if entry.folder() {
-                    if entry.flags & flag::LINK == 0 {
+                    if entry.flags & flag::LINK == 0 && shows((survey.folder(place).map_or(0, |inner| inner.held.bytes), place)) {
                         let drawn_up = if tree.by_place.contains_key(&place) { place } else { drawn_up };
                         stack.push((place, Drawn::of(tree, place, Some((folder, drawn))), drawn_up));
                     }
                     return;
                 }
                 let stat = index.stat(place);
-                if entry.flags & flag::CLOUD != 0 || stat.size == 0 {
+                if entry.flags & flag::CLOUD != 0 || stat.size == 0 || !shows((stat.size, place)) {
                     return;
                 }
                 let name = index.folded_name(place);

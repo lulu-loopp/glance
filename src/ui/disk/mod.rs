@@ -20,7 +20,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW, WM_APP};
 
 use crate::disk::map::{Block, Item, Rect};
-use crate::disk::{Filter, Kind, Light, What};
+use crate::disk::{Filter, Kind, Light, Rank, What};
 use crate::ui::gfx::Frame;
 use crate::ui::motion::Easing;
 use crate::ui::text::Lang;
@@ -371,11 +371,13 @@ impl Palette {
 }
 
 /// A block, or a piece of one, as it is known from one layout to the next: by its place in the index (a file's or a
-/// folder's), the folder whose small things are together in it, or what is in no file.
+/// folder's), the folder whose small things are together in it (a piece of several together in a block of several of
+/// the same folder's, its own), or what is in no file.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Key {
     Place(u32),
     Many(u32),
+    ManyWithin(u32),
     Unlisted,
 }
 
@@ -430,6 +432,14 @@ enum Change {
     Out(Rect),
     Fold,
     Fade,
+}
+
+/// A step of the path: a folder, and how many of the ways into what is too small to draw in it shown are taken there
+/// (see `Ask`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub path: PathBuf,
+    pub within: usize,
 }
 
 /// The tabs of the list beside the map.
@@ -496,8 +506,9 @@ struct Plate {
 enum MenuOf {
     /// The sizes the files shown may be filtered by.
     Sizes,
-    /// The folders on the way to the one shown not shown in the path: each's name and path, the nearest first.
-    Crumbs(Vec<(String, PathBuf)>),
+    /// The steps on the way to what is shown not shown in the path: each's name and where it is (see `Step`), the
+    /// nearest first.
+    Crumbs(Vec<(String, Step)>),
     /// The drives whose tabs do not fit (by their place among the drives).
     Drives(Vec<usize>),
     /// What is gathered and not shown in the foot.
@@ -560,8 +571,8 @@ enum Target {
     DriveMore(Vec<usize>),
     MenuDrive(usize),
     Back,
-    Crumb(PathBuf),
-    CrumbMore(Vec<(String, PathBuf)>),
+    Crumb(Step),
+    CrumbMore(Vec<(String, Step)>),
     FilterOld,
     FilterSize,
     FilterPreset,
@@ -587,7 +598,7 @@ enum Target {
     EmptyNow,
     Foot,
     MenuSize(u64),
-    MenuCrumb(PathBuf),
+    MenuCrumb(Step),
     MenuUngather(usize),
     PlateAct(PlateAct),
     /// A card or menu, over what is under it.
@@ -633,6 +644,8 @@ pub struct Organizer {
     drives: Vec<crate::disk::act::Drive>,
     root: String,
     focus: PathBuf,
+    /// Of the folder shown, what is shown: all it holds, or what is past the last of these in its order (see `Ask`).
+    after: Vec<Rank>,
     /// What was read last, and its drive's state: its files being found still, or it gone.
     shown: Option<Rc<Shown>>,
     listing: bool,
@@ -745,6 +758,7 @@ impl Organizer {
             drives: crate::disk::act::drives(),
             root: String::new(),
             focus: PathBuf::new(),
+            after: Vec::new(),
             shown: None,
             listing: false,
             asked: None,
@@ -851,6 +865,7 @@ impl Organizer {
         self.went = None;
         self.root = root.to_string();
         self.focus = PathBuf::from(root);
+        self.after.clear();
         self.chosen = None;
         self.light = None;
         self.peek = None;
@@ -881,9 +896,14 @@ impl Organizer {
 
     /// The folder at `path` shown (as soon as it is read).
     fn go_to(&mut self, path: PathBuf) {
+        self.go_within(path, Vec::new());
+    }
+
+    /// The folder at `path` shown: all it holds, or what is past the last of `after` in its order (see `Ask`).
+    fn go_within(&mut self, path: PathBuf, after: Vec<Rank>) {
         self.plate = None;
         self.menu = None;
-        if path == self.focus && self.shown.as_ref().is_some_and(|shown| shown.focus == path) {
+        if path == self.focus && after == self.after && self.shown.as_ref().is_some_and(|shown| shown.focus == path && shown.after == after) {
             return;
         }
         // In or out: from the block it is drawn as, or into the one the folder shown was.
@@ -892,13 +912,14 @@ impl Organizer {
             let drawn = |target: &Path| self.drawn_rect(target);
             self.change = Some(if path.starts_with(&self.focus) && path != self.focus {
                 drawn(&path).map_or(Change::Fade, Change::In)
-            } else if self.focus.starts_with(&path) {
+            } else if (path == self.focus && self.after.starts_with(&after)) || (path != self.focus && self.focus.starts_with(&path)) {
                 Change::Out(Rect { w: map.w.max(1.0), h: map.h.max(1.0), ..map })
             } else {
                 Change::Fade
             });
         }
         self.focus = path;
+        self.after = after;
         self.scroll = 0.0;
         self.scroll_to = 0.0;
         // A folder above, read before as it is asked now: shown from that at once (moving as it was to), the reading
@@ -912,15 +933,17 @@ impl Organizer {
         self.ask();
     }
 
-    /// The folder above the one shown, shown.
+    /// A step back: out of what is too small to draw taken last, else the folder above the one shown.
     pub fn up_a_folder(&mut self) {
-        if let Some(parent) = self.focus.parent().filter(|_| !self.at_root()) {
+        if let Some((_, before)) = self.after.split_last() {
+            self.go_within(self.focus.clone(), before.to_vec());
+        } else if let Some(parent) = self.focus.parent().filter(|_| !self.at_root()) {
             self.go_to(parent.to_path_buf());
         }
     }
 
     fn at_root(&self) -> bool {
-        self.focus.as_os_str().len() <= self.root.len()
+        self.focus.as_os_str().len() <= self.root.len() && self.after.is_empty()
     }
 
     /// Esc: a menu or a card closed, else the folder above shown; at the drive's root, whether the window is to close.
@@ -954,7 +977,7 @@ impl Organizer {
         let (width, height) = self.client();
         let card = paint::geo(width, height).card;
         let area = ((card.w - 24.0) * (card.h - 60.0)).max(10_000.0);
-        Ask { root: self.root.clone(), focus: self.focus.clone(), filter: self.filter, light: self.light.clone(), area, serial }
+        Ask { root: self.root.clone(), focus: self.focus.clone(), after: self.after.clone(), filter: self.filter, light: self.light.clone(), area, serial }
     }
 
     /// Its window's size (DIPs).
@@ -1007,8 +1030,9 @@ impl Organizer {
                     None => Change::Fold,
                 };
                 let change = if replaced && !matches!(change, Change::Fade) { Change::Fold } else { change };
-                if shown.focus != self.focus && shown.serial == self.serial {
+                if (shown.focus != self.focus || shown.after != self.after) && shown.serial == self.serial {
                     self.focus = shown.focus.clone();
+                    self.after = shown.after.clone();
                 }
                 // (What went is no longer gathered.)
                 self.gathered.retain(|gathered| gathered.path.exists());
@@ -1019,12 +1043,12 @@ impl Organizer {
                 let shown = Rc::new(*shown);
                 // Kept as read for what was asked, with what was read of the folders above it asked as it was.
                 if let Some(asked) = self.asked.clone().filter(|_| shown.serial == self.serial) {
-                    self.read_above.retain(|(above, _)| above.focus != asked.focus && asked.focus.starts_with(&above.focus) && Ask { focus: asked.focus.clone(), ..above.clone() } == asked);
+                    self.read_above.retain(|(above, _)| is_above(above, &asked));
                     self.read_above.push((asked, shown.clone()));
                 }
                 // A drive's root kept as read last; the other drives read ahead, once the first reading has come.
                 if shown.focus.as_os_str().len() <= shown.root.len() {
-                    if let Some(asked) = self.asked.clone().filter(|asked| asked.root.eq_ignore_ascii_case(&shown.root) && asked.focus == shown.focus) {
+                    if let Some(asked) = self.asked.clone().filter(|asked| asked.root.eq_ignore_ascii_case(&shown.root) && asked.focus == shown.focus && asked.after.is_empty()) {
                         self.drive_read.retain(|(read, _)| !read.root.eq_ignore_ascii_case(&shown.root));
                         self.drive_read.push((asked, shown.clone()));
                     }
@@ -1035,7 +1059,7 @@ impl Organizer {
                         .drives
                         .iter()
                         .filter(|drive| !drive.root.eq_ignore_ascii_case(&shown.root))
-                        .map(|drive| Ask { root: drive.root.clone(), focus: PathBuf::from(&drive.root), light: None, ..asking.clone() })
+                        .map(|drive| Ask { root: drive.root.clone(), focus: PathBuf::from(&drive.root), after: Vec::new(), light: None, ..asking.clone() })
                         .collect();
                     self.worker.read_ahead(ahead.clone());
                     self.ahead = Some(ahead);
@@ -1306,6 +1330,14 @@ fn key_of(shown: &Shown, item: &Item) -> Key {
     }
 }
 
+/// How a piece (its item `piece`) of a block (its item `block`) of `shown` is known (see `Key`).
+fn piece_key(shown: &Shown, block: &Item, piece: &Item) -> Key {
+    match key_of(shown, piece) {
+        Key::Many(place) if key_of(shown, block) == Key::Many(place) => Key::ManyWithin(place),
+        key => key,
+    }
+}
+
 /// Where the block or piece known as `key` is in `blocks`.
 fn drawn_as(blocks: &[Placed], key: Key) -> Option<Rect> {
     for placed in blocks {
@@ -1314,7 +1346,7 @@ fn drawn_as(blocks: &[Placed], key: Key) -> Option<Rect> {
         }
         let at = placed.block.at;
         for piece in &placed.block.pieces {
-            if key_of(&placed.shown, &piece.item) == key {
+            if piece_key(&placed.shown, &placed.block.item, &piece.item) == key {
                 return Some(Rect { x: at.x + piece.at.x * at.w, y: at.y + piece.at.y * at.h, w: piece.at.w * at.w, h: piece.at.h * at.h });
             }
         }
@@ -1326,6 +1358,13 @@ fn drawn_as(blocks: &[Placed], key: Key) -> Option<Rect> {
 fn anim_t(anim: &Anim, now: Instant) -> f32 {
     let t = (now.duration_since(anim.began).as_secs_f32() / anim.lasts.as_secs_f32()).clamp(0.0, 1.0);
     crate::ui::motion::Easing(0.1, 0.9, 0.2, 1.0).at(t)
+}
+
+/// Whether `above` asks for what is above what `asked` asks for (on the way up to the drive's root), as it is asked: a
+/// folder above it, or the same folder shown further out of what is too small to draw in it.
+fn is_above(above: &Ask, asked: &Ask) -> bool {
+    let up = if above.focus == asked.focus { asked.after.len() > above.after.len() && asked.after.starts_with(&above.after) } else { asked.focus.starts_with(&above.focus) && above.after.is_empty() };
+    up && Ask { focus: asked.focus.clone(), after: asked.after.clone(), ..above.clone() } == *asked
 }
 
 /// Whether `a` asks what `b` does, but for the map's size.

@@ -174,7 +174,7 @@ fn a_tree_is_drawn_down_as_far_as_its_map_can_draw_it() {
     let index = pc();
     let survey = survey(&index);
     // About 31 MB a square DIP: what is smaller goes into its folder's rest, a folder under 25 times that is drawn as one.
-    let tree = Tree::take(&index, &survey, ROOT, 1000.0);
+    let tree = Tree::take(&index, &survey, ROOT, None, 1000.0);
     let root = tree.root().unwrap();
     assert_eq!(root.held.bytes, LISTED + 3 * GB);
     let names: Vec<(&str, What)> = root.children.iter().map(|&kid| (tree.nodes[kid].name.as_str(), tree.nodes[kid].what)).collect();
@@ -213,7 +213,7 @@ fn a_tree_is_drawn_down_as_far_as_its_map_can_draw_it() {
 fn the_lists_hold_what_passes_and_is_lit_never_the_system_s_nor_the_bin_s() {
     let index = pc();
     let survey = survey(&index);
-    let tree = Tree::take(&index, &survey, ROOT, 1000.0);
+    let tree = Tree::take(&index, &survey, ROOT, None, 1000.0);
     let names = |detail: &Detail| detail.rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>();
     let all = Detail::take(&index, &survey, ROOT, Filter::default(), None, &tree);
     assert_eq!(names(&all)[..3], ["data.bin", "a.mp4", "old.zip"]);
@@ -250,8 +250,44 @@ fn the_lists_hold_what_passes_and_is_lit_never_the_system_s_nor_the_bin_s() {
 
     // Shown in the bin, what is in it is listed.
     let bin = at(&index, "$Recycle.Bin");
-    let in_bin = Detail::take(&index, &survey, bin, Filter::default(), None, &Tree::take(&index, &survey, bin, 1000.0));
+    let in_bin = Detail::take(&index, &survey, bin, Filter::default(), None, &Tree::take(&index, &survey, bin, None, 1000.0));
     assert_eq!(names(&in_bin), ["$R1.zip"]);
+}
+
+#[test]
+fn a_folder_shown_from_past_one_of_what_it_holds_has_only_what_comes_after_it() {
+    let index = pc();
+    let survey = survey(&index);
+    let rank = |path: &str| (survey.folder(at(&index, path)).unwrap().held.bytes, at(&index, path));
+    // Past Games: Users, what is in no file listed, Windows (the page file, the bin and Games none of it).
+    let games = rank("Games");
+    let tree = Tree::take(&index, &survey, ROOT, Some(games), 1000.0);
+    let root = tree.root().unwrap();
+    let held = |path: &str| survey.folder(at(&index, path)).unwrap().held.bytes;
+    assert_eq!(root.held.bytes, held("Users") + 3 * GB + held("Windows"));
+    let names: Vec<&str> = root.children.iter().map(|&kid| tree.nodes[kid].name.as_str()).collect();
+    assert_eq!(names, ["Users", "", "Windows"]);
+    assert_eq!(count_past(&index, &survey, ROOT, games), (3, false));
+    let detail = Detail::take(&index, &survey, ROOT, Filter::default(), None, &tree);
+    assert_eq!(detail.rows.iter().map(|row| row.name.as_str()).take(3).collect::<Vec<_>>(), ["a.mp4", "old.zip", "setup.exe"]);
+    // (Of Windows, the files in Temp alone: the system's are none to list.)
+    assert_eq!(detail.passing.0, 6);
+    assert!(!detail.extensions.iter().any(|extension| extension.extension == "bin" || extension.extension == "sys"));
+    // Further past: what is in no file listed, and Windows.
+    let users = rank("Users");
+    let tree = Tree::take(&index, &survey, ROOT, Some(users), 1000.0);
+    assert_eq!(tree.root().unwrap().children.iter().map(|&kid| tree.nodes[kid].what).collect::<Vec<_>>(), [What::Unlisted, What::Folder(Role::Kept)]);
+    assert_eq!(count_past(&index, &survey, ROOT, users), (2, false));
+    // Past what is in no file listed, a folder alone; in a folder, files alone.
+    assert_eq!(count_past(&index, &survey, ROOT, (3 * GB, crate::search::index::NONE)), (1, false));
+    let downloads = at(&index, "Users\\me\\Downloads");
+    let mut old_zip = None;
+    index.each_in(downloads, |place, _| {
+        if index.name(place) == std::ffi::OsStr::new("old.zip") {
+            old_zip = Some(place);
+        }
+    });
+    assert_eq!(count_past(&index, &survey, downloads, (3 * GB / 2, old_zip.unwrap())), (1, true));
 }
 
 #[test]

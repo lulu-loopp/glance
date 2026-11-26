@@ -215,10 +215,20 @@ impl Organizer {
             return;
         }
         self.clicked = matches!(about.what, Some(What::Folder(_) | What::File { .. })).then(|| about.path.clone());
-        if let Some((folder, focus)) = &about.many_in {
-            if !focus {
-                self.go_to(folder.clone());
+        // Several too small to draw: what they are shown, from where they start in their folder's order on (each
+        // way taken into the folder shown kept); all their folder holds, its own.
+        if let Some((folder, last)) = &about.many_in {
+            if *last {
+                return;
             }
+            let Item::Many { folder: node, .. } = &placed.block.item else { return };
+            let after = match placed.block.item.bound(&placed.shown.tree) {
+                Some(bound) if *node == 0 => [placed.shown.after.as_slice(), &[bound]].concat(),
+                Some(bound) => vec![bound],
+                None => Vec::new(),
+            };
+            self.change = Some(Change::In(placed.block.at));
+            self.go_within(folder.clone(), after);
             return;
         }
         match about.what {
@@ -314,9 +324,10 @@ impl Organizer {
                 }
             }
             Target::Back => self.up_a_folder(),
-            Target::Crumb(path) | Target::MenuCrumb(path) => {
+            Target::Crumb(step) | Target::MenuCrumb(step) => {
                 self.menu = None;
-                self.go_to(path);
+                let after = if step.path == self.focus { self.after[..step.within.min(self.after.len())].to_vec() } else { Vec::new() };
+                self.go_within(step.path, after);
             }
             Target::CrumbMore(hidden) => {
                 let under = self.target_rect(&Target::CrumbMore(hidden.clone()));
