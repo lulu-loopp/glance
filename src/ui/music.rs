@@ -297,8 +297,8 @@ pub struct Music {
     /// The rows the card's lines have glided to (the line aimed at, fractional while gliding), and how fast.
     rail: f32,
     rail_speed: f32,
-    /// The lyrics it last showed (to tell another track's).
-    lyrics: Option<usize>,
+    /// The lyrics it last showed (to tell another track's): held, so that no other lyrics are made where they were.
+    lyrics: Option<crate::lyrics::Lyrics>,
     last_frame: Instant,
     /// The cover behind it, blurred, and the one it is fading from (with when that began).
     backdrop: Option<(u64, ID2D1Bitmap1)>,
@@ -442,6 +442,15 @@ struct Moment {
     /// Known to have no cover (see `cover::has_none`): the last track's goes, and its colours.
     no_cover: bool,
     sound: crate::sound::Heard,
+}
+
+/// Whether lyrics shown and those of now are the same ones (none and none too).
+fn same_lyrics(shown: &Option<crate::lyrics::Lyrics>, now: &Option<crate::lyrics::Lyrics>) -> bool {
+    match (shown, now) {
+        (Some(shown), Some(now)) => Arc::ptr_eq(shown, now),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn moment() -> Moment {
@@ -723,8 +732,7 @@ impl Music {
         }
         // Other lyrics (another track): from the line sung now, not turned (turned for the lyrics before, they were
         // first shown turned as far, and sprang back).
-        let key = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
-        let other_lyrics = key != self.lyrics;
+        let other_lyrics = !same_lyrics(&self.lyrics, &moment.lines);
         if other_lyrics {
             self.back_to_now();
         }
@@ -740,7 +748,7 @@ impl Music {
         let count = moment.lines.as_ref().map_or(0, |lines| lines.len());
         let target = turned_to(moment.now, self.turned, count).map_or(moment.now.map_or(-1.0, |now| now as f32), |index| index as f32);
         if other_lyrics {
-            self.lyrics = key;
+            self.lyrics = moment.lines.clone();
             self.rail = target;
             self.rail_speed = 0.0;
         }
@@ -2955,6 +2963,24 @@ mod tests {
         assert_eq!(unsaid(Some(&crate::playing::Now { title: "渡尘寰".into(), ..heard }), Lang::Zh), "当前没有正在播放的歌曲");
     }
 
+    /// Another track's lyrics are told from those shown however they were made: let go of by the player's side,
+    /// lyrics made next may be put where they were, and told by where they lie they were the same.
+    #[test]
+    fn other_lyrics_are_told_where_the_last_were_let_go() {
+        let first: crate::lyrics::Lyrics = Arc::new(vec![line("first", Vec::new())]);
+        let address = Arc::as_ptr(&first) as usize;
+        let shown = Some(first.clone());
+        drop(first);
+        let mut met_there = false;
+        for _ in 0..256 {
+            let next: crate::lyrics::Lyrics = Arc::new(vec![line("next", Vec::new())]);
+            met_there |= Arc::as_ptr(&next) as usize == address;
+            assert!(!same_lyrics(&shown, &Some(next)));
+        }
+        assert!(!met_there, "held as they are shown, the lyrics shown keep their place");
+        assert!(same_lyrics(&shown, &shown.clone()) && same_lyrics(&None, &None) && !same_lyrics(&shown, &None));
+    }
+
     fn line(text: &str, words: Vec<Word>) -> Line {
         Line { at: 10.0, end: None, text: text.into(), words, backing: None, translation: None }
     }
@@ -3275,7 +3301,7 @@ mod pictures {
                     let moment = playing(false);
                     music.bands = moment.sound.bands;
                     music.rail = 1.0;
-                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    music.lyrics = moment.lines.clone();
                     let mut layer = Layer::default();
                     frame.origin(0.0, at as f32 / 1.5);
                     let local = windows_numerics::Matrix3x2::translation(margin, margin);
@@ -3320,7 +3346,7 @@ mod pictures {
             let moment = playing(false);
             music.bands = moment.sound.bands;
             music.rail = 1.0;
-            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+            music.lyrics = moment.lines.clone();
             let now = start + Duration::from_millis(at);
             let pixels = gfx
                 .draw_offscreen(size, 1.5, |frame| {
@@ -3359,7 +3385,7 @@ mod pictures {
                     let moment = playing(false);
                     music.bands = moment.sound.bands;
                     music.rail = 1.0;
-                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    music.lyrics = moment.lines.clone();
                     frame.origin(margin, y);
                     music.paint_moment(frame, (w, h), &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                     y += h + margin;
@@ -3398,7 +3424,7 @@ mod pictures {
                             moment.position = moment.lines.as_ref().unwrap()[0].words[2].at + 0.2;
                         }
                         music.bands = moment.sound.bands;
-                        music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                        music.lyrics = moment.lines.clone();
                         frame.origin(margin + column as f32 * (w + margin), margin + row as f32 * (h + margin));
                         music.paint_moment(frame, (w, h), &all, Ground::Own, Theme::new(skin, false).body.family, 1.5, None, now, moment);
                     }
@@ -3432,7 +3458,7 @@ mod pictures {
                     let target = moment.now.unwrap() as f32;
                     let mut music = Music { last_frame: now, ..Music::default() };
                     music.bands = moment.sound.bands;
-                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    music.lyrics = moment.lines.clone();
                     music.rail = target - rail_off;
                     // (Settled already, but for the rail: one frame to place the anchor, then the one looked at.)
                     music.paint_moment(frame, (w, h), &all, Ground::Clear, Family::Segoe, 1.5, None, now, Moment { lines: moment.lines.clone(), ..playing(false) });
@@ -3491,7 +3517,7 @@ mod pictures {
                             let mut music = Music { last_frame: now, ..Music::default() };
                             let moment = playing(false);
                             music.bands = moment.sound.bands;
-                            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                            music.lyrics = moment.lines.clone();
                             let at = (margin + column as f32 * (card.0 + margin), margin + index as f32 * row + down);
                             let local = windows_numerics::Matrix3x2::translation(at.0, at.1);
                             frame.origin(0.0, 0.0);
@@ -3539,7 +3565,7 @@ mod pictures {
                             moment.position = moment.lines.as_ref().unwrap()[0].words[2].at + 0.2;
                         }
                         music.bands = moment.sound.bands;
-                        music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                        music.lyrics = moment.lines.clone();
                         frame.origin(x, margin + at as f32 * row);
                         let shows = Shows { ground: if ground == Ground::Clear { MusicGround::Clear } else { MusicGround::Cover }, ..all };
                         music.paint_moment(frame, (w, h), &shows, ground, Family::Segoe, 1.5, None, now, moment);
@@ -3829,7 +3855,7 @@ mod pictures {
             music.bands = moment.sound.bands;
             // (The rail at the line aimed at, as it would be once glided there.)
             music.rail = moment.now.map_or(-1.0, |now| now as f32) + turned as f32;
-            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+            music.lyrics = moment.lines.clone();
             let margin = 30.0;
             let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
             let pointer = over.then_some((w * 0.5, h * 0.5));
@@ -3875,7 +3901,7 @@ mod pictures {
             let moment = playing(false);
             music.bands = moment.sound.bands;
             music.rail = moment.now.map_or(-1.0, |now| now as f32);
-            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+            music.lyrics = moment.lines.clone();
             let margin = 30.0;
             let (w, h) = (900.0f32, 470.0f32);
             let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
