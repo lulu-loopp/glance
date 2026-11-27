@@ -1653,7 +1653,7 @@ impl Lately {
             return vec![first];
         }
         first.group = Grouped::Holds { count: row.len(), unfolded: true };
-        let under = row.iter().enumerate().map(|(at, came)| Lately { group: Grouped::Within { last: at + 1 == row.len() }, ..Lately::of(came, tags, lang, now) });
+        let under = row.iter().map(|came| Lately { group: Grouped::Within, ..Lately::of(came, tags, lang, now) });
         std::iter::once(first).chain(under).collect()
     }
 
@@ -1715,7 +1715,7 @@ pub fn named(hits: &[HitBox], hit: Hit, lang: Lang) -> Option<String> {
     }
     match hit {
         Hit::Shelf(id) | Hit::Copied(id) => crate::station::run::shown().items.iter().find(|item| item.id == id).map(|item| Tile::of(item, &[], &crate::station::folder::Folder::own(), lang, 0).label),
-        Hit::Part(id, at) => crate::station::run::shown().items.iter().find(|item| item.id == id).and_then(|item| Tile::part(item, at, &crate::station::folder::Folder::own(), lang, false)).map(|tile| tile.label),
+        Hit::Part(id, at) => crate::station::run::shown().items.iter().find(|item| item.id == id).and_then(|item| Tile::part(item, at, &crate::station::folder::Folder::own(), lang)).map(|tile| tile.label),
         Hit::Recent(entry) => Lately::entry(&crate::station::recent::shown(), entry, lang, 0).map(|row| row.label),
         Hit::App(number) => crate::station::apps::numbered(number).and_then(|app| crate::station::apps::named().into_iter().find(|(_, target)| *target == app.target)).map(|(name, _)| name),
         _ => None,
@@ -1743,7 +1743,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
         Hit::Part(id, at) => {
             let shown = crate::station::run::shown();
             let item = shown.items.iter().find(|item| item.id == id)?;
-            let tile = Tile::part(item, at, &crate::station::folder::Folder::own(), lang, false)?;
+            let tile = Tile::part(item, at, &crate::station::folder::Folder::own(), lang)?;
             let Face::Picture { path, .. } = tile.face else { return None };
             Some(Item { key: hit.key(), title: tile.label, about: tile.about, shows: Shows::File(path), from, open: Some(Ask::Part(id, at, PartAct::Open)), copy: Some(Ask::Part(id, at, PartAct::Copy)), pastes: false, given: Some(Given::Part(id, at)) })
         }
@@ -1754,7 +1754,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
             let tile = Tile::of(item, &[], &folder, lang, now);
             // (What it holds together, each its part, by the name it shows by.)
             if item.what.parts() > 1 {
-                let parts = (0..item.what.parts()).filter_map(|at| Tile::part(item, at, &folder, lang, false).map(|part| (at, part)));
+                let parts = (0..item.what.parts()).filter_map(|at| Tile::part(item, at, &folder, lang).map(|part| (at, part)));
                 let together = parts.filter_map(|(at, part)| match part.face {
                     Face::Picture { path, .. } => Some(Together { path, name: part.label, given: Given::Part(id, at) }),
                     _ => None,
@@ -1833,13 +1833,13 @@ pub struct Tile {
 
 /// How a thing shown is of what holds things together (see `station::shelf::What::parts`): it is not; it holds them,
 /// so many, shown under it (`unfolded`) or not, its count pressed to show them or not (see `Hit::Unfold`); it is one
-/// of them, shown under what holds them (the `last` of them, or not).
+/// of them, shown under what holds them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Grouped {
     #[default]
     Alone,
     Holds { count: usize, unfolded: bool },
-    Within { last: bool },
+    Within,
 }
 
 /// The mark of a device nearby of the kind `kind` (as LocalSend names kinds): a phone's, else a computer's.
@@ -1929,9 +1929,9 @@ impl Tile {
     }
 
     /// Part `at` of what `item` holds together (see `station::shelf::What::parts`; its own files in `folder`) as its
-    /// tile shows it under it (the `last` of them, or not): its name, what it is (a file, a folder), its picture (a
+    /// tile shows it under it: its name, what it is (a file, a folder), its picture (a
     /// file gone from where it was, by its copy kept). None where it holds no such part.
-    fn part(item: &crate::station::shelf::Item, at: usize, folder: &crate::station::folder::Folder, lang: Lang, last: bool) -> Option<Tile> {
+    fn part(item: &crate::station::shelf::Item, at: usize, folder: &crate::station::folder::Folder, lang: Lang) -> Option<Tile> {
         use crate::station::shelf::{Entry, What};
         if item.what.parts() < 2 {
             return None;
@@ -1958,7 +1958,7 @@ impl Tile {
             What::Text { .. } | What::Link { .. } | What::Picture { .. } | What::Saved { .. } => return None,
         };
         let about = if crate::station::thumbs::looked(&path) == Some(crate::station::thumbs::Looked::Folder) { lang.pick("文件夹", "Folder") } else { lang.pick("文件", "File") };
-        Some(Tile { id: item.id, label, about: about.to_string(), when: None, face: Face::Picture { path, more: 0 }, pinned: false, tags: Vec::new(), badge: None, part: Some(at), group: Grouped::Within { last } })
+        Some(Tile { id: item.id, label, about: about.to_string(), when: None, face: Face::Picture { path, more: 0 }, pinned: false, tags: Vec::new(), badge: None, part: Some(at), group: Grouped::Within })
     }
 
     /// `tile`, of `item`, as what it holds together shows with it (see `Grouped`): told how many it holds, and where they
@@ -1969,7 +1969,7 @@ impl Tile {
             return vec![tile];
         }
         tile.group = Grouped::Holds { count, unfolded };
-        let parts = (0..count).filter(|_| unfolded).filter_map(|at| Tile::part(item, at, folder, lang, at + 1 == count));
+        let parts = (0..count).filter(|_| unfolded).filter_map(|at| Tile::part(item, at, folder, lang));
         std::iter::once(tile).chain(parts).collect()
     }
 
@@ -6171,10 +6171,9 @@ const COUNT_CHEVRON: f32 = 11.0;
 /// How tall it is at the end of a line, and on a picture.
 const COUNT_LINE: f32 = 22.0;
 const COUNT_FACE: f32 = BADGE + 2.0;
-/// How far in from what holds them the parts it shows under it are, in a list (see `Grouped::Within`), and how faint
-/// the ground under them is, in the lane's ink.
+/// How far in from what holds them the parts it shows under it are, in a list (see `Grouped::Within`): told apart from
+/// the rest by that alone, as Explorer tells what is in a folder unfolded.
 const PART_INDENT: f32 = 16.0;
-const PART_GROUND: f32 = 0.07;
 
 /// How wide the count `count` is (see `paint_count`).
 fn count_width(frame: &dyn Canvas, theme: &Theme, count: usize) -> f32 {
@@ -6713,23 +6712,6 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     let scroll = scene.scrolls.at(list).clamp(0.0, most);
     let room = (left - 4.0, top, width + 8.0, tall);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
-    // What holds things together shown with them under it, in lines: on one faint ground with them.
-    if shows == Shows::View(ShelfView::List) {
-        for (at, tile) in tiles.iter().enumerate() {
-            if !matches!(tile.group, Grouped::Holds { unfolded: true, .. }) {
-                continue;
-            }
-            let under = tiles[at + 1..].iter().take_while(|part| matches!(part.group, Grouped::Within { .. })).count();
-            let (first, last) = (places[at], places[at + under]);
-            let (y, bottom) = (top + first.y - scroll + 1.0, top + last.y + last.h - scroll - 1.0);
-            if bottom < top || y > top + tall {
-                continue;
-            }
-            frame.key(&format!("{}.ground", tile_key(hit(tile, at))));
-            frame.fill_rounded(ink.trace.alpha(PART_GROUND), left - 4.0, y, width + 8.0, bottom - y, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
-        }
-        frame.key("");
-    }
     for (at, heading) in headings {
         let y = top + at - scroll;
         if y + heading.tall() < top || y > top + tall {
@@ -6749,7 +6731,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let buttons = crate::station::Thing::of(pressed).map(|thing| [(Hit::PinThing(thing), Icon::Pin), (Hit::TagThing(thing), Icon::Tag)]);
         let unfold = crate::station::Thing::of(pressed).filter(|_| matches!(tile.group, Grouped::Holds { .. })).map(Hit::Unfold);
         let on_button = buttons.is_some_and(|buttons| buttons.iter().any(|(button, _)| scene.hover == Some(*button))) || unfold.is_some_and(|unfold| scene.hover == Some(unfold));
-        let part_ground = matches!(tile.group, Grouped::Within { .. });
+        let within = tile.group == Grouped::Within;
         // (Named, each, that it moves from where it was as they flow anew: see `morph`; and that what is carried off
         // the lane is drawn as it is here, see `carry`.)
         frame.key(&tile_key(pressed));
@@ -6801,10 +6783,6 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                 let card = (x - CARD_PAD, y - CARD_PAD, place.w + 2.0 * CARD_PAD, place.h + 2.0 * CARD_PAD);
-                // (Part of what holds it, shown after it: on a faint ground.)
-                if part_ground {
-                    frame.fill_rounded(ink.trace.alpha(PART_GROUND), card.0, card.1, card.2, card.3, plate_round(theme, face_round(theme, place.w.min(plate)), CARD_PAD));
-                }
                 tile_plate(frame, theme, card, plate_round(theme, face_round(theme, place.w.min(plate)), CARD_PAD), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
                 face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
@@ -6829,9 +6807,6 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 shown
             }
             Shows::Row => {
-                if part_ground {
-                    frame.fill_rounded(ink.trace.alpha(PART_GROUND), x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
-                }
                 tile_plate(frame, theme, (x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0), 8.0, lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
                 face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
@@ -6856,12 +6831,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 shown
             }
             Shows::View(ShelfView::List) => {
-                // (Part of what holds it, shown under it: in from it, a line down beside it from it; on its ground, see
-                // above.)
-                let indent = if part_ground { PART_INDENT } else { 0.0 };
-                if let Grouped::Within { last } = tile.group {
-                    frame.fill(ink.trace.alpha(0.35), x + indent / 2.0 - 0.75, y, 1.5, if last { LIST_ROW / 2.0 } else { LIST_ROW });
-                }
+                // (Part of what holds it, shown under it: in from it.)
+                let indent = if within { PART_INDENT } else { 0.0 };
                 tile_plate(frame, theme, (x - 4.0 + indent, y + 1.0, place.w + 8.0 - indent, place.h - 2.0), plate_round(theme, face_round(theme, LIST_PICTURE), 4.0), lit, chosen);
                 let x = x + indent;
                 let width = width - indent;
@@ -8019,10 +7990,6 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 let written = scene.naming.filter(|written| named && current && written.of.names(*hit));
                 if current {
                     frame.key(&tile_key(*hit));
-                    // (Part of what holds it, after it: on a faint ground.)
-                    if matches!(tile.group, Grouped::Within { .. }) {
-                        frame.fill_rounded(ink.trace.alpha(PART_GROUND), cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
-                    }
                     if lit(*hit) && written.is_none() {
                         frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
                     }
@@ -12630,13 +12597,21 @@ seven".into()));
             let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
             let mut hits = Vec::new();
             paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: lane.height(&theme) }, (0.0, 0.0), Pass::Content, &mut hits);
-            let grounds = recorder.parts().into_iter().flat_map(|part| part.ops).filter(|op| matches!(op, Op::Rounded { color, .. } if *color == ink.trace.alpha(PART_GROUND))).count();
-            (hits, grounds)
+            (hits, recorder.parts())
+        };
+        // What is drawn of `hit`: where its name is written from, and whether anything is laid in the lane's ink under it.
+        let of = |parts: &[crate::ui::morph::Part], hit: Hit| {
+            let ops: Vec<Op> = parts.iter().filter(|part| part.key.as_deref() == Some(tile_key(hit).as_str())).flat_map(|part| part.ops.clone()).collect();
+            // (Its name first on its line, what it is under it: the leftmost of its words.)
+            let written = ops.iter().filter_map(|op| if let Op::Text { x, .. } = op { Some(*x) } else { None }).reduce(f32::min).expect("its name");
+            // (In the lane's ink however faint: its hue.)
+            let inked = ops.iter().any(|op| matches!(op, Op::Rounded { color, .. } | Op::Fill { color, .. } if (color.r, color.g, color.b) == (ink.trace.r, ink.trace.g, ink.trace.b)));
+            (written, inked)
         };
         let boxed = |hits: &[HitBox], hit: Hit| hits.iter().find(|one| one.4 == hit).copied();
         // Folded: one line, the count at its end, within it; where it stays as the pointer comes on the line, its buttons
         // come before it (it moved aside for them, and a press meant for it pinned the line).
-        let (hits, grounds) = drawn(None);
+        let (hits, _) = drawn(None);
         let (line, count) = (boxed(&hits, Hit::Shelf(1)).expect("its line"), boxed(&hits, Hit::Unfold(Thing::Item(1))).expect("its count"));
         assert!(count.0 > line.0 + line.2 / 2.0 && count.0 + count.2 <= line.0 + line.2 + 0.01 && count.1 >= line.1 && count.1 + count.3 <= line.1 + line.3, "{count:?} on {line:?}");
         for hover in [Hit::Shelf(1), Hit::Unfold(Thing::Item(1))] {
@@ -12645,15 +12620,22 @@ seven".into()));
             let pin = boxed(&lit, Hit::PinThing(Thing::Item(1))).expect("its pin");
             assert!(pin.0 + pin.2 <= count.0, "{pin:?} before {count:?}");
         }
-        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::Part(..))) && grounds == 0);
+        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::Part(..))));
         assert_eq!(lane_order(tab, true), [Hit::Shelf(1), Hit::Shelf(2)]);
-        // Unfolded: each a line under it, in from it, in order, the next thing after them, all on one ground.
+        // Unfolded: each a line under it, in from it, in order, the next thing after them; told apart by that alone, with
+        // no ground nor line in the lane's ink under them or it (one was not in keeping with the panel's look).
         crate::station::run::pretend_unfolded(vec![1], Vec::new());
-        let (hits, grounds) = drawn(None);
+        let (hits, drawing) = drawn(None);
         let parts: Vec<HitBox> = (0..3).map(|at| boxed(&hits, Hit::Part(1, at)).expect("a line of its own")).collect();
         let (line, next) = (boxed(&hits, Hit::Shelf(1)).unwrap(), boxed(&hits, Hit::Shelf(2)).unwrap());
         assert!(parts[0].1 >= line.1 + line.3 - 0.01 && parts[1].1 > parts[0].1 && parts[2].1 > parts[1].1 && next.1 >= parts[2].1 + parts[2].3 - 0.01);
-        assert_eq!(grounds, 1);
+        let (whole, whole_inked) = of(&drawing, Hit::Shelf(1));
+        assert!(!whole_inked);
+        for at in 0..3 {
+            let (written, inked) = of(&drawing, Hit::Part(1, at));
+            assert!((written - whole - PART_INDENT).abs() < 0.01 && !inked, "{at}: {written} after {whole}");
+        }
+        assert!(drawing.iter().all(|part| !part.key.as_deref().is_some_and(|key| key.ends_with(".ground"))));
         assert_eq!(lane_order(tab, true), [Hit::Shelf(1), Hit::Part(1, 0), Hit::Part(1, 1), Hit::Part(1, 2), Hit::Shelf(2)]);
         assert!(Hit::Part(1, 1).drags() && Hit::Part(1, 1).looks());
         // Looked at: each by itself; one of them alone, the file, given by itself.
@@ -12681,11 +12663,11 @@ seven".into()));
         let (rows, groups) = Lately::page(&files, Filter::All, false, &[], Lang::En, now);
         assert_eq!(rows.iter().map(|row| (row.entry, row.group)).collect::<Vec<_>>(), [
             (Entry::Burst(Filter::All, Key { drive: 'D', file: 5 }), Grouped::Holds { count: 5, unfolded: true }),
-            (Entry::File(Key { drive: 'D', file: 5 }), Grouped::Within { last: false }),
-            (Entry::File(Key { drive: 'D', file: 4 }), Grouped::Within { last: false }),
-            (Entry::File(Key { drive: 'D', file: 3 }), Grouped::Within { last: false }),
-            (Entry::File(Key { drive: 'D', file: 2 }), Grouped::Within { last: false }),
-            (Entry::File(Key { drive: 'D', file: 1 }), Grouped::Within { last: true }),
+            (Entry::File(Key { drive: 'D', file: 5 }), Grouped::Within),
+            (Entry::File(Key { drive: 'D', file: 4 }), Grouped::Within),
+            (Entry::File(Key { drive: 'D', file: 3 }), Grouped::Within),
+            (Entry::File(Key { drive: 'D', file: 2 }), Grouped::Within),
+            (Entry::File(Key { drive: 'D', file: 1 }), Grouped::Within),
         ]);
         assert_eq!(groups.under, 0);
     }
