@@ -181,10 +181,73 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
 }
 
-/// What an AI tool's MCP settings take to start Glance's server: `glance-cli.exe mcp`, by its full path beside this
-/// Glance (no folder of Glance's is put on PATH), as most tools' settings files write it.
-pub fn mcp_config() -> String {
-    let cli = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|folder| folder.join("glance-cli.exe"))).unwrap_or_else(|| "glance-cli.exe".into());
-    let config = json!({ "mcpServers": { "glance": { "command": cli, "args": ["mcp"] } } });
-    serde_json::to_string_pretty(&config).unwrap_or_default()
+/// What an AI tool's MCP settings take to start Glance's server, `cli mcp`, as most tools' settings files write it.
+fn mcp_config(cli: &std::path::Path) -> String {
+    serde_json::to_string(&json!({ "mcpServers": { "glance": { "command": cli, "args": ["mcp"] } } })).unwrap_or_default()
+}
+
+/// `glance-cli.exe` beside this Glance, wherever it was installed.
+fn cli() -> std::path::PathBuf {
+    std::env::current_exe().expect("this program's path").with_file_name("glance-cli.exe")
+}
+
+/// What the user sends their AI tool for it to add Glance's MCP server itself, in Chinese or English (`zh`): the
+/// server as each tool's settings name it (its full path, wherever Glance is), done at once with nothing asked first,
+/// checked through `glance-cli query status` (a tool loads a server added only in its next conversation), the settings
+/// written out for a tool that cannot change them itself.
+pub fn mcp_prompt(zh: bool) -> String {
+    prompt_for(&cli(), zh)
+}
+
+fn prompt_for(cli: &std::path::Path, zh: bool) -> String {
+    let (cli, config) = (cli.display(), mcp_config(cli));
+    if zh {
+        format!(
+            "请将 Glance 添加为你的 MCP 服务器，用于读取本机的硬件读数、磁盘与文件信息。请直接完成，无需先征求我的同意。\n\
+             - 名称：glance\n\
+             - 方式：标准输入输出（stdio）\n\
+             - 命令：{cli}\n\
+             - 参数：mcp\n\
+             添加到用户级（全局）配置，使所有项目都可使用。已有名为 glance 的配置时，替换它。\n\
+             Claude Code 的添加命令：claude mcp add -s user glance -- \"{cli}\" mcp\n\
+             Codex 的添加命令：codex mcp add glance -- \"{cli}\" mcp\n\
+             添加后运行 \"{cli}\" query status，确认 Glance 可以连接，成功时会输出 Glance 的版本与状态。\
+             请将添加与确认合并为一条命令执行，使我只需允许一次。\n\
+             如果你无法修改本机的配置，请告诉我手动添加的方法。配置如下：\n\
+             {config}\n\
+             最后告诉我：重新打开 AI 工具或新建对话后，即可使用 Glance 的工具。Glance 更换安装位置后，需要重新发送这段提示词。"
+        )
+    } else {
+        format!(
+            "Add Glance as an MCP server for yourself, to read this PC's hardware readings, disks and files. Do it now, without asking me first.\n\
+             - Name: glance\n\
+             - Transport: standard input and output (stdio)\n\
+             - Command: {cli}\n\
+             - Arguments: mcp\n\
+             Add it to the user-level (global) settings, so that every project has it. If a server named glance is there already, replace it.\n\
+             For Claude Code: claude mcp add -s user glance -- \"{cli}\" mcp\n\
+             For Codex: codex mcp add glance -- \"{cli}\" mcp\n\
+             Then run \"{cli}\" query status to check that Glance can be reached. It prints Glance's version and status when it can. \
+             Run adding and checking as one command, so that I only have to allow it once.\n\
+             If you can't change this PC's settings, tell me how to add it by hand. The settings are:\n\
+             {config}\n\
+             Finally, tell me that Glance's tools are available once the AI tool is opened again or a new conversation is started, and that this prompt must be sent again if Glance is installed in another folder."
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The prompt names glance-cli.exe where it is, a folder with spaces and Chinese in it too, the same in the
+    /// command to check it by and in the settings written out (as JSON writes a path).
+    #[test]
+    fn the_prompt_names_the_cli_where_it_is() {
+        let cli = std::path::Path::new(r"D:\软件\Glance Beta\glance-cli.exe");
+        for zh in [true, false] {
+            let prompt = super::prompt_for(cli, zh);
+            assert!(prompt.contains(r#""D:\软件\Glance Beta\glance-cli.exe" query status"#), "{prompt}");
+            assert!(prompt.contains(r#"{"mcpServers":{"glance":{"args":["mcp"],"command":"D:\\软件\\Glance Beta\\glance-cli.exe"}}}"#), "{prompt}");
+            assert!(!prompt.contains(';') && !prompt.contains('；'));
+        }
+    }
 }

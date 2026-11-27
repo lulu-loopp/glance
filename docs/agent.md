@@ -11,7 +11,7 @@ Settings, General, 「AI 工具」: the switch 「允许 AI 工具读取本机�
 names what can be read (hardware readings, program and device names, disk usage, file names and paths, network
 addresses and AI Token usage) and says that an AI tool may send what it reads to its model provider.
 
-While it is on, the row 「MCP 配置」 copies the configuration an AI tool's MCP settings take:
+While it is on, the row 「连接 AI 工具」 copies a prompt (「复制提示词」) to send to the AI tool, which then adds Glance itself: the command, the Claude Code and Codex commands that add it, `glance-cli query status` to check it, all in one command so the user allows it once, and the settings below for a tool that cannot change its own. Tried 2026-11-27: Claude Code and Codex each added it with one command, and a new conversation used it. The settings:
 
 ```json
 {

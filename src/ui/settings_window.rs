@@ -1712,7 +1712,7 @@ enum Target {
     NetEaseRestart,
     /// Puts Glance in Claude Code's status line (asked first), or takes it out (see `ai::statusline`).
     ClaudeLimits(bool),
-    /// Copies what an AI tool's MCP settings take to start Glance's server (see `agent::mcp_config`).
+    /// Copies what an AI tool is sent to add Glance's MCP server itself (see `agent::mcp_prompt`).
     AgentConfig,
     /// Writes one of an AI provider's keys (see `Row::AiKey`), or takes the one given away.
     AiKey(String, usize),
@@ -1800,7 +1800,7 @@ enum Row {
     Group(&'static str),
     /// NetEase Cloud Music's lyrics plugin (InfLink-rs): how it is, and installing or taking it back.
     NetEase,
-    /// What an AI tool's MCP settings take to start Glance's server, to be copied (while AI tools may read Glance).
+    /// What an AI tool is sent to add Glance's MCP server itself, to be copied (while AI tools may read Glance).
     AgentConfig,
     /// Claude's limits read through Claude Code's status line: whether they are, and putting Glance there or taking it
     /// out.
@@ -4441,9 +4441,9 @@ impl Ui {
             Row::AgentConfig => {
                 let copied = self.agent_copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
                 (
-                    p("MCP 配置", "MCP configuration"),
-                    p("添加到 AI 工具的 MCP 设置中，即可读取 Glance 的信息", "Add it to an AI tool's MCP settings to let it read Glance's information").to_string(),
-                    vec![(if copied { p("已复制", "Copied") } else { p("复制", "Copy") }, Target::AgentConfig, Button::Plain)],
+                    p("连接 AI 工具", "Connect an AI tool"),
+                    p("复制后发送给 AI 工具，即可由其自行完成配置", "Send it to an AI tool, and it sets itself up").to_string(),
+                    vec![(if copied { p("已复制", "Copied") } else { p("复制提示词", "Copy prompt") }, Target::AgentConfig, Button::Plain)],
                 )
             }
             Row::Guide => (
@@ -6309,7 +6309,7 @@ You can disconnect here at any time, and the original status line command will b
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
             Target::ClaudeLimits(put_in) => self.claude_asked(put_in),
             Target::AgentConfig => {
-                if crate::diagnostics::copy(self.hwnd, &crate::agent::mcp_config()) {
+                if crate::diagnostics::copy(self.hwnd, &crate::agent::mcp_prompt(self.lang == Lang::Zh)) {
                     self.agent_copied_at = Some(Instant::now());
                 }
             }
