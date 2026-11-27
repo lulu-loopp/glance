@@ -5740,11 +5740,12 @@ impl Widget {
                 .filter_map(|(hit, parts, home)| {
                     let &(hx, hy, hw, hh, _) = self.hits.iter().find(|one| one.4 == hit)?;
                     let at = POINT { x: (self.at.x as f32 + (self.hits_from.0 + hx) * px).round() as i32, y: (self.at.y as f32 + (self.hits_from.1 + hy) * px).round() as i32 };
-                    Some(crate::carry::Tile { hit, parts, home, size: (hw, hh), at })
+                    Some(crate::carry::Tile { hit: crate::carry::Off::Tile(hit), parts, home, size: (hw, hh), at })
                 })
                 .collect();
             if !tiles.is_empty() {
                 let count = crate::station::select::landing(&carried);
+                let carried = carried.into_iter().map(crate::carry::Off::Tile).collect();
                 let lifted = crate::carry::Lifted { carried, count, drag, tiles, from, px, over: self.rect(), window: self.window.hwnd, look: self.menu_look() };
                 crate::carry::begin(&self.gfx, lifted);
             }

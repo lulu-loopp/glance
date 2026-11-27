@@ -690,8 +690,9 @@ impl Peek {
         let Some(drag) = crate::station::drag_off(&carried, thread) else { return };
         let thumb = self.thumb_on_screen(place);
         let (skin, dark, _) = look();
-        let tile = crate::carry::Tile { hit: carried[0], parts: self.face.clone(), home: None, size: (THUMB, THUMB), at: POINT { x: thumb.left, y: thumb.top } };
+        let tile = crate::carry::Tile { hit: crate::carry::Off::Tile(carried[0]), parts: self.face.clone(), home: None, size: (THUMB, THUMB), at: POINT { x: thumb.left, y: thumb.top } };
         let count = crate::station::select::landing(&carried);
+        let carried = carried.into_iter().map(crate::carry::Off::Tile).collect();
         let lifted = crate::carry::Lifted { carried, count, drag, tiles: vec![tile], from, px: place.contact.scale, over: place.plate, window: drawn.window.hwnd, look: super::menu::Look::of(skin, dark) };
         crate::carry::begin(&drawn.gfx, lifted);
         self.lifting = Some((drag, id));

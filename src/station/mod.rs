@@ -610,7 +610,7 @@ pub fn drag_off(hits: &[crate::ui::view::Hit], thread: u32) -> Option<u64> {
     crate::nearby::want_to_send();
     // (What is carried still, flying back into its room, put back there at once: lifted from there again before it
     // landed, it is drawn as it is in its room, not as the outline of the room it left.)
-    crate::carry::put_back(hits);
+    crate::carry::put_back(&hits.iter().copied().map(crate::carry::Off::Tile).collect::<Vec<_>>());
     let drag = drag::announce();
     run::ask(run::Ask::DragOut(given, thread));
     Some(drag)

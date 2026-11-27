@@ -46,7 +46,8 @@ use super::menu::{Colours, Look};
 use super::motion::Easing;
 use super::text::Lang;
 use super::theme::{self, Skin, Theme};
-use super::view::Rect;
+use super::morph::{Part, Recorder};
+use super::view::{Held, Rect};
 use crate::station::run::{Ask, FilesAct, Given, PartAct};
 
 mod pane;
@@ -152,6 +153,14 @@ static PLAYS: AtomicBool = AtomicBool::new(false);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
+/// Files it shows carried off it by Glance (see `carry`), by their places among those it shows: their places drawn as
+/// left; put back in them, springing back to their size (since when).
+static AWAY_CELLS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static LANDED_CELLS: Mutex<Vec<(usize, Instant)>> = Mutex::new(Vec::new());
+
+/// The longer side at most of the file it shows by itself as it is carried off it (DIPs): its picture made as small.
+const LIFTED_SIDE: f32 = 120.0;
+
 /// Its messages: something asked, something read, a previewer wanted for what it shows (see `pane`), and one made.
 const ASKED: u32 = WM_APP + 1;
 const LOADED: u32 = WM_APP + 2;
@@ -161,6 +170,8 @@ const PANE_MADE: u32 = WM_APP + 5;
 const PLAYED: u32 = WM_APP + 4;
 /// The screens changed (told by the system: see `procedure`).
 const SCREENS: u32 = WM_APP + 6;
+/// How the files it shows are carried off it changed (see `carry_cells`).
+const CARRIED: u32 = WM_APP + 7;
 /// Its timers: each frame while it moves; a look at the buttons pressed elsewhere, and at what changed.
 const FRAME: usize = 1;
 const FRAME_MS: u32 = 10;
@@ -290,6 +301,107 @@ pub fn show_among(items: Vec<Item>, key: u64) {
 pub fn tiles(owner: HWND, tiles: Vec<(u64, RECT)>) {
     if up_for(owner) {
         ask(Asked::Tiles(owner.0 as isize, tiles));
+    }
+}
+
+/// The files it shows carried off it now (by their places among those it shows: see `carry`), or none.
+pub fn carry_cells(cells: Vec<usize>) {
+    let changed = std::mem::replace(&mut *AWAY_CELLS.lock().unwrap(), cells.clone()) != cells;
+    if changed {
+        carried_changed();
+    }
+}
+
+/// Files it shows carried off it put back in their places at `at`: no longer carried, springing back to their size.
+pub fn land_cells(cells: Vec<usize>, at: Instant) {
+    if cells.is_empty() {
+        return;
+    }
+    AWAY_CELLS.lock().unwrap().retain(|away| !cells.contains(away));
+    let mut landed = LANDED_CELLS.lock().unwrap();
+    landed.retain(|(cell, when)| !cells.contains(cell) && when.elapsed() < super::view::LANDED_FOR);
+    landed.extend(cells.into_iter().map(|cell| (cell, at)));
+    drop(landed);
+    carried_changed();
+}
+
+/// Files it shows carried off it put back in their places as they were drawn coming there: drawn full at once.
+pub fn settle_cells(cells: &[usize]) {
+    if cells.is_empty() {
+        return;
+    }
+    AWAY_CELLS.lock().unwrap().retain(|away| !cells.contains(away));
+    LANDED_CELLS.lock().unwrap().retain(|(cell, _)| !cells.contains(cell));
+    carried_changed();
+}
+
+/// How the file in the place `cell` among those it shows is held (carried off; else `pressed`, as it is to be dragged
+/// out; else not), and when it was put back in its place, while it springs back to its size.
+fn cell_held(cell: usize, pressed: bool) -> (Held, Option<Instant>) {
+    let held = if AWAY_CELLS.lock().unwrap().contains(&cell) {
+        Held::Away
+    } else if pressed {
+        Held::Pressed
+    } else {
+        Held::Not
+    };
+    let landed = LANDED_CELLS.lock().unwrap().iter().find(|(landed, at)| *landed == cell && at.elapsed() < super::view::LANDED_FOR).map(|(_, at)| *at);
+    (held, landed)
+}
+
+/// Whether the file in the place `cell` is carried off it now.
+#[cfg(test)]
+pub fn carried_off(cell: usize) -> bool {
+    matches!(cell_held(cell, false).0, Held::Away)
+}
+
+/// Whether the file in the place `cell` springs back into it now, put back.
+#[cfg(test)]
+pub fn landing_in(cell: usize) -> bool {
+    cell_held(cell, false).1.is_some()
+}
+
+/// Whether files put back in their places spring back to their size still (it is drawn on meanwhile).
+fn cells_landing() -> bool {
+    LANDED_CELLS.lock().unwrap().iter().any(|(_, at)| at.elapsed() < super::view::LANDED_FOR)
+}
+
+/// It drawn again where it is made: how the files it shows are carried changed.
+fn carried_changed() {
+    if let Some(Some(hwnd)) = WINDOW.get() {
+        let _ = unsafe { PostMessageW(Some(HWND(*hwnd as *mut _)), CARRIED, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// A file dragged off it, to be carried by Glance (see `carry`) on the panel's thread, which carries what is dragged
+/// off a station: what is drawn of it at rest (from its box's corner, DIPs) and its box's size, its box's corner on the
+/// screen (physical px), where it was pressed (physical px, `px` a DIP), the sheet on the screen (let go over it, it goes
+/// back) and its window, the sheet's look, the drag that carries it, and its place among the files it shows (none: the
+/// one it shows by itself).
+pub struct Lift {
+    parts: Vec<Part>,
+    size: (f32, f32),
+    at: POINT,
+    from: POINT,
+    px: f32,
+    over: RECT,
+    window: isize,
+    look: Look,
+    drag: u64,
+    cell: Option<usize>,
+}
+
+impl Lift {
+    /// The sheet it is lifted off, on the screen (physical px).
+    pub fn over(&self) -> RECT {
+        self.over
+    }
+
+    /// It as it is carried (see `carry::begin`).
+    pub fn lifted(self) -> crate::carry::Lifted {
+        let room = crate::carry::Off::Look(self.cell);
+        let tile = crate::carry::Tile { hit: room, parts: self.parts, home: None, size: self.size, at: self.at };
+        crate::carry::Lifted { carried: vec![room], count: 1, drag: self.drag, tiles: vec![tile], from: self.from, px: self.px, over: self.over, window: HWND(self.window as *mut _), look: self.look }
     }
 }
 
@@ -1116,6 +1228,9 @@ struct Looker {
     /// A file pressed on (one of those shown together, or the file shown), and where (on the window, px): dragged out
     /// as the pointer goes far enough from there (see `drag_out`).
     drag_from: Option<(Given, (i32, i32))>,
+    /// A file dragged out, to be lifted off it as it is next drawn (see `lift`): its place among the files it shows
+    /// (none: the one it shows by itself), the drag that carries it, and where it was pressed (on the window, px).
+    lifting: Option<(Option<usize>, u64, (i32, i32))>,
     hits: Vec<(Rect, Hit)>,
     /// What a button said a moment, and since when.
     told: Option<(Hit, Instant)>,
@@ -1189,6 +1304,7 @@ impl Looker {
             pointer: None,
             pressed: None,
             drag_from: None,
+            lifting: None,
             hits: Vec::new(),
             told: None,
             held: false,
@@ -2145,17 +2261,28 @@ impl Looker {
         self.take_clicks(shape.at);
         let size = ((self.monitor.right - self.monitor.left) as u32, (self.monitor.bottom - self.monitor.top) as u32);
         let scale = self.scale;
+        let mut lift = None;
         let done = match &mut drawn {
-            Drawn::Plain(surface) => surface.draw(&gfx, size, scale, |frame| self.paint(frame, false, shape)),
+            Drawn::Plain(surface) => surface.draw(&gfx, size, scale, |frame| {
+                self.paint(frame, false, shape);
+                lift = self.lift(frame, shape);
+            }),
             Drawn::Frosted(frosted) => {
                 // (Glass as frosted as the panel's would be there, Windows 11's acrylic always; as clear as it is drawn.)
                 frosted.set_frost(if self.skin == Skin::Glass { self.frost } else { 1.0 } * shape.opacity);
                 let k = (shape.at.w / shape.size.0).min(shape.at.h / shape.size.1);
                 let radius = self.colours(true).radius * k;
                 let pane = (shape.at.x * scale, shape.at.y * scale, shape.at.w * scale, shape.at.h * scale, radius * scale);
-                frosted.draw(&gfx, size, scale, pane, |frame| self.paint(frame, true, shape))
+                frosted.draw(&gfx, size, scale, pane, |frame| {
+                    self.paint(frame, true, shape);
+                    lift = self.lift(frame, shape);
+                })
             }
         };
+        // (Carried from the panel's thread, which carries what is dragged off a station.)
+        if let Some(lift) = lift {
+            crate::app().controller.carry_from_look(lift);
+        }
         match done {
             Err(error) if gfx::failed("look", &gfx, Some(&error)) => {}
             _ => self.drawn = Some(drawn),
@@ -2533,10 +2660,12 @@ impl Looker {
             }
             let lit = resting && self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == Hit::Cell(place));
             let picked = listing.picked == Some(place);
+            // (Pressed to be dragged out, drawn in a little; carried off, its place drawn as left: see `carry`.)
+            let (held, landed) = cell_held(place, live && self.drag_from.is_some() && self.pressed == Some(Hit::Cell(place)));
             if listing.rows {
-                self.paint_row(frame, theme, at, member, lit, picked);
+                self.paint_row(frame, theme, at, member, lit, picked, held, landed);
             } else {
-                self.paint_cell(frame, theme, at, member, lit, picked);
+                self.paint_cell(frame, theme, at, member, lit, picked, held, landed);
             }
             // (Clicked only where it shows in the body.)
             let (top, bottom) = (at.y.max(body.y), (at.y + at.h).min(body.y + body.h));
@@ -2547,41 +2676,64 @@ impl Looker {
         frame.unclip();
     }
 
-    /// A file of files together at `at`: its picture (made for as many px as it takes), else its square and in it
-    /// Explorer's picture of it; ringed where it is picked or `lit`; its name under it.
-    fn paint_cell(&self, frame: &Frame, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool) {
+    /// A file of files together at `at`, held as `held` (put back in its place `landed`, springing back to its size):
+    /// its picture (see `paint_face`), ringed where it is picked or `lit`, else its place left outlined; its name under
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_cell(&self, frame: &Frame, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool, held: Held, landed: Option<Instant>) {
+        let radius = self.body_radius();
+        if let Some((x, y, w, h)) = super::view::held_room(frame, theme, held, (at.x, at.y, at.w, at.h), radius) {
+            let face = shrunk(Rect { x, y, w, h }, landed.map_or(1.0, super::view::landed_size));
+            self.paint_face(frame, theme, face, &member.path, member.seen.is_some());
+            let ring = if picked { Some(theme::accent(self.dark)) } else { lit.then(|| theme.text.alpha(0.3)) };
+            if let Some(ring) = ring {
+                frame.stroke_rounded(Fill::Solid(ring), at.x - 2.0, at.y - 2.0, at.w + 4.0, at.h + 4.0, radius + 2.0, 2.0);
+            }
+        }
+        frame.text(&member.name, self.font(11.5, 400.0), theme.text3, at.x, at.y + at.h + 4.0, at.w, Align::Start);
+    }
+
+    /// The picture of the file at `path` in `at`: its own (made for as many px as it takes) where it is `seen` as one,
+    /// else its square and in it Explorer's picture of it.
+    fn paint_face(&self, frame: &dyn Canvas, theme: &Theme, at: Rect, path: &Path, seen: bool) {
         let radius = self.body_radius();
         // (Of two sizes: made once for either.)
         let side = if at.w.max(at.h) * self.scale > 256.0 { 512 } else { 256 };
-        let thumb = crate::station::thumbs::of(&member.path, side);
-        match (member.seen, thumb) {
-            (Some(_), Some(thumb)) => {
+        let thumb = crate::station::thumbs::of(path, side);
+        match (seen, thumb) {
+            (true, Some(thumb)) => {
                 let (x, y, pw, ph) = thumb.fitted_in(at.x, at.y, at.w, at.h);
                 frame.picture(&thumb, x, y, pw, ph, radius, 1.0);
             }
             // (No picture of it yet, or none of its own: its square, and in it Explorer's picture of it.)
             (seen, thumb) => {
                 frame.fill_rounded(theme.track, at.x, at.y, at.w, at.h, radius);
-                let thumb = thumb.filter(|_| seen.is_none());
-                if let Some(thumb) = thumb.or_else(|| crate::station::thumbs::icon(&member.path, (48.0 * self.scale).round() as u32)) {
+                let thumb = thumb.filter(|_| !seen);
+                if let Some(thumb) = thumb.or_else(|| crate::station::thumbs::icon(path, (48.0 * self.scale).round() as u32)) {
                     let inner = (at.w.min(at.h) - 24.0).clamp(0.0, 96.0);
                     let (x, y, pw, ph) = thumb.fitted_in(at.x + (at.w - inner) / 2.0, at.y + (at.h - inner) / 2.0, inner, inner);
                     frame.picture(&thumb, x, y, pw, ph, 0.0, 1.0);
                 }
             }
         }
-        let ring = if picked { Some(theme::accent(self.dark)) } else { lit.then(|| theme.text.alpha(0.3)) };
-        if let Some(ring) = ring {
-            frame.stroke_rounded(Fill::Solid(ring), at.x - 2.0, at.y - 2.0, at.w + 4.0, at.h + 4.0, radius + 2.0, 2.0);
-        }
-        frame.text(&member.name, self.font(11.5, 400.0), theme.text3, at.x, at.y + at.h + 4.0, at.w, Align::Start);
     }
 
     /// A file (or folder) of a folder's rows, `at`: its picture (a picture's, a video's, made small) else its icon, its
     /// name, when it was written, how large it is (a folder: how many things it holds); lit where the pointer is on it,
-    /// marked where it is `picked`.
-    fn paint_row(&self, frame: &Frame, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool) {
+    /// marked where it is `picked`. Held as `held`: carried off, its place left outlined; pressed, or put back in its
+    /// place `landed`, its picture drawn in a little (springing back to its size).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_row(&self, frame: &dyn Canvas, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool, held: Held, landed: Option<Instant>) {
         let radius = self.body_radius().min(8.0);
+        if matches!(held, Held::Away) {
+            super::view::held_room(frame, theme, held, (at.x, at.y, at.w, at.h), radius);
+            return;
+        }
+        let k = match (held, landed) {
+            (Held::Pressed, _) => super::view::PRESSED_IN,
+            (_, Some(landed)) => super::view::landed_size(landed),
+            _ => 1.0,
+        };
         let accent = match self.skin {
             Skin::Paper => theme.text,
             _ => theme::accent(self.dark),
@@ -2593,7 +2745,7 @@ impl Looker {
             frame.fill_rounded(theme.hover, at.x, at.y, at.w, at.h, radius);
         }
         let pictured = !member.folder && matches!(kind_of(&member.path), Kind::Picture | Kind::Video);
-        let icon = row_icon(at, member.seen);
+        let icon = shrunk(row_icon(at, member.seen), k);
         let thumb = pictured.then(|| crate::station::thumbs::of(&member.path, 64)).flatten();
         match thumb {
             Some(thumb) => {
@@ -2601,7 +2753,7 @@ impl Looker {
                 frame.picture(&thumb, x, y, w, h, 3.0, 1.0);
             }
             None => {
-                let square = row_icon(at, None);
+                let square = shrunk(row_icon(at, None), k);
                 match crate::station::thumbs::icon(&member.path, (LIST_ICON * self.scale).round() as u32) {
                     Some(icon) => frame.picture(&icon, square.x, square.y, square.w, square.h, 0.0, 1.0),
                     None => frame.icon(if member.folder { Icon::Folder } else { Icon::File }, Point { x: square.x + square.w / 2.0, y: square.y + square.h / 2.0 }, LIST_ICON * 0.8, theme.text3),
@@ -2610,7 +2762,7 @@ impl Looker {
         }
         let (font, small) = (self.font(13.0, 400.0), self.font(12.0, 400.0));
         let middle = |font: Font| {
-            let (ascent, descent) = frame.gfx.baseline(font);
+            let (ascent, descent) = frame.baseline(font);
             at.y + (at.h - ascent - descent) / 2.0
         };
         let size_x = at.x + at.w - LIST_IN - LIST_SIZE;
@@ -3069,16 +3221,68 @@ impl Looker {
         if !crate::station::run::drag_begins(point(*from), point(at)) {
             return false;
         }
-        let Some((file, _)) = self.drag_from.take() else { return false };
-        self.pressed = None;
+        let Some((file, from)) = self.drag_from.take() else { return false };
+        let cell = match self.pressed.take() {
+            Some(Hit::Cell(member)) => Some(member),
+            _ => None,
+        };
         super::window::let_go_of_capture(self.hwnd);
         // (The devices nearby looked for, to rise at the station's foot as it is dragged: see `station::send`.)
         crate::nearby::want_to_send();
-        crate::station::drag::announce();
+        let drag = crate::station::drag::announce();
         let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
         crate::station::run::ask(Ask::DragOut(vec![file], thread));
+        // (Lifted off it as it is drawn, as what is dragged off a station is lifted off its lane: see `carry`.)
+        self.lifting = Some((cell, drag, from));
         self.draw();
         true
+    }
+
+    /// The file dragged out (see `drag_out`), drawn on `frame` as the sheet is drawn as `shape`, as it is lifted off it to
+    /// be carried: one of the files it shows together as its place shows it (its picture, its row), the one it shows
+    /// by itself as its picture made small, under where it was pressed. None where nothing is dragged out, or it shows
+    /// no such file any more.
+    fn lift(&mut self, frame: &Frame, shape: Shape) -> Option<Lift> {
+        let (cell, drag, (px_x, px_y)) = self.lifting.take()?;
+        let theme = Theme::new(self.skin, self.dark);
+        let (place, parts) = match cell {
+            Some(member) => {
+                let listing = self.listing()?;
+                let (cells, _) = self.cells(&listing);
+                let body = self.body_at(shape.size);
+                let cell = *cells.get(member)?;
+                let at = Rect { x: body.x + cell.x, y: body.y + cell.y - self.grid_scroll, w: if listing.rows { body.w } else { cell.w }, h: cell.h };
+                let member = listing.members.get(member)?;
+                let recorder = Recorder::new(frame, 1.0, (-at.x, -at.y));
+                if listing.rows {
+                    self.paint_row(&recorder, &theme, at, member, false, false, Held::Not, None);
+                } else {
+                    self.paint_face(&recorder, &theme, at, &member.path, member.seen.is_some());
+                }
+                (at, recorder.parts())
+            }
+            None => {
+                let path = self.shown_path()?.to_path_buf();
+                let seen = matches!(kind_of(&path), Kind::Picture | Kind::Video);
+                let (w, h) = match crate::station::thumbs::of(&path, 256).filter(|_| seen) {
+                    Some(thumb) => {
+                        let (_, _, w, h) = thumb.fitted_in(0.0, 0.0, LIFTED_SIDE, LIFTED_SIDE);
+                        (w, h)
+                    }
+                    None => (LIFTED_SIDE, LIFTED_SIDE),
+                };
+                let (x, y) = self.on_sheet((px_x, px_y));
+                let at = Rect { x: x - w / 2.0, y: y - h / 2.0, w, h };
+                let recorder = Recorder::new(frame, 1.0, (-at.x, -at.y));
+                self.paint_face(&recorder, &theme, at, &path, seen);
+                (at, recorder.parts())
+            }
+        };
+        let on = on_screen(place, shape.at, self.scale, self.monitor);
+        let over = on_screen(Rect { x: 0.0, y: 0.0, w: shape.at.w, h: shape.at.h }, shape.at, self.scale, self.monitor);
+        let from = POINT { x: self.monitor.left + px_x, y: self.monitor.top + px_y };
+        let look = Look::of(self.skin, self.dark).frosted(self.frost, true);
+        Some(Lift { parts, size: (place.w, place.h), at: POINT { x: on.left, y: on.top }, from, px: self.scale, over, window: self.hwnd.0 as isize, look, drag, cell })
     }
 
     /// A right click at `at`: on a file it shows (one of files together, or the one shown), that file's menu, up on the
@@ -3331,13 +3535,15 @@ impl Looker {
         let length = self.player.as_ref().and_then(play::Player::length).unwrap_or(0.0);
         let track = f64::from(self.track_at.map_or(0.0, |track| track.w * self.scale));
         let gone_on = at.floor() != drawn_at.floor() || (length > 0.0 && (at - drawn_at).abs() / length * track >= 0.5);
-        if fresh || gone_on || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
+        // (Files put back in their places drawn as they spring back to their size: see `land_cells`.)
+        let landing = cells_landing();
+        if fresh || gone_on || landing || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
             self.draw();
         }
         if self.hides_pointer() {
             unsafe { SetCursor(None) };
         }
-        if !self.plays_on(now) {
+        if !self.plays_on(now) && !landing {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), FRAME);
             }
@@ -3700,6 +3906,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // takes up its screen's as it is next drawn.
         SCREENS => {
             gfx::let_go_of_strays();
+            LRESULT(0)
+        }
+        // How the files it shows are carried off it changed (see `carry_cells`): drawn so, and on as they spring back
+        // into their places.
+        CARRIED => {
+            with(Looker::draw);
+            if cells_landing() {
+                unsafe {
+                    let _ = SetTimer(Some(hwnd), FRAME, FRAME_MS, None);
+                }
+            }
             LRESULT(0)
         }
         // A click on it leaves the keyboard where it was.

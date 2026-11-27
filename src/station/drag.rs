@@ -102,7 +102,7 @@ fn drag_here(given: &[Content], stays_here: bool) -> Option<Dragged> {
     let data = data_of(&self::given(given, stays_here, &dragged_folder())?)?;
     GOING.lock().unwrap().stays_here = stays_here;
     unsafe {
-        let source: IDropSource = Source { data: data.clone(), said: Default::default() }.into();
+        let source: IDropSource = Source { data: data.clone(), said: Default::default(), plain: Default::default() }.into();
         let mut effect = DROPEFFECT_NONE;
         let said = DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect);
         Some(if said == windows::Win32::Foundation::DRAGDROP_S_DROP && effect != DROPEFFECT_NONE { Dragged::Taken } else { Dragged::Not })
@@ -349,6 +349,31 @@ unsafe fn global(bytes: &[u8]) -> Option<HGLOBAL> {
 
 #[cfg(test)]
 mod tests {
+    /// Over a program that takes what is dragged, the system's cursors show what a drop does; over one that takes
+    /// nothing (the look, the panel it was lifted off), the pointer stays as it is, not the system's sign for no drop:
+    /// what is carried says that (see `carry`). Kept so as the drag goes on, the sign put back by Windows after it.
+    #[test]
+    fn where_nothing_takes_it_the_pointer_stays_as_it_is() {
+        use windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS;
+        use windows::Win32::System::Ole::IDropSource;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursor, LoadCursorW, SetCursor, IDC_ARROW, IDC_NO};
+        let _one = super::ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _com = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let data = super::shell_data(&[]).expect("a data object");
+        let source: IDropSource = super::Source { data, said: Default::default(), plain: Default::default() }.into();
+        let (arrow, no) = unsafe { (LoadCursorW(None, IDC_ARROW).unwrap(), LoadCursorW(None, IDC_NO).unwrap()) };
+        let go_on = || unsafe { source.QueryContinueDrag(false.into(), windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS(0)) };
+        unsafe { SetCursor(Some(no)) };
+        assert_eq!(unsafe { source.GiveFeedback(super::DROPEFFECT_COPY) }, DRAGDROP_S_USEDEFAULTCURSORS);
+        go_on();
+        assert_eq!(unsafe { GetCursor() }, no, "where it is taken, the system's cursors");
+        assert_eq!(unsafe { source.GiveFeedback(super::DROPEFFECT_NONE) }, windows::core::HRESULT(0));
+        assert_eq!(unsafe { GetCursor() }, arrow);
+        unsafe { SetCursor(Some(no)) };
+        go_on();
+        assert_eq!(unsafe { GetCursor() }, arrow, "kept as the drag goes on");
+    }
+
     /// What Explorer says a drop does, as it sets it: its words, the place named where it says `%1`; none where it took
     /// it back (as it does by turns over one folder) or said nothing. Why none is taken, said as such.
     #[test]
@@ -626,12 +651,21 @@ impl windows::Win32::System::Com::IDataObject_Impl for Contents_Impl {
     }
 }
 
-/// The station as the source of a drag: dropped as the left button is let go, given up by Esc; the system's cursors.
-/// What is dragged, and what the program under the pointer last said a drop does, and that window (see `kept_said`).
+/// The station as the source of a drag: dropped as the left button is let go, given up by Esc; the system's cursors
+/// where a drop is taken, the pointer as it is where none is (what is dragged, carried by Glance, says that: see
+/// `carry`). What is dragged, what the program under the pointer last said a drop does, and that window (see
+/// `kept_said`), and whether the pointer is kept as it is (nothing takes a drop where it is).
 #[implement(IDropSource)]
 struct Source {
     data: IDataObject,
     said: std::cell::RefCell<(isize, Option<String>)>,
+    plain: std::cell::Cell<bool>,
+}
+
+/// The pointer as it is, an arrow (not the system's sign for no drop).
+fn plain_pointer() {
+    use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW};
+    unsafe { SetCursor(LoadCursorW(None, IDC_ARROW).ok()) };
 }
 
 impl IDropSource_Impl for Source_Impl {
@@ -644,6 +678,11 @@ impl IDropSource_Impl for Source_Impl {
         let down = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0;
         // (The button the mouse's buttons swapped make the left: its state as it is is the one under the finger.)
         let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        // (Kept as it is where nothing takes a drop: told so, Windows puts its sign for no drop back once after it, over
+        // a window that takes none.)
+        if self.plain.get() {
+            plain_pointer();
+        }
         if escape.as_bool() || down(VK_ESCAPE) {
             windows::Win32::Foundation::DRAGDROP_S_CANCEL
         } else if !down(button) {
@@ -669,7 +708,14 @@ impl IDropSource_Impl for Source_Impl {
         let mut said = self.said.borrow_mut();
         *said = kept_said(&said, window, takes, described.filter(|(refusing, _)| !refusing).map(|(_, said)| said));
         GOING.lock().unwrap().over = Over { takes, says: said.1.clone().filter(|_| takes).or(why) };
-        windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS
+        // (Not taken there: what is carried fades, and says why where it is told, as the pointer stays as it is; the
+        // system's sign for that, over the look or the panel it was lifted off, was taken for the drag not working.)
+        self.plain.set(!takes);
+        if takes {
+            return windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS;
+        }
+        plain_pointer();
+        HRESULT(0)
     }
 }
 

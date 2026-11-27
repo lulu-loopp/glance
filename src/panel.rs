@@ -314,6 +314,7 @@ pub struct Controller {
     /// The menu of a file the look shows asked for by a right click on it, not yet up: what it is, where the pointer
     /// was, and how the look is drawn (see `look_menu`).
     look_menu_asked: Mutex<Option<(crate::station::run::Given, POINT, crate::ui::menu::Look)>>,
+    look_lifted: Mutex<Option<crate::ui::look::Lift>>,
 }
 
 impl Controller {
@@ -334,6 +335,7 @@ impl Controller {
             widgets_seen: AtomicBool::new(false),
             todo_asked: Mutex::new(None),
             look_menu_asked: Mutex::new(None),
+            look_lifted: Mutex::new(None),
         }
     }
 
@@ -519,6 +521,13 @@ impl Controller {
     /// click on it): up on this thread, which runs the menus (see `station::given_menu`).
     pub fn look_menu(&self, given: crate::station::run::Given, at: POINT, look: crate::ui::menu::Look) {
         *self.look_menu_asked.lock().unwrap() = Some((given, at, look));
+        self.post(WAKE);
+    }
+
+    /// A file dragged off the look (from the look's thread), carried from this thread, as what is dragged off a station
+    /// is (see `carry`).
+    pub fn carry_from_look(&self, lift: crate::ui::look::Lift) {
+        *self.look_lifted.lock().unwrap() = Some(lift);
         self.post(WAKE);
     }
 
@@ -781,6 +790,13 @@ impl Controller {
                 self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                 menu = crate::station::given_menu(&given, at, true, look).map(|(open, choices)| (open, MenuFor::Given(given, choices)));
                 keep_menu_above(&menu, &mut overlay);
+            }
+            // A file dragged off the look (see `carry_from_look`): carried on the device of the screen it is lifted on.
+            let look_lifted = self.look_lifted.lock().unwrap().take();
+            if let Some(lift) = look_lifted {
+                if let Ok(gfx) = crate::ui::gfx::for_area(lift.over()) {
+                    crate::carry::begin(&gfx, lift.lifted());
+                }
             }
             if !got {
                 let now = Instant::now();
@@ -4902,11 +4918,12 @@ impl<'a> Panel<'a> {
                 .filter_map(|(hit, parts, home)| {
                     let (.., w, h, _) = *self.hits.iter().find(|box_| box_.4 == hit)?;
                     let at = self.hit_on_screen(hit)?;
-                    Some(crate::carry::Tile { hit, parts, home, size: (w, h), at: POINT { x: at.left, y: at.top } })
+                    Some(crate::carry::Tile { hit: crate::carry::Off::Tile(hit), parts, home, size: (w, h), at: POINT { x: at.left, y: at.top } })
                 })
                 .collect();
             if !tiles.is_empty() {
                 let count = crate::station::select::landing(&carried);
+                let carried = carried.into_iter().map(crate::carry::Off::Tile).collect();
                 let lifted = crate::carry::Lifted { carried, count, drag, tiles, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
                 crate::carry::begin(&self.gfx, lifted);
             }

@@ -1391,7 +1391,7 @@ fn held(number: u64) -> Held {
 /// What is drawn of a note's card held from the panel in the box `room`, its corners rounded by `radius`: carried away,
 /// the room it left, outlined (none: nothing of the card drawn there); pressed, the box drawn in by a little round its
 /// middle; else the box.
-fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, f32, f32, f32), radius: f32) -> Option<(f32, f32, f32, f32)> {
+pub(crate) fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, f32, f32, f32), radius: f32) -> Option<(f32, f32, f32, f32)> {
     match held {
         Held::Not => Some((x, y, w, h)),
         Held::Pressed => {
@@ -1421,7 +1421,15 @@ static LANDED_TILES: std::sync::Mutex<Vec<(Hit, std::time::Instant)>> = std::syn
 /// it comes, about a third of a second), from how large, and how long it is drawn on for.
 const LANDING: (f32, f32) = (400.0, 16.0);
 const LANDED_FROM: f32 = 0.94;
-const LANDED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
+pub(crate) const LANDED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// How large a thing put back in its room `since` then is drawn, of its size, as it springs back to it.
+pub(crate) fn landed_size(since: std::time::Instant) -> f32 {
+    let mut spring = crate::ui::motion::Spring::at(LANDED_FROM, LANDING.0, LANDING.1);
+    spring.target = 1.0;
+    spring.step(since.elapsed().as_secs_f32());
+    spring.value
+}
 
 /// How many times how a thing on a station's lane is held has changed: what shows one is drawn again as it does.
 static TILE_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1519,12 +1527,7 @@ fn tile_face(hit: Hit, face: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = face;
     let k = match (tile_held(hit), tile_landed(hit)) {
         (Held::Pressed, _) => PRESSED_IN,
-        (_, Some(at)) => {
-            let mut spring = crate::ui::motion::Spring::at(LANDED_FROM, LANDING.0, LANDING.1);
-            spring.target = 1.0;
-            spring.step(at.elapsed().as_secs_f32());
-            spring.value
-        }
+        (_, Some(at)) => landed_size(at),
         _ => 1.0,
     };
     let (dx, dy) = (w * (1.0 - k) / 2.0, h * (1.0 - k) / 2.0);
