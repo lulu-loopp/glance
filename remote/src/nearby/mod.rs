@@ -10,6 +10,7 @@
 pub mod discover;
 pub mod http;
 pub mod link;
+pub mod page;
 pub mod run;
 pub mod send;
 pub mod tls;
@@ -376,6 +377,8 @@ struct Incoming {
     done: u64,
     came: Option<String>,
     writing: bool,
+    /// Where it is written as it comes in pieces, each asked of its own (a phone's browser sends so: see `page`).
+    pieces: Option<Writing>,
 }
 
 /// A receiving: from whom, its files, when it last moved.
@@ -425,6 +428,8 @@ pub struct Receiver {
     /// Where other devices reach this PC, network by network (see `discover::addresses`), as last looked at.
     addresses: Mutex<Vec<discover::Address>>,
     callers: Mutex<HashMap<IpAddr, usize>>,
+    /// The pages of phones paired by the browser that are open, and what is offered them (see `page`).
+    pub pages: page::Pages,
 }
 
 /// What goes wrong with a request: its status, and what is said of it.
@@ -446,7 +451,7 @@ impl Receiver {
             }
         }
         let receipts = Receipt::folder(&inbox);
-        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(None), devices: Mutex::default(), addresses: Mutex::default(), callers: Mutex::default() })
+        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(None), devices: Mutex::default(), addresses: Mutex::default(), callers: Mutex::default(), pages: page::Pages::default() })
     }
 
     /// Serves what comes to `listener`, a thread to each, for as long as it listens.
@@ -575,7 +580,9 @@ impl Receiver {
 
     /// Glance told the devices seen lately, and those added by their addresses.
     pub fn tell_devices(&self) {
-        self.told.tell(Event::Devices { devices: self.devices_now(), added: self.added() });
+        // (And the pages open, which may be sent to: see `page`.)
+        let devices = [self.devices_now(), self.pages.open().0].concat();
+        self.told.tell(Event::Devices { devices, added: self.added() });
     }
 
     /// The devices added by their addresses (see `Added`), as kept now.
@@ -688,7 +695,9 @@ impl Receiver {
             devices.retain(|_, device| device.heard.elapsed() < discover::FRESH);
             devices.len() != before
         };
-        if gone {
+        // (A page closed is gone too.)
+        let closed = self.pages.open().1;
+        if gone || closed {
             self.tell_devices();
         }
     }
@@ -754,36 +763,11 @@ impl Receiver {
         if sender.fingerprint.is_empty() {
             return Err((400, "no fingerprint"));
         }
-        // One receiving at a time (another, or one being asked about, turns this away): the sender may try again. (A
-        // message is no receiving: it comes whole with its offer.)
         if message.is_none() {
-            let mut session = self.session.lock().unwrap();
-            if session.as_ref().is_some_and(|going| going.touched.elapsed() > IDLE) {
-                let stale = session.take().unwrap();
-                drop(session);
-                self.end(stale, Some("nothing came for too long".into()));
-            } else if session.is_some() {
-                return Err((409, "another sending is being received"));
-            }
+            self.room_for_one()?;
         }
         if !kept.trusts(&sender) {
-            if kept.others_refused {
-                return Err((403, "not taken from devices not trusted"));
-            }
-            {
-                let mut asking = self.asking.lock().unwrap();
-                if asking.is_some() {
-                    return Err((409, "another device is being asked about"));
-                }
-                *asking = Some(from);
-            }
-            let answer = self.told.ask(&Asked { from: sender.clone(), files: files.iter().map(|(file, _)| file.clone()).collect() });
-            *self.asking.lock().unwrap() = None;
-            let answer = answer.unwrap_or_default();
-            crate::journal::note(format!("nearby: {} ({}) offered {} files: {}", sender.alias, sender.address, files.len(), if answer.take { "taken" } else { "refused" }));
-            if !answer.take {
-                return Err((403, "refused"));
-            }
+            let answer = self.asked_about(&sender, &files.iter().map(|(file, _)| file.clone()).collect::<Vec<_>>(), &kept)?;
             if answer.trust && sender.verified {
                 (self.keep)(&|kept: &mut Kept| kept.trust(&sender));
             }
@@ -794,13 +778,56 @@ impl Receiver {
             self.message(sender, words);
             return Ok((204, String::new()));
         }
+        let (id, tokens) = self.begin(sender, files)?;
+        Ok((200, json!({ "sessionId": id, "files": tokens }).to_string()))
+    }
+
+    /// Room for a receiving: one at a time (another, or one being asked about, turns this away: the sender may try
+    /// again), one nothing came for in `IDLE` given up first. (A message is no receiving: it comes whole with its offer.)
+    fn room_for_one(&self) -> Result<(), Refused> {
+        let mut session = self.session.lock().unwrap();
+        if session.as_ref().is_some_and(|going| going.touched.elapsed() > IDLE) {
+            let stale = session.take().unwrap();
+            drop(session);
+            self.end(stale, Some("nothing came for too long".into()));
+        } else if session.is_some() {
+            return Err((409, "another sending is being received"));
+        }
+        Ok(())
+    }
+
+    /// The user asked whether to take what `sender` offers (`files`), one device at a time, where devices not trusted
+    /// are asked about at all (`kept`): taken, with whether to trust it; else why not.
+    fn asked_about(&self, sender: &Sender, files: &[Offered], kept: &Kept) -> Result<Answer, Refused> {
+        if kept.others_refused {
+            return Err((403, "not taken from devices not trusted"));
+        }
+        {
+            let mut asking = self.asking.lock().unwrap();
+            if asking.is_some() {
+                return Err((409, "another device is being asked about"));
+            }
+            *asking = Some(sender.address);
+        }
+        let answer = self.told.ask(&Asked { from: sender.clone(), files: files.to_vec() });
+        *self.asking.lock().unwrap() = None;
+        let answer = answer.unwrap_or_default();
+        crate::journal::note(format!("nearby: {} ({}) offered {} files: {}", sender.alias, sender.address, files.len(), if answer.take { "taken" } else { "refused" }));
+        if !answer.take {
+            return Err((403, "refused"));
+        }
+        Ok(answer)
+    }
+
+    /// A receiving begun of `files` from `sender` (Glance told it is coming): its id, and each file's token by its id.
+    fn begin(&self, sender: Sender, files: Vec<(Offered, Option<String>)>) -> Result<(String, serde_json::Map<String, Value>), Refused> {
         let id = random(16);
         let mut tokens = serde_json::Map::new();
         let mut incoming = HashMap::new();
         for (offered, sha256) in files {
             let token = random(16);
             tokens.insert(offered.id.clone(), Value::String(token.clone()));
-            incoming.insert(offered.id.clone(), Incoming { offered, sha256, token, done: 0, came: None, writing: false });
+            incoming.insert(offered.id.clone(), Incoming { offered, sha256, token, done: 0, came: None, writing: false, pieces: None });
         }
         let session = Session { id: id.clone(), from: sender.clone(), files: incoming, touched: Instant::now(), told: Instant::now() };
         let offered: Vec<Offered> = session.files.values().map(|file| file.offered.clone()).collect();
@@ -812,7 +839,7 @@ impl Receiver {
             *going = Some(session);
         }
         self.told.tell(Event::Coming { session: id.clone(), from: sender, files: offered });
-        Ok((200, json!({ "sessionId": id, "files": tokens }).to_string()))
+        Ok((id, tokens))
     }
 
     /// One file of the receiving going on (`upload`), as its body comes: written into the inbox, checked to be as
@@ -865,70 +892,26 @@ impl Receiver {
     /// A file's body written into the inbox as `<random>.part`, and, whole, named `<random>.<extension>` and marked as
     /// from the Internet: that name. (Not whole, or not as its hash said, it is gone.)
     fn written(&self, body: &mut impl Read, size: u64, sha256: Option<&str>, extension: &str, session: &str, file_id: &str) -> Result<String, Refused> {
-        std::fs::create_dir_all(&self.inbox).map_err(|_| (500, "the inbox cannot be made"))?;
-        let stem = random(12);
-        let part = self.inbox.join(format!("{stem}.part"));
-        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|_| (500, "the file cannot be written"))?;
-        let gone = |part: &Path| {
-            let _ = std::fs::remove_file(part);
-        };
-        // Marked as from the Internet before anything of it is written (the mark goes with it as it is renamed): not
-        // marked, not kept.
-        let mut zone = part.as_os_str().to_owned();
-        zone.push(":Zone.Identifier");
-        if std::fs::write(PathBuf::from(zone), b"[ZoneTransfer]\r\nZoneId=3\r\n").is_err() {
-            drop(out);
-            gone(&part);
-            return Err((500, "the file cannot be marked"));
-        }
-        let mut hash = Sha256::new();
+        let mut writing = Writing::begin(&self.inbox)?;
         let mut chunk = vec![0u8; 256 << 10];
-        let mut done = 0u64;
         loop {
             let read = match body.read(&mut chunk) {
                 Ok(read) => read,
                 Err(_) => {
-                    drop(out);
-                    gone(&part);
+                    writing.gone();
                     return Err((400, "the file did not come whole"));
                 }
             };
             if read == 0 {
                 break;
             }
-            done += read as u64;
-            if done > size {
-                drop(out);
-                gone(&part);
-                return Err((400, "more came than was said"));
+            if let Err(refused) = writing.add(&chunk[..read], size) {
+                writing.gone();
+                return Err(refused);
             }
-            hash.update(&chunk[..read]);
-            if out.write_all(&chunk[..read]).is_err() {
-                drop(out);
-                gone(&part);
-                return Err((500, "the file cannot be written"));
-            }
-            self.progressed(session, file_id, done);
+            self.progressed(session, file_id, writing.done);
         }
-        drop(out);
-        if done != size {
-            gone(&part);
-            return Err((400, "less came than was said"));
-        }
-        if let Some(said) = sha256 {
-            let made: String = hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
-            if made != said {
-                gone(&part);
-                return Err((422, "not what its hash says"));
-            }
-        }
-        let name = if extension.is_empty() { stem } else { format!("{stem}.{extension}") };
-        let whole = self.inbox.join(&name);
-        if std::fs::rename(&part, &whole).is_err() {
-            gone(&part);
-            return Err((500, "the file cannot be kept"));
-        }
-        Ok(name)
+        writing.whole(size, sha256, extension, &self.inbox)
     }
 
     /// How far a file has come: kept, and Glance told of the receiving's progress (at most every `PROGRESS_EVERY`).
@@ -947,7 +930,16 @@ impl Receiver {
 
     /// A receiving over (`short`: why before all of it came): Glance told what came whole.
     fn end(&self, session: Session, short: Option<String>) {
-        let mut came: Vec<Came> = session.files.into_values().filter_map(|file| file.came.map(|name| Came { file: name, name: file.offered.name, size: file.offered.size, kind: file.offered.kind })).collect();
+        let mut came = Vec::new();
+        for file in session.files.into_values() {
+            // (What came of a file in pieces before it ended goes.)
+            if let Some(pieces) = file.pieces {
+                pieces.gone();
+            }
+            if let Some(name) = file.came {
+                came.push(Came { file: name, name: file.offered.name, size: file.offered.size, kind: file.offered.kind });
+            }
+        }
         came.sort_by(|a, b| a.name.cmp(&b.name));
         crate::journal::note(format!("nearby: from {} ({}): {} files came{}", session.from.alias, session.from.address, came.len(), short.as_deref().map(|why| format!(", then {why}")).unwrap_or_default()));
         // Written down before Glance is told: what came is Glance's to take in, told or not (it may not be there, or
@@ -987,6 +979,77 @@ impl Receiver {
     #[cfg(test)]
     pub fn inbox(&self) -> &Path {
         &self.inbox
+    }
+}
+
+/// A file being written into the inbox as it comes: as `<random>.part`, marked as from the Internet before anything of
+/// it is written (the mark goes with it as it is renamed: not marked, not kept), its bytes counted and hashed.
+struct Writing {
+    part: PathBuf,
+    stem: String,
+    out: std::fs::File,
+    done: u64,
+    hash: Sha256,
+}
+
+impl Writing {
+    fn begin(inbox: &Path) -> Result<Writing, Refused> {
+        std::fs::create_dir_all(inbox).map_err(|_| (500, "the inbox cannot be made"))?;
+        let stem = random(12);
+        let part = inbox.join(format!("{stem}.part"));
+        let out = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|_| (500, "the file cannot be written"))?;
+        let mut zone = part.as_os_str().to_owned();
+        zone.push(":Zone.Identifier");
+        if std::fs::write(PathBuf::from(zone), b"[ZoneTransfer]\r\nZoneId=3\r\n").is_err() {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            return Err((500, "the file cannot be marked"));
+        }
+        Ok(Writing { part, stem, out, done: 0, hash: Sha256::new() })
+    }
+
+    /// `bytes` written after what came, of a file said to be `size` long.
+    fn add(&mut self, bytes: &[u8], size: u64) -> Result<(), Refused> {
+        if self.done + bytes.len() as u64 > size {
+            return Err((400, "more came than was said"));
+        }
+        self.hash.update(bytes);
+        self.out.write_all(bytes).map_err(|_| (500, "the file cannot be written"))?;
+        self.done += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Kept, where all `size` bytes came (and, where its hash was said, as `sha256` says), as `<random>.<extension>`:
+    /// that name. Else gone.
+    fn whole(self, size: u64, sha256: Option<&str>, extension: &str, inbox: &Path) -> Result<String, Refused> {
+        let Writing { part, stem, out, done, hash } = self;
+        drop(out);
+        let gone = || {
+            let _ = std::fs::remove_file(&part);
+        };
+        if done != size {
+            gone();
+            return Err((400, "less came than was said"));
+        }
+        if let Some(said) = sha256 {
+            let made: String = hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+            if made != said {
+                gone();
+                return Err((422, "not what its hash says"));
+            }
+        }
+        let name = if extension.is_empty() { stem } else { format!("{stem}.{extension}") };
+        if std::fs::rename(&part, inbox.join(&name)).is_err() {
+            gone();
+            return Err((500, "the file cannot be kept"));
+        }
+        Ok(name)
+    }
+
+    /// Given up: what was written goes.
+    fn gone(self) {
+        drop(self.out);
+        let _ = std::fs::remove_file(&self.part);
     }
 }
 

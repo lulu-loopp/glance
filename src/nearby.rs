@@ -350,17 +350,27 @@ pub struct Target {
     pub added: Option<SocketAddr>,
 }
 
-/// The devices this PC may send to, as `devices` are found nearby: the phones paired (`phones`, those a browser is
-/// paired as left out: a page receives nothing), each by the certificate it told (`trusted`), found or not; then the
-/// others found, Glance's first, by name; then the devices added by their addresses (`added`) not found, as they were
-/// added. A device added that is found is listed where it is found, its address said.
+/// The devices this PC may send to, as `devices` are found nearby: the phones paired (`phones`), each by the
+/// certificate it told (`trusted`), found or not, a browser paired by the remote's page while it is open (the helper
+/// lists it among the devices, see `web_page`); then the others found, Glance's first, by name; then the devices added
+/// by their addresses (`added`) not found, as they were added. A device added that is found is listed where it is
+/// found, its address said.
 pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[crate::phone::Trusted], added: &[crate::phone::Added]) -> Vec<Target> {
     let added_at = |fingerprint: &str| added.iter().find(|added| added.fingerprint.eq_ignore_ascii_case(fingerprint)).and_then(|added| added.addresses.first().copied());
     let found_of = |fingerprint: &str| devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(fingerprint));
     let model = |device: Option<&Device>| device.and_then(|device| device.model.clone()).filter(|model| !model.trim().is_empty());
     let mut targets: Vec<Target> = Vec::new();
-    for phone in phones.iter().filter(|phone| !phone.web) {
-        let Some(fingerprint) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone.id.as_str())).map(|trusted| trusted.fingerprint.clone()) else { continue };
+    for phone in phones {
+        let fingerprint = if phone.web {
+            let page = format!("{WEB_PAGE}{}", phone.id);
+            if found_of(&page).is_none() {
+                continue;
+            }
+            page
+        } else {
+            let Some(fingerprint) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone.id.as_str())).map(|trusted| trusted.fingerprint.clone()) else { continue };
+            fingerprint
+        };
         let found = found_of(&fingerprint);
         let name = found.map(|device| device.alias.clone()).filter(|alias| !alias.is_empty()).unwrap_or_else(|| phone.name.clone());
         let added = added_at(&fingerprint);
@@ -376,6 +386,16 @@ pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[cr
         .collect();
     targets.extend(away);
     targets
+}
+
+/// What the fingerprint of a paired phone's open page begins with, as the helper lists it among the devices (a page
+/// has no certificate: it is known by its phone's id after this).
+const WEB_PAGE: &str = "web:";
+
+/// Whether the device known by `fingerprint` is a paired phone's page (see `WEB_PAGE`): no device found nearby, nor
+/// one to be trusted, but a phone listed as paired.
+pub fn web_page(fingerprint: &str) -> bool {
+    fingerprint.starts_with(WEB_PAGE)
 }
 
 /// The devices this PC may send to now (see `targets`): the phones paired and the certificates trusted as the helper
@@ -950,6 +970,22 @@ mod tests {
         let targets = targets(&found, &[], &[], &kept);
         let listed: Vec<(&str, bool, Option<SocketAddr>)> = targets.iter().map(|target| (target.name.as_str(), target.found, target.added)).collect();
         assert_eq!(listed, [("Desk", true, None), ("实验室电脑", true, Some("10.21.140.12:53320".parse().unwrap())), ("图书馆电脑", false, Some("[2001:da8::9]:53320".parse().unwrap()))]);
+    }
+
+    /// A phone paired by its browser is listed among the paired phones while its page is open (the helper lists the
+    /// page among the devices, see `web_page`), by its name, and not among the others: closed, it is not listed. A
+    /// phone of the app is listed found or not.
+    #[test]
+    fn a_phone_paired_by_its_browser_is_listed_while_its_page_is_open() {
+        let phone = |id: &str, name: &str, web: bool| crate::phone::Phone { id: id.into(), name: name.into(), control: true, files: true, web };
+        let phones = [phone("a", "Fold", false), phone("b", "iPhone (web)", true)];
+        let trusted = [crate::phone::Trusted { fingerprint: "AB".into(), alias: "Fold".into(), kind: Some("mobile".into()), since: 0, phone: Some("a".into()), glance: true }];
+        let page = Device { fingerprint: "web:b".into(), alias: "iPhone (web)".into(), model: None, kind: Some("mobile".into()), glance: true };
+        let desk = Device { fingerprint: "CD".into(), alias: "Desk".into(), model: None, kind: Some("desktop".into()), glance: true };
+        let listed = |devices: &[Device]| -> Vec<(String, bool, bool)> { targets(devices, &phones, &trusted, &[]).into_iter().map(|target| (target.fingerprint, target.paired, target.found)).collect() };
+        assert_eq!(listed(&[desk.clone(), page]), [("AB".into(), true, false), ("web:b".into(), true, true), ("CD".into(), false, true)]);
+        assert_eq!(listed(&[desk]), [("AB".into(), true, false), ("CD".into(), false, true)]);
+        assert!(web_page("web:b") && !web_page("AB"));
     }
 
     /// What the helper is told to send, as it reads it (see its `link::Command::Send`): each file where it is, and

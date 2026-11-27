@@ -255,22 +255,30 @@ fn code(rows: &mut dyn Iterator<Item = &str>) -> Option<Code> {
 pub struct Offer {
     pub id: String,
     pub code: Code,
+    /// The page the code opens is at this PC's IPv6 address (not its IPv4 one).
+    pub v6: bool,
+    /// This PC has an IPv6 address beside an IPv4 one: the page may be opened at either.
+    pub either: bool,
 }
 
 /// How long the remote keeps a pairing offered (as its `OFFERED_FOR`).
 pub const OFFER_LASTS: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// A pairing offered to one phone (see `Offer`), for as long as the remote keeps one (`OFFER_LASTS`).
-pub fn offer() -> Option<Offer> {
-    offered(&ask(&["pair", "cells"])?)
+pub fn offer(v6: bool) -> Option<Offer> {
+    offered(&ask(if v6 { &["pair", "cells", "v6"] } else { &["pair", "cells"] })?)
 }
 
 /// The pairing offered as the remote says it (`pair cells`): its name, the link itself, then the code's rows.
 fn offered(said: &str) -> Option<Offer> {
     let mut lines = said.lines();
     let id = lines.next()?.trim().to_string();
-    lines.next()?;
-    Some(Offer { id, code: code(&mut lines)? })
+    let link = lines.next()?.trim();
+    // (Where the page is, in brackets for IPv6, and the other addresses after the `#`, as `a=` and commas.)
+    let v6 = link.split("://").nth(1).is_some_and(|rest| rest.starts_with('['));
+    let others = link.split_once('#').map_or("", |(_, said)| said).split('&').find_map(|field| field.strip_prefix("a=")).unwrap_or("");
+    let either = others.split(',').any(|other| other.contains(':') != v6 && !other.is_empty());
+    Some(Offer { id, code: code(&mut lines)?, v6, either })
 }
 
 /// Takes back the pairing offered of name `id` (see `offer`), where no phone has taken it yet.
@@ -353,7 +361,7 @@ pub fn report() -> Option<String> {
 
 /// A phone paired with: what the remote tells it from the others by, what it calls itself, whether it may control
 /// this PC, whether what it sends is taken without asking, and whether it is a phone's browser (paired by the remote's
-/// page, sending nothing).
+/// page: it sends and is sent while the page is open, see `nearby::web_page`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Phone {
     pub id: String,
@@ -500,11 +508,12 @@ pub fn turn_sending(on: bool) -> bool {
     set(None, None, Some(on)).2
 }
 
-/// The firewall opened for the helper at `helper` as it runs for phones (`remote`) and for devices nearby (`nearby`,
-/// receiving or sending), and closed for what it does not run for (see `set`): each rule made anew, as it is now.
-fn open_firewall(helper: &Path, remote: bool, nearby: bool) {
+/// The firewall opened for the helper at `helper` as it serves phones (`phones`: paired ones control it, ask how it is
+/// and send to it, and new ones pair with it, while the remote or nearby receiving is on) and devices nearby (`nearby`,
+/// receiving or sending), and closed for what it does not do (see `set`): each rule made anew, as it is now.
+fn open_firewall(helper: &Path, phones: bool, nearby: bool) {
     let program = format!("program={}", helper.display());
-    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby)] {
+    for (rule, wanted) in [(RULE, phones), (NEARBY_RULE, nearby)] {
         let name = format!("name={rule}");
         // (Whatever rule of that name there was goes first: one, and current.)
         firewall(&["delete", "rule", &name]);
@@ -519,13 +528,14 @@ fn open_firewall(helper: &Path, remote: bool, nearby: bool) {
             firewall(&arguments);
         };
         if rule == RULE {
-            // (What phones ask of it, and their looking for it when its address has changed.)
-            open("protocol=TCP", Some(&PORT.to_string()), "remoteip=localsubnet");
+            // (What phones ask of it, from any address: a phone on another network, as across a campus, reaches it by
+            // its IPv6 address, and nothing is done for one that does not sign with a key it paired by. Their looking
+            // for it when its address has changed: the local network's alone, as that is where it is looked for.)
+            open("protocol=TCP", Some(&PORT.to_string()), "remoteip=any");
             open("protocol=UDP", Some(&PORT.to_string()), "remoteip=localsubnet");
         } else {
             // (What devices send and ask of it: from any address on its own ports, from the local network on another
-            // it receives on where all of those were taken; and their saying they are there. The phones' port stays
-            // the local network's alone.)
+            // it receives on where all of those were taken; and their saying they are there.)
             open("protocol=TCP", Some(NEARBY_OWN_PORTS), "remoteip=any");
             open("protocol=TCP", None, "remoteip=localsubnet");
             open("protocol=UDP", Some(&NEARBY_PORT.to_string()), "remoteip=localsubnet");
@@ -539,13 +549,13 @@ pub fn keep_firewall() {
     let Some(helper) = helper() else { return };
     let (remote, nearby, send) = kept_flags();
     let running = elevation::remote_enabled(&helper);
-    open_firewall(&helper, running && remote, running && (nearby || send));
+    open_firewall(&helper, running && (remote || nearby), running && (nearby || send));
 }
 
 /// The helper set to run for phones (`remote`), for devices nearby to send to it (`nearby`), and to send to devices
 /// nearby while they may not (`send`), each as asked, or else as it is: told what it runs for, the firewall opened for
-/// it as each needs (closed as none does): to the local network for phones, which control this PC; to every address
-/// for what devices send and ask on the helper's own nearby ports (a device added by its address may be on another
+/// it as each needs (closed as none does): to every address for phones while the remote or receiving is on (paired by
+/// a key, from another network too, by IPv6), and for what devices send and ask on the helper's own nearby ports (a device added by its address may be on another
 /// network, as across a campus: what a device not trusted sends is asked about, wherever it is), and to the local
 /// network on any other it receives on and for their saying they are there,
 /// and its task made and run anew while any is on (so it takes what it was told), else stopped and gone. Whether each
@@ -559,7 +569,7 @@ fn set(remote: Option<bool>, nearby: Option<bool>, send: Option<bool>) -> (bool,
     let _ = asked(&helper, &["remote", word(remote)]);
     let _ = asked(&helper, &["nearby", word(nearby)]);
     let _ = asked(&helper, &["nearby", "send", word(send)]);
-    open_firewall(&helper, remote, nearby || send);
+    open_firewall(&helper, remote || nearby, nearby || send);
     let is_on = elevation::set_remote(&helper, remote || nearby || send);
     // Ended while it kept the screens dark its own way, it has not put them back: it is asked to now.
     if !is_on {
@@ -704,6 +714,13 @@ http://10.0.0.19:7311/#k=ab&n=PC
 ").unwrap();
         assert_eq!(offer.id, "3f2a9c");
         assert_eq!(offer.code.0, vec![vec![true, true, false], vec![false, true, true], vec![true, false, true]]);
+        assert!(!offer.v6 && !offer.either, "at IPv4, with no other address");
+        // At which address the page is, and whether it could be at the other kind (the addresses after the `#`).
+        let read = |link: &str| offered(&format!("id\n{link}\n1\n")).map(|offer| (offer.v6, offer.either)).unwrap();
+        assert_eq!(read("http://10.0.0.19:47631/#k=ab&n=PC&a=2601:40f::5b68,192.168.56.1"), (false, true));
+        assert_eq!(read("http://10.0.0.19:47631/#k=ab&n=PC&a=192.168.56.1"), (false, false));
+        assert_eq!(read("http://[2601:40f::5b68]:47631/#k=ab&n=PC&a=10.0.0.19"), (true, true));
+        assert_eq!(read("http://[2601:40f::5b68]:47631/#k=ab&n=PC"), (true, false));
         assert!(offered("3f2a9c
 http://10.0.0.19:7311/
 ").is_none(), "an offer with no code is none");

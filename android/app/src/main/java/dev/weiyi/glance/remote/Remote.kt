@@ -9,14 +9,17 @@ import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** The PC paired with: where it is, the key shared with it, and its name. */
-data class Pc(val host: String, val port: Int, val key: String, val name: String) {
+/**
+ * The PC paired with: where it is, the key shared with it, its name, and the other addresses it said it may be reached
+ * at (as from another network: tried where [host] answers no more, see [find]).
+ */
+data class Pc(val host: String, val port: Int, val key: String, val name: String, val addresses: List<String> = emptyList()) {
     companion object {
         /** A pairing link, as the PC's QR code holds it (see [Lan.pairing]). */
         fun fromLink(link: String): Pc? = Lan.pairing(link)
     }
 
-    fun toJson(): JSONObject = JSONObject().put("host", host).put("port", port).put("key", key).put("name", name)
+    fun toJson(): JSONObject = JSONObject().put("host", host).put("port", port).put("key", key).put("name", name).put("addresses", JSONArray(addresses))
 }
 
 /**
@@ -44,7 +47,8 @@ object Pcs {
         val list = runCatching { JSONArray(kept(context).getString("list", "[]")) }.getOrElse { JSONArray() }
         return (0 until list.length()).mapNotNull { at ->
             val one = list.optJSONObject(at) ?: return@mapNotNull null
-            Pc(one.optString("host"), one.optInt("port"), one.optString("key"), one.optString("name")).takeIf { it.host.isNotBlank() && it.key.length == 64 }
+            val addresses = one.optJSONArray("addresses")?.let { list -> (0 until list.length()).map { list.optString(it) }.filter(Lan::isAddress) }.orEmpty()
+            Pc(one.optString("host"), one.optInt("port"), one.optString("key"), one.optString("name"), addresses).takeIf { it.host.isNotBlank() && it.key.length == 64 }
         }
     }
 
@@ -64,9 +68,22 @@ object Pcs {
         keep(context, list, if (at >= 0) at else list.size - 1)
     }
 
-    /** The PC with that key is at [host] now. */
+    /** The PC with that key is at [host] now (the address it was at kept among its others). */
     fun move(context: Context, key: String, host: String) {
-        keep(context, all(context).map { if (it.key == key) it.copy(host = host) else it }, chosen(context))
+        keep(context, all(context).map { if (it.key == key) it.copy(host = host, addresses = (listOf(it.host) + it.addresses).filter { other -> other != host }.distinct().take(Lan.MOST_ADDRESSES)) else it }, chosen(context))
+    }
+
+    /** The other addresses the PC with that key may be reached at, as it last said. */
+    fun addressesOf(context: Context, key: String): List<String> = all(context).firstOrNull { it.key == key }?.addresses.orEmpty()
+
+    /** The PC with that key said it may be reached at [addresses] (the one it is asked at left out). */
+    fun knowAddresses(context: Context, key: String, addresses: List<String>) {
+        synchronized(this) {
+            val list = all(context)
+            val pc = list.firstOrNull { it.key == key } ?: return
+            val others = addresses.filter { Lan.isAddress(it) && it != pc.host }.distinct().take(Lan.MOST_ADDRESSES)
+            if (others != pc.addresses) keep(context, list.map { if (it.key == key) it.copy(addresses = others) else it }, chosen(context))
+        }
     }
 
     fun remove(context: Context, at: Int) {
@@ -154,6 +171,8 @@ data class PcState(
      * refused). An older PC that does not say lets every paired phone control it.
      */
     val control: Boolean = true,
+    /** Where else the PC says it may be reached (see [Pc.addresses]). */
+    val addresses: List<String> = emptyList(),
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
@@ -169,6 +188,7 @@ data class PcState(
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
             reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
             name = json.optString("name"),
+            addresses = json.optJSONArray("addresses")?.let { list -> (0 until list.length()).map { list.optString(it) } }.orEmpty(),
             lights = if (json.isNull("lights")) null else json.optBoolean("lights"),
             night = json.optBoolean("night"),
             screen = if (json.isNull("screen")) null else json.optBoolean("screen"),
@@ -317,12 +337,40 @@ fun Pc.near(): Boolean? {
 }
 
 /**
+ * Looks for the PC where it is not at its address: on the network the phone is on now (its address may have changed
+ * since it was paired), then at the other addresses it said it may be reached at ([others], as from another network,
+ * by IPv6). An address where it answers, or none. What is asked there is signed and answered signed, so another
+ * machine at one of them is not taken for it. Blocks for under four seconds.
+ */
+fun Pc.find(others: List<String> = addresses): String? = findNearby() ?: reachAt(others.filter { it != host })
+
+/** The first of [addresses] (each tried at once) where something takes a connection on the PC's port, within 2.5 s. */
+private fun Pc.reachAt(addresses: List<String>): String? {
+    if (addresses.isEmpty()) return null
+    val found = java.util.concurrent.LinkedBlockingQueue<String>()
+    val tries = addresses.map { address ->
+        Thread {
+            runCatching {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(java.net.InetAddress.getByName(address), port), 2500) }
+                found.add(address)
+            }
+        }.apply { isDaemon = true; start() }
+    }
+    val until = System.currentTimeMillis() + 2600
+    while (System.currentTimeMillis() < until) {
+        found.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)?.let { return it }
+        if (tries.none { it.isAlive }) return found.poll()
+    }
+    return null
+}
+
+/**
  * Looks for the PC on the network the phone is on now (its address may
  * have changed since it was paired): everyone there is asked for the PC
  * that holds this key, by the key's name; the PC proves it holds it. Its
  * address, or none if it does not answer. Blocks for a second at most.
  */
-fun Pc.find(): String? {
+private fun Pc.findNearby(): String? {
     val secret = unhex(key)
     val id = hex(java.security.MessageDigest.getInstance("SHA-256").digest(secret).copyOf(8))
     val nonce = hex(ByteArray(8).also { SecureRandom().nextBytes(it) })

@@ -42,7 +42,7 @@ mod sign;
 mod touch;
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,8 +51,12 @@ use serde_json::{json, Value};
 
 /// The most a request may be: none of the phone's is near it.
 const MOST: usize = 16 << 10;
+/// The most what a page offers to send may be (its files' names, or words).
+const MOST_OFFER: usize = 1 << 20;
 /// How long a request may take to arrive whole.
 const ARRIVING: Duration = Duration::from_secs(5);
+/// How long a piece of a file a page sends is given to come (see `nearby::page::PIECE`).
+const PIECE_ARRIVING: Duration = Duration::from_secs(60);
 /// How many requests are answered at once, and how many of them one
 /// address may have: more are turned away till those are done.
 const AT_ONCE: usize = 64;
@@ -494,23 +498,82 @@ impl Helper {
         })
     }
 
+    /// A page's state told what this PC sends it (see `nearby::page`), where `key` is a page's: it is open, from `from`.
+    fn page_told(&self, answer: &mut Value, key: &str, from: std::net::IpAddr) {
+        let Some(phone) = Config::load().phones.into_iter().find(|phone| !key.is_empty() && phone.key == key && phone.web) else { return };
+        answer["incoming"] = nearby::run::page_asked(&phone.id, &phone.name, from).unwrap_or(Value::Null);
+        answer["files"] = json!(phone.files);
+    }
+
+    /// A piece of what this PC sends the page asking (see `nearby::page::piece_of`): `{ "job", "file", "at" }`.
+    fn take_piece(&self, body: &[u8], key: &str) -> Result<Vec<u8>, (u16, String)> {
+        let phone = paired(key)?;
+        let asked: Value = serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))?;
+        let number = |name: &str| asked.get(name).and_then(Value::as_u64).ok_or((400, format!("\"{name}\" is missing")));
+        nearby::run::piece_for_page(&phone.id, number("job")?, number("file")? as usize, number("at")?).map_err(|(status, why)| (status, why.to_string()))
+    }
+
     /// Does what a request asks: its answer, or why not (with the status).
-    fn act(self: &Arc<Self>, method: &str, path: &str, body: &[u8], key: &str) -> Result<Value, (u16, String)> {
+    fn act(self: &Arc<Self>, method: &str, path: &str, body: &[u8], key: &str, from: std::net::IpAddr) -> Result<Value, (u16, String)> {
         let failed = |error: String| (500, error);
-        let asked: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))? };
-        let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
+        // (Files sent and fetched are no control of this PC: a page's, as an app's are nearby, whatever it may control.)
+        let transfer = path.starts_with("/v1/send/") || path.starts_with("/v1/take/");
         // The remote off (this helper runs for nearby transfer alone), a phone is answered only what nearby transfer
-        // has of it, and its unpairing.
-        if !self.config.remote && !path.starts_with("/v1/nearby") && path != "/v1/unpair" {
+        // has of it, its files, and its unpairing.
+        if !self.config.remote && !path.starts_with("/v1/nearby") && path != "/v1/unpair" && !transfer && path != "/v1/state" {
             return Err((403, "the remote is off".into()));
         }
         // A phone that may only read how this PC is (see `Phone::control`): answered that too, and nothing it asks done.
         let reads_only = !key.is_empty() && Config::load().phones.iter().any(|phone| phone.key == key && !phone.control);
-        if reads_only && !(method == "GET" && path == "/v1/state") && !path.starts_with("/v1/nearby") && path != "/v1/unpair" {
+        if reads_only && !(method == "GET" && path == "/v1/state") && !path.starts_with("/v1/nearby") && path != "/v1/unpair" && !transfer {
             return Err((403, "this phone may not control this PC".into()));
         }
+        // A piece of what a page sends: its bytes, the body itself (see `nearby::page`).
+        if let ("POST", Some(query)) = (method, path.strip_prefix("/v1/send/piece?")) {
+            let phone = paired(key)?;
+            let field = |name: &str| query.split('&').find_map(|pair| pair.strip_prefix(name).and_then(|rest| rest.strip_prefix('='))).unwrap_or_default();
+            let at = field("at").parse::<u64>().map_err(|_| (400, "no place in the file".to_string()))?;
+            nearby::run::piece_from_page(field("s"), field("f"), &nearby::page::fingerprint(&phone.id), at, body).map_err(|(status, why)| (status, why.to_string()))?;
+            return Ok(json!({}));
+        }
+        let asked: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))? };
+        let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
         match (method, path) {
+            ("GET", "/v1/state") if !self.config.remote => {
+                // (A page told what it is sent, with nothing of how this PC is: the remote is off.)
+                let mut answer = json!({ "name": Config::load().name, "remote": false, "nearby": nearby::run::told_to_phones() });
+                self.page_told(&mut answer, key, from);
+                return Ok(answer);
+            }
             ("GET", "/v1/state") => {}
+            // What a page sends (see `nearby::page`): its files' names, sizes and types, or words. Taken as its phone's
+            // files are (see `Phone::files`): the receiving's id and its files', or nothing (words, taken whole).
+            ("POST", "/v1/send/offer") => {
+                let phone = paired(key)?;
+                let files: Vec<(String, u64, String)> = asked
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|files| files.iter().map(|file| (file.get("name").and_then(Value::as_str).unwrap_or_default().to_string(), file.get("size").and_then(Value::as_u64).unwrap_or(0), file.get("type").and_then(Value::as_str).filter(|kind| !kind.is_empty()).unwrap_or("application/octet-stream").to_string())).collect())
+                    .unwrap_or_default();
+                let words = asked.get("words").and_then(Value::as_str).filter(|words| !words.trim().is_empty()).map(str::to_string);
+                let sender = nearby::Sender { alias: phone.name.clone(), model: None, kind: Some("mobile".into()), fingerprint: nearby::page::fingerprint(&phone.id), verified: false, address: from, glance: true };
+                return match nearby::run::from_page(sender, &files, words, phone.files) {
+                    Ok(Some((session, files))) => Ok(json!({ "session": session, "files": files })),
+                    Ok(None) => Ok(json!({})),
+                    Err((status, why)) => Err((status, why.into())),
+                };
+            }
+            ("POST", "/v1/send/cancel") => {
+                let phone = paired(key)?;
+                nearby::run::page_cancelled(asked.get("session").and_then(Value::as_str).unwrap_or_default(), &nearby::page::fingerprint(&phone.id));
+                return Ok(json!({}));
+            }
+            // What this PC sends a page, turned down there.
+            ("POST", "/v1/take/refuse") => {
+                let phone = paired(key)?;
+                nearby::run::page_refused(&phone.id, asked.get("job").and_then(Value::as_u64).unwrap_or(0));
+                return Ok(json!({}));
+            }
             // Where and as whom this PC receives nearby (its certificate's fingerprint, for the phone to pin).
             ("GET", "/v1/nearby") => return Ok(nearby::run::told_to_phones()),
             // The certificate the asking phone sends nearby by: trusted while the phone is paired (it told it signed
@@ -621,6 +684,11 @@ impl Helper {
         let mut answer = if self.config.remote { self.state() } else { json!({ "name": Config::load().name, "remote": false }) };
         // (Whether the phone asking may control this PC, for it to show so.)
         answer["control"] = json!(!reads_only);
+        if method == "GET" && path == "/v1/state" {
+            self.page_told(&mut answer, key, from);
+        }
+        // (Where else it may reach this PC: the app keeps them, to try where the address it asks by answers no more.)
+        answer["addresses"] = json!(addresses_now().iter().map(|address| address.to_string()).collect::<Vec<_>>());
         Ok(answer)
     }
 
@@ -629,10 +697,10 @@ impl Helper {
     fn serve(self: &Arc<Self>, mut stream: TcpStream) -> std::io::Result<()> {
         stream.set_write_timeout(Some(ARRIVING))?;
         // The whole of it is to have come by then, however it trickles in.
-        let by = std::time::Instant::now() + ARRIVING;
-        let mut chunk = [0u8; 2048];
+        let by = std::cell::Cell::new(std::time::Instant::now() + ARRIVING);
+        let mut chunk = vec![0u8; 64 << 10];
         let mut more = |stream: &mut TcpStream| -> std::io::Result<Vec<u8>> {
-            let left = by.checked_duration_since(std::time::Instant::now()).filter(|left| !left.is_zero()).ok_or(std::io::ErrorKind::TimedOut)?;
+            let left = by.get().checked_duration_since(std::time::Instant::now()).filter(|left| !left.is_zero()).ok_or(std::io::ErrorKind::TimedOut)?;
             stream.set_read_timeout(Some(left))?;
             let read = stream.read(&mut chunk)?;
             Ok(chunk[..read].to_vec())
@@ -654,8 +722,13 @@ impl Helper {
         let (method, path) = (request.next().unwrap_or_default(), request.next().unwrap_or_default());
         let header = |name: &str| lines.clone().filter_map(|line| line.split_once(':')).find(|(key, _)| key.eq_ignore_ascii_case(name)).map_or("", |(_, value)| value.trim());
         let length: usize = header("content-length").parse().unwrap_or(0);
-        if length > MOST {
+        // (A piece of a file a page sends may be larger, and given longer to come over a slow network.)
+        let piece = path.starts_with("/v1/send/piece?");
+        if length > if piece { nearby::page::PIECE } else if path == "/v1/send/offer" { MOST_OFFER } else { MOST } {
             return Ok(());
+        }
+        if piece {
+            by.set(std::time::Instant::now() + PIECE_ARRIVING);
         }
         while body.len() < length {
             let came = more(&mut stream)?;
@@ -673,7 +746,7 @@ impl Helper {
             let (status, answer) = if !self.config.remote {
                 (403, json!({ "error": "the remote is off" }))
             } else if method != "POST" || !kept.as_deref().is_some_and(|kept| sign::is_key(given, kept)) {
-                journal::note(format!("refused {method} {path} from {}: not the night key", stream.peer_addr().map_or_else(|_| "?".into(), |from| from.ip().to_string())));
+                journal::note(format!("refused {method} {path} from {}: not the night key", peer(&stream).map_or_else(|| "?".into(), |from| from.to_string())));
                 (401, json!({ "error": "forged" }))
             } else {
                 let on = serde_json::from_slice::<Value>(&body).ok().and_then(|asked| asked.get("on").and_then(Value::as_bool));
@@ -690,12 +763,7 @@ impl Helper {
                 }
             };
             let answer = answer.to_string();
-            return write!(stream, "HTTP/1.1 {status} {}
-Content-Type: application/json
-Content-Length: {}
-Connection: close
-
-{answer}", if status == 200 { "OK" } else { "Error" }, answer.len());
+            return write!(stream, "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", if status == 200 { "OK" } else { "Error" }, answer.len());
         }
         // The page a phone's browser controls this PC from (a phone with no
         // app for it): anyone's to fetch, for it holds nothing; what it
@@ -706,22 +774,36 @@ Connection: close
         }
         let nonce = header("x-glance-nonce");
         let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
-        let here = stream.peer_addr().is_ok_and(|from| from.ip().is_loopback());
+        let here = peer(&stream).is_some_and(|from| from.is_loopback());
         let (status, answer, secret) = match self.admit(&request, here, header("x-glance-browser") == "1") {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
             Err((refused, secret)) => {
                 // (Not of now is how every phone's first asking of a run is refused: nothing to note.)
                 if refused != sign::Refused::Stale {
-                    journal::note(format!("refused {method} {} from {}: {refused:?}", path.chars().take(40).collect::<String>(), stream.peer_addr().map_or_else(|_| "?".into(), |from| from.ip().to_string())));
+                    journal::note(format!("refused {method} {} from {}: {refused:?}", path.chars().take(40).collect::<String>(), peer(&stream).map_or_else(|| "?".into(), |from| from.to_string())));
                 }
                 (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now(), "session": self.session }), secret)
             }
+            // A piece of what this PC sends a page: its bytes, signed as any answer is.
+            Ok(admitted) if method == "POST" && path == "/v1/take/piece" => {
+                let (status, bytes) = match self.take_piece(&body, &admitted.key) {
+                    Ok(bytes) => (200, bytes),
+                    Err((status, error)) => (status, json!({ "error": error }).to_string().into_bytes()),
+                };
+                let reason = if status == 200 { "OK" } else { "Error" };
+                let signed = sign::answer(&admitted.secret, nonce, status, &bytes);
+                write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/octet-stream\r\nX-Glance-Sign: {signed}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len())?;
+                return stream.write_all(&bytes);
+            }
             Ok(admitted) => {
-                let done = self.act(method, path, &body, &admitted.key);
-                // What was asked to be done, and how it went (not each look, nor each step of a slider: how loud, how bright).
+                let done = self.act(method, path, &body, &admitted.key, peer(&stream).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into()));
+                // What was asked to be done, and how it went (not each look, nor each step of a slider: how loud, how
+                // bright; nor a file's pieces, nor what is sent, which is the user's own).
                 let slid = path == "/v1/volume" || (path == "/v1/monitor" && body.windows(10).any(|part| part == b"brightness"));
-                if method == "POST" && !(slid && done.is_ok()) {
-                    journal::note(format!("asked {path} {}: {}", String::from_utf8_lossy(&body), done.as_ref().map_or_else(|(_, error)| error.as_str(), |_| "done")));
+                let sent = path.starts_with("/v1/send/");
+                if method == "POST" && !(slid && done.is_ok()) && !(path.starts_with("/v1/send/piece?") && done.is_ok()) {
+                    let what = if sent { String::new() } else { String::from_utf8_lossy(&body).into_owned() };
+                    journal::note(format!("asked {} {what}: {}", path.split('?').next().unwrap_or_default(), done.as_ref().map_or_else(|(_, error)| error.as_str(), |_| "done")));
                 }
                 match done {
                     Ok(answer) => (200, answer, Some(admitted.secret)),
@@ -780,16 +862,62 @@ fn unescaped(text: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Where the page for a phone's browser is: none while this PC is on no network.
-fn page(config: &Config) -> Option<String> {
-    Some(format!("http://{}:{}/", address()?, config.port))
+/// The phone paired by `key`, as kept.
+fn paired(key: &str) -> Result<Phone, (u16, String)> {
+    Config::load().phones.into_iter().find(|phone| !key.is_empty() && phone.key == key).ok_or((403, "not a paired phone".to_string()))
 }
 
+/// Where a connection comes from (an address of IPv4 as itself, not as the IPv6 socket that took it holds it).
+fn peer(stream: &TcpStream) -> Option<std::net::IpAddr> {
+    stream.peer_addr().ok().map(|from| from.ip().to_canonical())
+}
+
+/// The addresses a phone may reach this PC at: those of each network that leads beyond this PC, its IPv6 address
+/// first (see `nearby::discover::addresses`). Looked at once in a while (phones ask for them every few seconds).
+fn addresses_now() -> Vec<std::net::IpAddr> {
+    static SEEN: Mutex<Option<(std::time::Instant, Vec<std::net::IpAddr>)>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap();
+    if let Some((_, addresses)) = seen.as_ref().filter(|(at, _)| at.elapsed() < ADDRESSES_EVERY) {
+        return addresses.clone();
+    }
+    let mut addresses = Vec::new();
+    for address in nearby::discover::addresses().into_iter().filter(|address| address.routed) {
+        if !addresses.contains(&address.address) {
+            addresses.push(address.address);
+        }
+    }
+    *seen = Some((std::time::Instant::now(), addresses.clone()));
+    addresses
+}
+
+/// How long the addresses looked at stand.
+const ADDRESSES_EVERY: Duration = Duration::from_secs(15);
+
+/// How many addresses the pairing code carries beside the one in its link (each makes the code denser to read).
+const OTHER_ADDRESSES: usize = 3;
+
 /// What a phone needs to pair, as the link its QR code holds, the same for the app and for a phone's camera: the
-/// page's address (where this PC is: the app takes it from there, a browser opens the page), then, after the `#` (which
-/// a browser keeps to itself: it is never sent), the key offered to the phone that takes it and this PC's name.
-fn pairing(config: &Config, key: &str) -> String {
-    format!("{}#k={key}&n={}", page(config).unwrap_or_default(), escaped(&config.name))
+/// page's address (where this PC is: the app takes it from there, a browser opens the page: by IPv6 where `v6` is
+/// asked and this PC has an IPv6 address, else by IPv4), then, after the `#` (which a browser keeps to itself: it is
+/// never sent), the key offered to the phone that takes it, this PC's name and its other addresses (for the app to
+/// try where the link's does not answer, as from another network). None while this PC is on no network.
+fn pairing(config: &Config, key: &str, v6: bool) -> Option<String> {
+    let all = addresses_now();
+    let v4 = address().and_then(|address| address.parse().ok()).or_else(|| all.iter().copied().find(std::net::IpAddr::is_ipv4));
+    let host = if v6 { all.iter().copied().find(std::net::IpAddr::is_ipv6).or(v4) } else { v4.or_else(|| all.first().copied()) }?;
+    Some(pairing_link(host, config.port, key, &config.name, &all))
+}
+
+/// The pairing link for this PC at `host` on `port` (see `pairing`), the addresses in `all` but `host` after it.
+fn pairing_link(host: std::net::IpAddr, port: u16, key: &str, name: &str, all: &[std::net::IpAddr]) -> String {
+    let at = match host {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+    };
+    let others: Vec<String> = all.iter().filter(|address| **address != host).take(OTHER_ADDRESSES).map(|address| address.to_string()).collect();
+    // (As they are: an address has neither `&` nor `=`, and escaped they made the code denser.)
+    let others = if others.is_empty() { String::new() } else { format!("&a={}", others.join(",")) };
+    format!("http://{at}:{port}/#k={key}&n={}{others}", escaped(name))
 }
 
 /// What this PC calls itself, asking its own helper (see `Helper::admit`).
@@ -867,14 +995,18 @@ fn main() -> std::io::Result<()> {
             Config::withdraw(&std::env::args().nth(3).unwrap_or_default())?;
             return Ok(());
         }
-        // glance-remote pair [cells]: a pairing offered, as its link (for the app and a phone's browser alike). With
+        // glance-remote pair [cells] [v6]: a pairing offered, as its link (for the app and a phone's browser alike, the
+        // browser sent to this PC's IPv6 address with "v6": see `pairing`). With
         // "cells", the offer's name comes first (what it is taken back by: see `pair withdraw`), and the link's QR code
         // follows the link as rows of 1 and 0 (for Glance to draw); without, it follows drawn in the console's
         // characters, to be scanned off the screen (written to a file, the key in it was left on the disk).
         Some("pair") => {
             let asked = |word: &str| std::env::args().skip(2).any(|given| given == word);
+            let link_for = |key: &str| pairing(&config, key, asked("v6")).ok_or_else(|| std::io::Error::other("this PC is on no network"));
+            // (On no network, no pairing is offered: there is no address to offer it at.)
+            link_for("")?;
             let (key, id) = Config::offer()?;
-            let link = pairing(&config, &key);
+            let link = link_for(&key)?;
             if asked("cells") {
                 say!("{id}");
                 say!("{link}");
@@ -1187,7 +1319,8 @@ fn main() -> std::io::Result<()> {
         Config::change(|config| config.darkened = dark)?;
     }
     display::watch();
-    let listener = TcpListener::bind(("0.0.0.0", config.port)).inspect_err(|error| journal::note(format!("port {} cannot be listened on: {error}", config.port)))?;
+    // (Over IPv6 as over IPv4: a phone on another network, as across a campus, reaches this PC by its IPv6 address.)
+    let listener = nearby::run::listening(config.port).inspect_err(|error| journal::note(format!("port {} cannot be listened on: {error}", config.port)))?;
     // A phone that has lost this PC (its address changed) asks the whole
     // network for it by its key's name: answered with proof of the key,
     // from the address this PC has now.
@@ -1289,7 +1422,7 @@ fn main() -> std::io::Result<()> {
     }
     for stream in listener.incoming().flatten() {
         // (One for whom there is no room, or no thread to be had, is hung up on.)
-        let Some(caller) = stream.peer_addr().ok().and_then(|from| helper.room(from.ip())) else { continue };
+        let Some(caller) = peer(&stream).and_then(|from| helper.room(from)) else { continue };
         let helper = helper.clone();
         let _ = std::thread::Builder::new().spawn(move || {
             let _caller = caller;
@@ -1301,6 +1434,41 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A helper of `config`, as `main` makes one (nothing started with it).
+    fn helper(config: super::Config) -> std::sync::Arc<super::Helper> {
+        use std::sync::Mutex;
+        std::sync::Arc::new(super::Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(None), keys: Mutex::new(None), phones: Mutex::new((None, Vec::new())), config, state: Mutex::default(), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session: "s".into(), callers: Mutex::default() })
+    }
+
+    /// What `helper` answers `request`, sent to it over the loopback as it came.
+    fn answered(helper: &std::sync::Arc<super::Helper>, request: &[u8]) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut asking = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (served, _) = listener.accept().unwrap();
+        let serving = helper.clone();
+        let done = std::thread::spawn(move || serving.serve(served));
+        asking.write_all(request).unwrap();
+        let mut answer = Vec::new();
+        asking.read_to_end(&mut answer).unwrap();
+        done.join().unwrap().unwrap();
+        answer
+    }
+
+    /// The night key's answer is HTTP as any other: its head's lines ended by CR LF, then a blank line, then the body.
+    #[test]
+    fn the_night_key_is_answered_in_http() {
+        let mut config = super::Config::default();
+        config.remote = false;
+        let helper = helper(config);
+        let answer = answered(&helper, b"POST /v1/night/key HTTP/1.1\r\nX-Glance-Key: 00\r\nContent-Length: 11\r\n\r\n{\"on\":true}");
+        let answer = String::from_utf8(answer).unwrap();
+        let (head, body) = answer.split_once("\r\n\r\n").expect("a head, a blank line, a body");
+        assert!(head.starts_with("HTTP/1.1 403 Error\r\n"), "{head:?}");
+        assert!(!head.replace("\r\n", "").contains('\n'), "{head:?}");
+        assert_eq!(body, r#"{"error":"the remote is off"}"#);
+    }
+
     /// OpenRGB run by the sensors starts with this helper: that it has its lights dark, or none yet, is not how they
     /// are to be. One running as this helper starts otherwise is the user's, and says how they are.
     #[test]
@@ -1341,6 +1509,21 @@ mod tests {
         assert_eq!(super::escaped("a b"), "a%20b");
         // What is no number stays as it is.
         assert_eq!(super::unescaped("%zz%4"), "%zz%4");
+    }
+
+    /// The pairing link opens the page at the address chosen (an IPv6 one in brackets), and carries the others after
+    /// the `#`, as few as the code is to hold, the link's own not among them.
+    #[test]
+    fn the_pairing_link_carries_the_other_addresses() {
+        let v6: std::net::IpAddr = "2601:40f:4401:1d9e::5b68".parse().unwrap();
+        let v4: std::net::IpAddr = "10.0.0.19".parse().unwrap();
+        let more: Vec<std::net::IpAddr> = ["192.168.56.1", "172.20.0.1", "10.1.2.3"].iter().map(|text| text.parse().unwrap()).collect();
+        let all = [vec![v6, v4], more].concat();
+        let by_v4 = super::pairing_link(v4, 47631, "ab", "书房", &all);
+        assert_eq!(by_v4, "http://10.0.0.19:47631/#k=ab&n=%E4%B9%A6%E6%88%BF&a=2601:40f:4401:1d9e::5b68,192.168.56.1,172.20.0.1");
+        let by_v6 = super::pairing_link(v6, 47631, "ab", "PC", &[v6, v4]);
+        assert_eq!(by_v6, "http://[2601:40f:4401:1d9e::5b68]:47631/#k=ab&n=PC&a=10.0.0.19");
+        assert_eq!(super::pairing_link(v4, 47631, "ab", "PC", &[v4]), "http://10.0.0.19:47631/#k=ab&n=PC");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::discover::Discovery;
 use super::link::{Command, Link};
-use super::{send, tls, Added, Adding, Event, Info, Kept, Receiver, Told};
+use super::{page, send, tls, Added, Adding, Event, Info, Kept, Receiver, Told};
 use crate::config::Config;
 
 /// How often a receiving gone quiet is looked for.
@@ -77,6 +77,11 @@ pub fn start(name: &str) -> std::io::Result<()> {
         std::thread::sleep(EXPIRE_EVERY);
         receiver.expire();
         receiver.let_go_quiet();
+        receiver.pages.expire();
+        // (The sendings over, a page's among them, let go of: a sending to a device holds its own while it goes.)
+        if let Some(running) = RUNNING.get() {
+            running.jobs.lock().unwrap().retain(|_, job| Arc::strong_count(job) > 1);
+        }
     });
     discovery.announce();
     let reaching = RUNNING.get().expect("nearby transfer is running").clone();
@@ -103,7 +108,7 @@ pub const PORTS_TRIED: [u16; 2] = [super::OWN_PORT, super::PORT];
 
 /// A listener on `port` (none: one of the system's choosing) for devices over IPv6 and IPv4 alike (an IPv6 socket that
 /// takes IPv4 too), where this PC has IPv6; else over IPv4.
-fn listening(port: u16) -> std::io::Result<TcpListener> {
+pub fn listening(port: u16) -> std::io::Result<TcpListener> {
     use socket2::{Domain, Socket, Type};
     let both = || -> std::io::Result<TcpListener> {
         let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
@@ -141,6 +146,12 @@ impl Running {
                         running.told.tell(Event::Added { job, outcome });
                     }
                 });
+            }
+            // (To a page open, it waits for the page to fetch it: see `page::offer`.)
+            Command::Send { job, to, files } if page::phone_of(&to).is_some() => {
+                let going = Arc::new(send::Job::default());
+                self.jobs.lock().unwrap().insert(job, going.clone());
+                self.receiver.pages.offer(page::phone_of(&to).expect("a page's"), job, &files, going, self.told.clone());
             }
             Command::Send { job, to, files } => {
                 let Some(device) = self.receiver.devices_now().into_iter().find(|device| device.fingerprint.eq_ignore_ascii_case(&to)) else {
@@ -308,6 +319,45 @@ pub fn phone_trusted(phone: &str, fingerprint: &str, alias: &str) -> std::io::Re
         trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last, since, phone: Some(phone.to_string()), glance: true });
     })?;
     Ok(true)
+}
+
+/// The page of phone `phone` (named `name`) asked how this PC is, from `address`: it may be sent to while it is open
+/// (the devices told anew as it opens). What it is offered meanwhile (see `page::offered_to`).
+pub fn page_asked(phone: &str, name: &str, address: std::net::IpAddr) -> Option<serde_json::Value> {
+    let running = RUNNING.get()?;
+    if running.receiver.pages.seen(phone, name, address) {
+        running.receiver.tell_devices();
+    }
+    running.receiver.pages.offered_to(phone)
+}
+
+/// A piece of what this PC sends the page of `phone` (see `page::Pages::piece_of`).
+pub fn piece_for_page(phone: &str, job: u64, at: usize, from: u64) -> Result<Vec<u8>, super::Refused> {
+    RUNNING.get().ok_or((404, "no such sending"))?.receiver.pages.piece_of(phone, job, at, from)
+}
+
+/// What this PC sends the page of `phone`, turned down there.
+pub fn page_refused(phone: &str, job: u64) {
+    if let Some(running) = RUNNING.get() {
+        running.receiver.pages.refused(phone, job);
+    }
+}
+
+/// What a page sends, as `sender` (see `Receiver::offered_by_page`): refused where nearby transfer does not run.
+pub fn from_page(sender: super::Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<page::Begun, super::Refused> {
+    RUNNING.get().ok_or((403, "not receiving"))?.receiver.offered_by_page(sender, files, words, direct)
+}
+
+/// A piece of what a page sends (see `Receiver::piece`).
+pub fn piece_from_page(session: &str, file: &str, from: &str, at: u64, bytes: &[u8]) -> Result<(), super::Refused> {
+    RUNNING.get().ok_or((403, "not receiving"))?.receiver.piece(session, file, from, at, bytes)
+}
+
+/// What a page sends, given up by it (see `Receiver::cancelled_by`).
+pub fn page_cancelled(session: &str, from: &str) {
+    if let Some(running) = RUNNING.get() {
+        running.receiver.cancelled_by(session, from);
+    }
 }
 
 /// What a paired phone is told of nearby transfer: whether it is on, where and as whom this PC receives (its

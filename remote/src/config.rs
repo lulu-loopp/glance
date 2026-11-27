@@ -209,7 +209,8 @@ pub struct Phone {
     pub control: bool,
     /// What it sends nearby is taken without asking (off, it is asked about as any device's is).
     pub files: bool,
-    /// It is a phone's browser, paired by the remote's page (it sends nothing nearby).
+    /// It is a phone's browser, paired by the remote's page (it sends and is sent files over the phone channel, while
+    /// its page is open: see `nearby::page`).
     pub web: bool,
 }
 

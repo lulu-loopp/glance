@@ -37,6 +37,16 @@ class LanTest {
     }
 
     @Test
+    fun theOtherAddressesComeWithThePc() {
+        val pc = Lan.pairing("http://10.0.0.19:47631/#k=$key&n=PC&a=2601:40f:4401:1d9e::5b68,192.168.56.1")
+        assertEquals(listOf("2601:40f:4401:1d9e::5b68", "192.168.56.1"), pc?.addresses)
+        // Names (which would be looked up), the address asked at, and what is no address are left out.
+        val odd = Lan.pairing("http://10.0.0.19:47631/#k=$key&a=router.lan,10.0.0.19,,fd00::5%eth0,::1")
+        assertEquals(listOf("::1"), odd?.addresses)
+        assertEquals(emptyList<String>(), Lan.pairing("http://10.0.0.19:47631/#k=$key")?.addresses)
+    }
+
+    @Test
     fun aLinkWithNoNameIsNamedByItsAddress() {
         assertEquals("10.0.0.2", Lan.pairing("http://10.0.0.2:47321/#k=$key")?.name)
         // (A name of control characters only is none.)

@@ -476,6 +476,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         failure = null
         // Kept for the list of devices in the settings, which says what this PC lets this phone do.
         Pcs.knowControl(context, pc.key, answer.control)
+        // And where else it may be reached, to look for it there should it answer no more where it is.
+        if (answer.addresses.isNotEmpty()) Pcs.knowAddresses(context, pc.key, answer.addresses)
         if (!sliding) answer.volume?.let { level = it.toFloat() }
     }
 
@@ -517,7 +519,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         while (true) {
             if (busy == null) ask("/v1/state")
             // Not answering where it was: looked for on the network, in case its address has changed.
-            if (silent != null) withContext(Dispatchers.IO) { pc.find() }?.takeIf { it != pc.host }?.let(moved)
+            if (silent != null) withContext(Dispatchers.IO) { pc.find(Pcs.addressesOf(context, pc.key)) }?.takeIf { it != pc.host }?.let(moved)
             // (Sooner while it is not yet said to be away.)
             delay(if (silent != null && failure == null) 400 else 1500)
         }

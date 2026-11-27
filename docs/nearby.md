@@ -112,7 +112,8 @@ LocalSend app does that for now).
   The firewall rule "Glance Nearby" is the helper's program-scoped rule: TCP from any address on its own ports
   53320–53329 (any address since adding by address, see "By address"), TCP from the local subnet on any other port
   (it receives on one of the system's where all of its own are taken), and UDP 53317 from the local subnet. The
-  phones' port stays the local subnet's alone. The sensors make both rules anew as they start, so an earlier Glance's rules become
+  phones' port ("Glance Remote") takes TCP from any address and UDP from the local subnet (see "The remote's page
+  and its addresses"). The sensors make both rules anew as they start, so an earlier Glance's rules become
   this one's. The uninstaller removes it with the remote's.
 - **`glance.exe`** serves a named pipe `\\.\pipe\Glance.Nearby.<user SID>`:
   - DACL: the user and SYSTEM only. `PIPE_REJECT_REMOTE_CLIENTS`.
@@ -501,7 +502,7 @@ pills, groups named without counts, no paragraphs of notes under the lists.
     控制本机 and 直接接收文件 with their switches, and 解除配对 ("解除后，该手机需重新添加才能使用") with its button,
     which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制本机，发来的文件也需要重新确认。如需重新使用，
     请再次添加手机。"). The switches and the button stand in the column every row's buttons do (the card's right less
-    its inset). A web-paired phone has no files switch (a page cannot send).
+    its inset). A web-paired phone has the files switch too (its page sends: see "The remote's page" below).
   - 已信任的设备 (only where there are any): "LocalSend · 直接接收文件 · M月D日起" / "Glance 电脑 · …", with 移除, without
     asking (it is asked about again when it sends).
   - 附近发现的设备: what discovery found that is neither: "Glance 手机 · Xiaomi。信任后，它发来的文件直接接收", with 信任.
@@ -509,7 +510,9 @@ pills, groups named without counts, no paragraphs of notes under the lists.
 - **设备**, its stage: "添加手机", "配对后，手机可控制本机，发来的文件也直接接收", a card with 配对码 | 下载 APP.
   - 配对码: the code always shown while the page is (no button to show it), "X 分 XX 秒后刷新" and
     "一部手机配对后立即刷新，离开此页后失效", then the two ways ("安卓手机 / 在 Glance APP 中点“添加电脑”扫描",
-    "iPhone 或未装 APP 的手机 / 用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕"). Neither helper running: "请先开启
+    "iPhone 或未装 APP 的手机 / 用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕"; where this PC has an IPv6 address
+    beside its IPv4 one, the iPhone's name has IPv4 | IPv6 at its end, or under it where the two do not fit, choosing
+    the address the code opens the page at, and its words end "手机与电脑不在同一网段时，改用 IPv6 后再扫描"). Neither helper running: "请先开启
     “手机遥控”或“附近传输”，再添加手机" in the code's square. Not made: "未能生成配对码" with 重试.
   - The offer's life (`Ui::keep_offer`): offered as the page shows with a helper running; offered anew once it has
     lasted ten minutes (`phone::OFFER_LASTS`, the helper's `OFFERED_FOR`) or as a phone takes it (the phone appears in
@@ -622,3 +625,36 @@ pills, groups named without counts, no paragraphs of notes under the lists.
 5. PC: the menu's submenus, "发送到" in the three lists, the strip at the panel's foot for any drag.
 6. Android: the server, discovery, receiving, notifications, settings, the send sheet, the scanner.
 7. Tests both ways, then a live test with the Fold and another PC (the 270KP).
+
+## The remote's page and its addresses (2026-11-27)
+
+A tester asked to connect a phone from another network: the phone needs the remote over IPv6, and an iPhone, which
+has no app, needs files both ways on the page.
+
+- **Every address in the code.** The pairing link carries this PC's other routed addresses after the key:
+  `http://<host>:<port>/#k=<key>&n=<name>&a=<addr>,<addr>` (raw, three at most, so the code stays readable). The
+  host is the IPv4 address, or the IPv6 one as chosen beside the iPhone's step (above). The helper's signed state
+  answers carry `addresses` too, so the app keeps them current.
+- **The phone channel over IPv6.** The remote's listener (port 47631) is dual-stack as the nearby one is, its peers
+  read canonical. Its firewall rule allows TCP from any address (requests are signed with the key a phone paired by,
+  so no one else is answered), opened while the remote or nearby transfer is on.
+- **The app.** A PC keeps the addresses it was told (8 at most, the one it moved from among them). Not reached at its
+  address, it is looked for on the local network as before, then tried at each other address at once (2.5 s).
+- **Files from the page.** `POST /v1/send/offer` (`{files: [{name, size, type}]}` or `{words}`), signed as every
+  request: taken as the phone's files are (its 直接接收文件 switch), else asked about as any device's, never trusted by
+  the answer (a page has no certificate: it is known as `web:<phone id>`). Words come whole. Files then come as
+  `POST /v1/send/piece?s=<session>&f=<file>&at=<offset>`, the body the bytes (512 KB at most, 60 s to arrive), each
+  signed; a piece out of place is refused, one sent again taken as come. Into the inbox as any receiving's (marked as
+  from the Internet, a receipt for Glance). `POST /v1/send/cancel {session}` gives it up, what came of a file going.
+- **Files to the page.** A paired phone's page asking `/v1/state` is open for 8 s: the helper lists it among the
+  devices (`web:<id>`, kind mobile), so Glance lists it among the paired phones in every 发送到 while it is open. A
+  sending to it waits (`Waiting`) and is told in the page's state (`incoming: {job, files: [{id, name, size, type,
+  words}]}`). The page fetches `POST /v1/take/piece {job, file, at}` (the answer the bytes, signed), `Sending` as it
+  does, `Sent` once all is fetched (words alone once told). `POST /v1/take/refuse {job}` refuses it. Not fetched from
+  for 120 s it fails, cancelled from Glance it is told so.
+- **The page.** Two cards outside what the 2 s poll redraws: 发送到电脑 (a box "输入要发送的文字", 选择照片或文件, 发送文字,
+  progress "正在发送 N%" with 取消, then "已发送 N 个文件", "等待电脑确认" where the PC asks, and why not: 电脑已拒绝接收,
+  电脑正在接收其他内容, 文件超出电脑可接收的大小, 电脑未开启附近传输), and 电脑发来 N 个文件 / 电脑发来的文字 (each file's name
+  and size, 拒绝 | 接收, "正在接收 N%", then 保存 per file and a picture shown, "长按图片可存储到照片。" on an iPhone,
+  words with 复制, 关闭). The remote off on the PC, the page says 手机遥控已关闭 and still sends and receives. Android's
+  page offers the app for sharing from other apps and finding the PC as its address changes.

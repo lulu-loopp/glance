@@ -1300,6 +1300,7 @@ enum Field {
     /// What the devices' page's stage shows: the pairing code, or the code that leads to the phone app (see
     /// `Ui::stage_shows`).
     Adding,
+    PairBy,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -1881,6 +1882,8 @@ const CODE: f32 = 248.0;
 const STEPS: f32 = 420.0;
 /// The smallest a QR code's square is drawn there, where the stage is short.
 const CODE_LEAST: f32 = 150.0;
+/// How tall the iPhone's step's name is with the choice of where the pairing code opens the page beside it.
+const PAIR_BY_TALL: f32 = 36.0;
 
 /// A module row being dragged: by how far below the row's top it was
 /// taken, and where the pointer is (document DIPs).
@@ -2241,6 +2244,8 @@ struct Ui {
     offer: Option<(crate::phone::Offer, Instant)>,
     offering: Option<(Instant, std::thread::JoinHandle<Option<crate::phone::Offer>>)>,
     offer_failed: bool,
+    /// The pairing code opens the page at this PC's IPv6 address (for a phone on another network), not its IPv4 one.
+    pair_v6: bool,
     app_code: Option<Option<crate::phone::Code>>,
     app_asked: Option<std::thread::JoinHandle<Option<crate::phone::Code>>>,
     phones: Vec<crate::phone::Phone>,
@@ -2588,6 +2593,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             offer: None,
             offering: None,
             offer_failed: false,
+            pair_v6: false,
             app_code: None,
             app_asked: None,
             phones_written: crate::phone::phones_written(),
@@ -3530,10 +3536,7 @@ impl Ui {
             // (In its card while it opens, is open or closes, as a module's items are.)
             if self.opened(&phone_card(&phone.id)) > 0.0 {
                 rows.push(Row::PhoneMay(phone.id.clone(), crate::phone::May::Control));
-                // (A phone's browser sends nothing.)
-                if !phone.web {
-                    rows.push(Row::PhoneMay(phone.id.clone(), crate::phone::May::Files));
-                }
+                rows.push(Row::PhoneMay(phone.id.clone(), crate::phone::May::Files));
                 rows.push(Row::Unpair(phone.id.clone()));
             }
         }
@@ -4411,7 +4414,7 @@ impl Ui {
                 let (count, title, detail) = match managed {
                     Managed::Phones => (self.phones.len(), (("已配对 ", " 部手机"), ("", " paired phones")), String::new()),
                     Managed::Trusted => {
-                        let count = self.phones.iter().filter(|phone| phone.files && !phone.web).count() + self.known().iter().filter(|known| matches!(known, Known::Trusted(_))).count();
+                        let count = self.phones.iter().filter(|phone| phone.files).count() + self.known().iter().filter(|known| matches!(known, Known::Trusted(_))).count();
                         (count, (("已信任 ", " 台设备"), ("", " trusted devices")), p("已配对的手机自动信任", "Paired phones are trusted"))
                     }
                 };
@@ -4429,7 +4432,7 @@ impl Ui {
                 let name = if phone.name.is_empty() { p("未命名的手机", "Unnamed phone") } else { phone.name.clone() };
                 let mut said = vec![if phone.web { pick(lang, "网页", "Web page") } else { pick(lang, "Glance 手机", "Glance phone") }];
                 said.push(if phone.control { pick(lang, "可控制本机", "Can control this PC") } else { pick(lang, "仅查看状态", "View status only") });
-                if phone.files && !phone.web {
+                if phone.files {
                     said.push(pick(lang, "直接接收文件", "Accepts files automatically"));
                 }
                 (name, said.join(" · "), Vec::new())
@@ -4579,6 +4582,7 @@ impl Ui {
                 [Layout::Card, Layout::Strip].iter().position(|&l| l == settings.overlay.layout),
             ),
             Field::Adding => (pick(lang, "添加方式", "How to add"), vec![s("配对码", "Pairing code"), s("下载 APP", "Get the app")], Some(usize::from(self.stage_shows == CodeFor::App))),
+            Field::PairBy => (pick(lang, "网页地址", "Page address"), vec![s("IPv4", "IPv4"), s("IPv6", "IPv6")], Some(usize::from(self.pair_v6))),
             Field::NearbyOthers => (
                 pick(lang, "来自未信任设备的文件", "Files from untrusted devices"),
                 vec![s("每次询问", "Ask each time"), s("一律拒绝", "Always decline")],
@@ -4738,6 +4742,12 @@ impl Ui {
             // (Not kept: the stage shows the pairing code each time the page is opened.)
             Field::Adding => {
                 self.stage_shows = [CodeFor::Pairing, CodeFor::App][index];
+                self.next_frame = Instant::now();
+                return;
+            }
+            // (Not kept either: the code is offered anew at the address chosen, see `keep_offer`.)
+            Field::PairBy => {
+                self.pair_v6 = index == 1;
                 self.next_frame = Instant::now();
                 return;
             }
@@ -7292,9 +7302,10 @@ You can disconnect here at any time, and the original status line command will b
         // opens and now and then while it shows (one that came since says itself, one that went is forgotten).
         if self.page == Page::Devices {
             let shown = crate::nearby::shown();
-            // (Those trusted, and those added by their addresses, are listed in their own groups.)
+            // (Those trusted, and those added by their addresses, are listed in their own groups, a paired phone's page
+            // open among the phones.)
             let known: Vec<&str> = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter().map(|trusted| trusted.fingerprint.as_str()).chain(nearby.added.iter().map(|added| added.fingerprint.as_str()))).collect();
-            let found: Vec<crate::nearby::Device> = shown.devices.into_iter().filter(|device| !known.iter().any(|known| known.eq_ignore_ascii_case(&device.fingerprint))).collect();
+            let found: Vec<crate::nearby::Device> = shown.devices.into_iter().filter(|device| !crate::nearby::web_page(&device.fingerprint) && !known.iter().any(|known| known.eq_ignore_ascii_case(&device.fingerprint))).collect();
             if found != self.found || shown.trusting != self.trusting {
                 self.found = found;
                 self.trusting = shown.trusting;
@@ -8583,13 +8594,19 @@ You can disconnect here at any time, and the original status line command will b
         let cx = area.x + area.w / 2.0;
         frame.clip(area.x, area.y, area.w, area.h);
         let running = self.remote || self.nearby_on;
+        // The page may be opened at this PC's IPv6 address or its IPv4 one, as chosen under the code.
+        let either = self.stage_shows == CodeFor::Pairing && self.offer.as_ref().is_some_and(|(offer, _)| offer.either);
         // How it is used: by an Android phone, and by an iPhone.
         let steps = match self.stage_shows {
             CodeFor::Pairing => [
                 (pick(lang, "安卓手机", "Android"), pick(lang, "在 Glance APP 中点按“添加电脑”扫描", "In the Glance app, tap Add a PC and scan this code")),
                 (
                     pick(lang, "iPhone 或未装 APP 的手机", "iPhone, or a phone without the app"),
-                    pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕", "Scan with the camera to open the remote in the browser. It can be added to the home screen"),
+                    if either {
+                        pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕。手机与电脑不在同一网段时，改用 IPv6 后再扫描", "Scan with the camera to open the remote in the browser. It can be added to the home screen. If the phone is on another network than this PC, switch to IPv6 first")
+                    } else {
+                        pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕", "Scan with the camera to open the remote in the browser. It can be added to the home screen")
+                    },
                 ),
             ],
             CodeFor::App => [
@@ -8598,7 +8615,17 @@ You can disconnect here at any time, and the original status line command will b
             ],
         };
         let steps_w = STEPS.min(area.w - 48.0).max(120.0);
-        let steps_tall: f32 = steps.iter().map(|(_, words)| 20.0 + frame.gfx.wrapped_height(words, hint, steps_w - 28.0) + 12.0).sum();
+        // (The iPhone's step names where the page is opened, where it may be at either address: beside its name, its row as
+        // tall as that choice; under it, where the two do not fit side by side.)
+        let (_, pair_by, pair_by_chosen) = self.choices(Field::PairBy);
+        let choice_w = self.segmented_width(&pair_by);
+        let beside = frame.gfx.measure(steps[1].0, hint) + 12.0 + choice_w <= steps_w - 28.0;
+        let named_tall = |at: usize| match (either && at == 1, beside) {
+            (false, _) => 20.0,
+            (true, true) => PAIR_BY_TALL,
+            (true, false) => 20.0 + PAIR_BY_TALL,
+        };
+        let steps_tall: f32 = steps.iter().enumerate().map(|(at, (_, words))| named_tall(at) + frame.gfx.wrapped_height(words, hint, steps_w - 28.0) + 12.0).sum();
         let under = match self.stage_shows {
             CodeFor::Pairing if running && self.offer_failed => 32.0,
             CodeFor::Pairing if self.offer.is_some() => 42.0,
@@ -8680,11 +8707,19 @@ You can disconnect here at any time, and the original status line command will b
         y += 24.0 * gaps;
         let width = steps_w;
         let (left, words_left) = (cx - width / 2.0, cx - width / 2.0 + 28.0);
-        for (name, words) in steps {
-            frame.icon(Icon::Smartphone, Point { x: left + 8.0, y: y + 10.0 }, 16.0, palette.text2);
-            text_centred(frame, name, hint, palette.text, words_left, y + 10.0, width - 28.0, Align::Start);
-            frame.text_wrapped(words, hint, palette.text2, words_left, y + 20.0, width - 28.0);
-            y += 20.0 + frame.gfx.wrapped_height(words, hint, width - 28.0) + 12.0;
+        for (at, (name, words)) in steps.into_iter().enumerate() {
+            let named = named_tall(at);
+            let cy = if either && at == 1 && beside { y + named / 2.0 } else { y + 10.0 };
+            frame.icon(Icon::Smartphone, Point { x: left + 8.0, y: cy }, 16.0, palette.text2);
+            // Where the page is opened: at the end of the iPhone's name, or under it.
+            if either && at == 1 {
+                let (right, choice_cy) = if beside { (left + width, cy) } else { (words_left + choice_w, y + 20.0 + PAIR_BY_TALL / 2.0) };
+                self.segmented(frame, palette, Field::PairBy, &pair_by, pair_by_chosen, true, right, choice_cy, f32::INFINITY, now, &hovered);
+            }
+            let room = if either && at == 1 && beside { width - 28.0 - choice_w - 12.0 } else { width - 28.0 };
+            text_centred(frame, name, hint, palette.text, words_left, cy, room, Align::Start);
+            frame.text_wrapped(words, hint, palette.text2, words_left, y + named, width - 28.0);
+            y += named + frame.gfx.wrapped_height(words, hint, width - 28.0) + 12.0;
         }
         frame.unclip();
     }
@@ -8714,16 +8749,18 @@ You can disconnect here at any time, and the original status line command will b
             self.offer = offer.map(|offer| (offer, asked_at));
             self.next_frame = now;
         }
-        let lapsed = self.offer.as_ref().is_some_and(|(offer, at)| now.duration_since(*at) >= crate::phone::OFFER_LASTS || self.phones.iter().any(|phone| phone.id == offer.id));
+        // (Or at an address other than the one chosen, where this PC has both.)
+        let lapsed = self.offer.as_ref().is_some_and(|(offer, at)| now.duration_since(*at) >= crate::phone::OFFER_LASTS || self.phones.iter().any(|phone| phone.id == offer.id) || (offer.either && offer.v6 != self.pair_v6));
         if self.offering.is_none() && !self.offer_failed && (self.offer.is_none() || lapsed) {
             let before = self.offer.take().map(|(offer, _)| offer.id);
+            let v6 = self.pair_v6;
             self.offering = Some((
                 now,
                 std::thread::spawn(move || {
                     if let Some(id) = before {
                         crate::phone::withdraw(&id);
                     }
-                    crate::phone::offer()
+                    crate::phone::offer(v6)
                 }),
             ));
             self.next_frame = now;
@@ -9394,7 +9431,7 @@ mod pictures {
                     .collect()
             })
             .collect();
-        ui.offer = Some((crate::phone::Offer { id: "made up".into(), code: crate::phone::Code(cells) }, Instant::now() - Duration::from_secs(98)));
+        ui.offer = Some((crate::phone::Offer { id: "made up".into(), code: crate::phone::Code(cells), v6: false, either: true }, Instant::now() - Duration::from_secs(98)));
         // Found nearby: two trusted already (not listed among those found), and two not.
         let found = |fingerprint: &str, alias: &str, model: &str, kind: &str, glance: bool| crate::nearby::Device { fingerprint: fingerprint.into(), alias: alias.into(), model: Some(model.into()), kind: Some(kind.into()), glance };
         crate::nearby::pretend_devices(vec![
@@ -9439,6 +9476,8 @@ mod pictures {
                 ("address-listed", Page::Nearby, "listed"),
                 ("address-added", Page::Nearby, "added"),
                 ("address-devices", Page::Devices, ""),
+                // (The pairing code at the least size, its page's address chosen beside the iPhone's step, in English.)
+                ("pairing-narrow-en", Page::Devices, "narrow-en"),
             ] {
                 // (At the least the window is sized to, too: an address the longest IPv6 one is, written whole.)
                 let (w, h) = if case.starts_with("narrow") { MIN_SIZE } else { SIZE };

@@ -4,6 +4,9 @@
 use super::*;
 use std::sync::Condvar;
 
+#[path = "page_tests.rs"]
+mod page_tests;
+
 /// What Glance would be told, and how it answers when asked: at once, or after the user thought `thinks` (none, where
 /// the asking was withdrawn meanwhile).
 #[derive(Default)]

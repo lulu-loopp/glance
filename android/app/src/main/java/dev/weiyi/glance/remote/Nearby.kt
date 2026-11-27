@@ -61,7 +61,7 @@ object Nearby {
         } catch (failure: Failure) {
             // Not answered, or answered by one that does not know this phone's key (another machine at its old
             // address): the PC itself is looked for.
-            val host = pc.find()?.takeIf { it != pc.host } ?: return null
+            val host = pc.find(Pcs.addressesOf(context, pc.key))?.takeIf { it != pc.host } ?: return null
             Pcs.move(context, pc.key, host)
             val moved = pc.copy(host = host)
             try { Receiving(moved, moved.said("/v1/nearby")) } catch (failure: Failure) { return null }

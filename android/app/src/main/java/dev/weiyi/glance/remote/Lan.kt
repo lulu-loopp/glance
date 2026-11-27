@@ -244,8 +244,17 @@ object Lan {
         if (host.isBlank() || host.any { it.isWhitespace() || it == '/' || it == '@' }) return null
         val at = port?.takeIf { it in 1..65535 } ?: return null
         val key = said["k"]?.lowercase()?.takeIf { it.length == 64 && it.all { c -> c.isDigit() || c in 'a'..'f' } } ?: return null
-        return Pc(host, at, key, said["n"]?.let(::shownName)?.takeIf { it.isNotEmpty() } ?: host)
+        // (The PC's other addresses, as a newer one says them: to try where [host] does not answer.)
+        val others = said["a"].orEmpty().split(',').filter { isAddress(it) && it != host }.distinct().take(MOST_ADDRESSES)
+        return Pc(host, at, key, said["n"]?.let(::shownName)?.takeIf { it.isNotEmpty() } ?: host, others)
     }
+
+    /** The most addresses kept for a PC beside the one it is asked at. */
+    const val MOST_ADDRESSES = 8
+
+    /** Whether [text] is an address as it is written (IPv4 or IPv6), not a name, which would be looked up. */
+    fun isAddress(text: String): Boolean =
+        text.isNotEmpty() && text.length <= 45 && (text.all { it.isDigit() || it == '.' } || (text.contains(':') && text.all { it.isDigit() || it == ':' || it == '.' || it.lowercaseChar() in 'a'..'f' }))
 
     /** The fields of a query (or of what follows a `#` as one), each unescaped. */
     private fun fields(query: String): Map<String, String> = query.split('&').filter { it.isNotEmpty() }.associate { field ->

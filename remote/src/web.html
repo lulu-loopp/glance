@@ -62,6 +62,15 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .ask div { background: var(--card2); border-radius: 24px; padding: 24px 24px 12px; max-width: 328px; display: grid; gap: 12px; }
 .ask h3 { margin: 0; font-size: 19px; } .ask p { margin: 0; color: var(--dim); font-size: 14px; line-height: 1.6; }
 .ask nav { display: flex; justify-content: flex-end; gap: 8px; } .ask nav button { font: inherit; font-weight: 600; background: none; border: 0; color: var(--dim); height: 44px; padding: 0 12px; } .ask nav .do { color: var(--bad); }
+/* Files to and from the PC: a button as the app's (a pill, 44 high), what is typed in a well of the card's second shade, how far a sending is as a line under it. */
+.go { font: inherit; font-weight: 600; color: var(--ink); background: var(--card2); border: 0; border-radius: 99px; min-height: 44px; padding: 0 18px; text-decoration: none; display: inline-grid; place-items: center; white-space: nowrap; }
+.go.main { background: var(--accent); color: #1a0d07; } .go:disabled { opacity: .4; }
+textarea { font: inherit; color: var(--ink); background: var(--card2); border: 0; border-radius: 12px; padding: 12px; min-height: 88px; resize: vertical; width: 100%; }
+textarea::placeholder { color: var(--faint); }
+.ends { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap; } .ends .note { margin-right: auto; }
+.bar { height: 4px; border-radius: 99px; background: var(--card2); overflow: hidden; } .bar i { display: block; height: 100%; width: var(--done, 0%); background: var(--accent); transition: width .2s; }
+.thing { display: grid; gap: 8px; } .thing img { max-width: 100%; max-height: 320px; border-radius: 12px; justify-self: start; }
+.thing p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; } .thing a.link { color: var(--accent); overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -69,6 +78,8 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 <div class="card" id="unpaired" hidden><b id="unpaired-title"></b><span class="note" id="unpaired-how"></span></div>
 <div class="card rig" id="rig" hidden><div id="rig-drawing"></div><div class="reads" id="rig-reads"></div></div>
 <main id="main" hidden></main>
+<section class="card" id="came" hidden><h2 id="came-title"></h2><div class="rows" id="came-list"></div><div class="bar" id="came-bar" hidden><i></i></div><div class="ends"><span class="note" id="came-said"></span><button class="text" type="button" id="came-refuse"></button><button class="go main" type="button" id="came-take"></button><button class="go" type="button" id="came-close"></button></div></section>
+<section class="card" id="send" hidden><h2 id="send-title"></h2><textarea id="words"></textarea><div class="bar" id="send-bar" hidden><i></i></div><div class="ends"><span class="note" id="send-said"></span><button class="text" type="button" id="send-cancel"></button><button class="go" type="button" id="send-pick"></button><button class="go main" type="button" id="send-words"></button></div><input type="file" id="send-files" multiple hidden></section>
 <a class="card app" id="app" href="https://glancepc.com/app" hidden><b id="app-title"></b><span class="note" id="app-how"></span></a>
 <script>
 "use strict";
@@ -120,24 +131,33 @@ const called = /iPhone|iPad/.test(navigator.userAgent) ? (/iPad/.test(navigator.
 // ---- asking the PC: signed, as the app signs (over what is asked, when, by which browser, for which run of the PC's helper, and a number used once); the PC signs its answer in turn, and none that is not signed is believed
 // What the PC said of itself when it last refused a request as not of now: which run of its helper it is, and how far its clock is from this one's (seconds).
 const told = { session: "", ahead: 0 };
-const signed = (parts, body) => hex(hmac(unhex(key), new TextEncoder().encode(parts.map(part => part + "\n").join("") + body)));
-async function ask(path, body, again = true) {
-  const method = body ? "POST" : "GET", sent = body ? JSON.stringify(body) : "", time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
+const encoder = new TextEncoder();
+const signed = (parts, body) => hex(hmac(unhex(key), joined(encoder.encode(parts.map(part => part + "\n").join("")), body)));
+// What is asked is JSON, or bytes as they are (a piece of a file sent: see `send`). The answer is JSON, or where `bytes` is asked, bytes (a piece of a file the PC sends: see `take`).
+async function ask(path, body, again = true, bytes = false) {
+  const method = body ? "POST" : "GET", sent = body instanceof Uint8Array ? body : encoder.encode(body ? JSON.stringify(body) : ""), time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
   const sign = signed([method, path, time, nonce, phone, name, told.session], sent);
   const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name, "X-Glance-Browser": "1" } });
-  const text = await answer.text();
-  const own = signed(["answer", nonce, String(answer.status)], text) === answer.headers.get("X-Glance-Sign");
+  const got = new Uint8Array(await answer.arrayBuffer());
+  const own = signed(["answer", nonce, String(answer.status)], got) === answer.headers.get("X-Glance-Sign");
   let json = {};
-  try { json = JSON.parse(text); } catch (e) {}
+  if (!bytes || !answer.ok) try { json = JSON.parse(new TextDecoder().decode(got)); } catch (e) {}
   // (Refused by one that does not know the key: there is nothing it could sign with. Whatever else is not signed is not the PC's.)
   if (!own) throw Object.assign(new Error(answer.status === 401 ? "forged" : "unsigned"), { status: answer.status === 401 ? 401 : 0 });
   // Not of now, as the PC has it: asked again, for the run it says it is and by its clock.
   if (answer.status === 401 && json.error === "stale" && again) {
     told.session = String(json.session || ""); told.ahead = (Number(json.time) || 0) - Math.floor(Date.now() / 1000);
-    return ask(path, body, false);
+    return ask(path, body, false, bytes);
   }
   if (!answer.ok) throw Object.assign(new Error(json.error || String(answer.status)), { status: answer.status });
-  return json;
+  return bytes ? got : json;
+}
+// The same, asked again where the network let it down (not where the PC answered): a piece sent or fetched twice is taken once.
+async function askAgain(path, body, bytes) {
+  for (let tries = 1; ; tries++) {
+    try { return await ask(path, body, true, bytes); }
+    catch (error) { if (error.status || tries === 3) throw error; await new Promise(done => setTimeout(done, 800 * tries)); }
+  }
 }
 
 // ---- the page
@@ -161,6 +181,7 @@ function failed(error) {
 function unpaired(title) {
   main.hidden = true;
   document.getElementById("rig").hidden = true;
+  document.getElementById("send").hidden = document.getElementById("came").hidden = true;
   document.getElementById("unpaired").hidden = false;
   document.getElementById("unpaired-title").textContent = title;
   document.getElementById("unpaired-how").textContent = t("在电脑的 Glance 设置中打开“设备”页，用相机扫描其中的配对码。", "On the PC, open the Devices page in Glance Settings and scan the pairing code there with the camera.");
@@ -195,10 +216,20 @@ function slide(value, least, enabled, done) {
 function card(title, right) { const c = el("div", "card"), h = el("h2", "", title); if (right) h.append(right); c.append(h); return c; }
 
 function draw() {
+  if (!state) return;
+  transferDrawn();
   // (Not under a finger that is sliding something, nor under a question.)
-  if (!state || holding) return;
+  if (holding) return;
   document.getElementById("name").textContent = state.name || "Glance";
   main.hidden = false; main.textContent = "";
+  // The remote off on the PC (it runs for nearby sharing alone): nothing of it to show or press, files still sent.
+  if (state.remote === false) {
+    document.getElementById("rig").hidden = true;
+    const c = card(t("手机遥控已关闭", "Phone remote is off"));
+    c.append(el("span", "note", t("电脑已关闭手机遥控，仍可在此与电脑互传文件。", "Phone remote is off on the PC. Files can still be sent here.")));
+    main.append(c);
+    return;
+  }
   const night = state.night, screen = state.screen !== false, lights = state.lights;
   const reads = state.reads;
   // The PC drawn, and under it what its parts read (none, where Glance is not running there to read them).
@@ -414,17 +445,188 @@ function rig(host) {
 }
 const drawn = rig(document.getElementById("rig-drawing"));
 
+// ---- files and words, to the PC and from it (see `nearby::page` in the helper): each sent or fetched a piece at a time, every piece signed
+const PIECE = 512 * 1024;
+const $ = id => document.getElementById(id);
+const plural = (n, one, many) => n === 1 ? one : many;
+function sized(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let at = 0, size = bytes;
+  while (size >= 1024 && at < units.length - 1) { size /= 1024; at++; }
+  return (at ? size.toFixed(size < 10 ? 1 : 0) : size) + " " + units[at];
+}
+const bar = (id, done, of) => { const line = $(id); line.hidden = of == null; if (of != null) line.style.setProperty("--done", (of ? Math.min(100, done / of * 100) : 100) + "%"); };
+// Why the PC did not take what was sent, as it says (see `Receiver::offered_by_page`).
+function why(error) {
+  const said = error.message || "";
+  if (said === "not receiving") return t("电脑未开启附近传输", "Nearby sharing is off on the PC");
+  if (said === "refused" || said === "not taken from devices not trusted") return t("电脑已拒绝接收", "The PC declined");
+  if (said.startsWith("another")) return t("电脑正在接收其他内容", "The PC is receiving something else");
+  if (said === "a file too large" || said === "no room for them") return t("文件超出电脑可接收的大小", "Too large for the PC to receive");
+  if (said === "too many files") return t("一次选择的文件过多", "Too many files at once");
+  return error.status ? t("发送失败", "Couldn't send") : t("无法连接", "Can't connect");
+}
+
+// Sending: what is picked goes at once, a file after another, each a piece after another.
+// (What is said of the last sending shows while the PC receives. While it does not, that is said instead.)
+const sending = { going: false, stop: false, session: "", said: "" };
+function sendSaid(text) { sending.said = text; sendDrawn(); }
+function sendDrawn() {
+  const near = state && state.nearby, on = !!(near && near.on);
+  $("send").hidden = !near;
+  $("send-pick").disabled = $("send-words").disabled = !on || sending.going;
+  $("words").disabled = !on;
+  $("send-cancel").hidden = !sending.going;
+  $("send-said").textContent = on || sending.going ? sending.said : t("电脑未开启附近传输", "Nearby sharing is off on the PC");
+}
+async function send(files, words) {
+  const near = state.nearby || {};
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (near.most_files && files.length > near.most_files) return sendSaid(t(`一次最多发送 ${near.most_files} 个文件`, `Up to ${near.most_files} files at once`));
+  if ((near.most_file != null && files.some(file => file.size > near.most_file)) || (near.most_sending != null && total > near.most_sending)) return sendSaid(t("文件超出电脑可接收的大小", "Too large for the PC to receive"));
+  Object.assign(sending, { going: true, stop: false, session: "" });
+  sendDrawn();
+  sendSaid(state.files === false ? t("等待电脑确认", "Waiting for the PC to accept") : t("正在发送", "Sending"));
+  try {
+    const begun = await ask("/v1/send/offer", words != null ? { words } : { files: files.map(file => ({ name: file.name, size: file.size, type: file.type })) });
+    if (words != null) {
+      $("words").value = "";
+      sendSaid(t("文字已发送", "Text sent"));
+      return;
+    }
+    sending.session = begun.session;
+    let done = 0;
+    bar("send-bar", 0, total);
+    for (let at = 0; at < files.length; at++) {
+      const file = files[at];
+      // (An empty file is sent as one empty piece.)
+      for (let from = 0; from === 0 || from < file.size; ) {
+        if (sending.stop) throw new Error("cancelled");
+        const piece = new Uint8Array(await file.slice(from, from + PIECE).arrayBuffer());
+        await askAgain(`/v1/send/piece?s=${sending.session}&f=${begun.files[at]}&at=${from}`, piece);
+        from += piece.length; done += piece.length;
+        bar("send-bar", done, total);
+        sendSaid(t(`正在发送 ${Math.floor(done / (total || 1) * 100)}%`, `Sending ${Math.floor(done / (total || 1) * 100)}%`));
+        if (!file.size) break;
+      }
+    }
+    sendSaid(t(`已发送 ${files.length} 个文件`, plural(files.length, "Sent 1 file", `Sent ${files.length} files`)));
+  } catch (error) {
+    if (sending.session) ask("/v1/send/cancel", { session: sending.session }).catch(() => {});
+    sendSaid(error.message === "cancelled" ? t("已取消发送", "Sending canceled") : why(error));
+  } finally {
+    sending.going = false;
+    bar("send-bar", 0, null);
+    sendDrawn();
+  }
+}
+
+// What the PC sends here: shown as it is offered, fetched once it is taken, each file then to be saved (a picture shown too). Words come whole with the offer.
+const came = { job: null, files: [], urls: {}, taking: false, over: false, closed: false };
+function copy(text, button) {
+  const copied = () => { button.textContent = t("已复制", "Copied"); };
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(copied, () => {}); return; }
+  // (A page not served over HTTPS has no clipboard of its own: what is copied is selected and copied as by hand.)
+  const area = el("textarea");
+  area.value = text; area.setAttribute("readonly", ""); area.style.position = "fixed"; area.style.opacity = "0";
+  document.body.append(area); area.select(); area.setSelectionRange(0, text.length);
+  if (document.execCommand("copy")) copied();
+  area.remove();
+}
+function cameDrawn() {
+  const offer = state && state.incoming;
+  if (offer && offer.job !== came.job) {
+    Object.values(came.urls).forEach(url => URL.revokeObjectURL(url));
+    Object.assign(came, { job: offer.job, files: offer.files || [], urls: {}, taking: false, over: false, closed: false });
+    $("came-said").textContent = "";
+    cameListed();
+  }
+  const files = came.files.filter(file => file.words == null), taken = files.every(file => came.urls[file.id]);
+  $("came").hidden = came.job == null || came.closed;
+  $("came-take").hidden = $("came-refuse").hidden = !files.length || taken || came.over;
+  $("came-take").disabled = $("came-refuse").disabled = came.taking;
+  $("came-close").hidden = !(taken || came.over) || came.taking;
+}
+function cameListed() {
+  const list = $("came-list");
+  list.textContent = "";
+  const words = came.files.filter(file => file.words != null), files = came.files.filter(file => file.words == null);
+  $("came-title").textContent = files.length ? t(`电脑发来 ${files.length} 个文件`, plural(files.length, "1 file from the PC", `${files.length} files from the PC`)) : t("电脑发来的文字", "Text from the PC");
+  for (const file of words) {
+    const row = el("div", "row"), thing = el("div", "thing"), button = el("button", "text", t("复制", "Copy"));
+    thing.append(/^https?:\/\/\S+$/.test(file.words.trim()) ? Object.assign(el("a", "link", file.words.trim()), { href: file.words.trim(), target: "_blank", rel: "noopener" }) : el("p", "", file.words));
+    button.onclick = () => copy(file.words, button);
+    row.append(thing, button); list.append(row);
+  }
+  for (const file of files) {
+    const row = el("div", "row"), thing = el("div", "thing"), url = came.urls[file.id];
+    const text = el("div");
+    text.append(el("b", "", file.name.split("/").pop()), el("small", "", sized(file.size)));
+    thing.append(text);
+    if (url && /^image\//.test(file.type)) thing.append(Object.assign(el("img"), { src: url, alt: file.name }));
+    row.append(thing);
+    if (url) row.append(Object.assign(el("a", "go", t("保存", "Save")), { href: url, download: file.name.split("/").pop() }));
+    list.append(row);
+  }
+  if (files.some(file => came.urls[file.id] && /^image\//.test(file.type)) && /iPhone|iPad/.test(navigator.userAgent)) list.append(el("span", "note small", t("长按图片可存储到照片。", "Touch and hold a picture to save it to Photos.")));
+}
+async function take() {
+  came.taking = true;
+  cameDrawn();
+  const job = came.job, files = came.files.filter(file => file.words == null), total = files.reduce((sum, file) => sum + file.size, 0);
+  let done = 0;
+  bar("came-bar", 0, total);
+  try {
+    for (const file of files) {
+      const parts = [];
+      for (let at = 0; at < file.size; ) {
+        const piece = await askAgain("/v1/take/piece", { job, file: file.id, at }, true);
+        if (!piece.length) throw Object.assign(new Error("short"), { status: 500 });
+        parts.push(piece); at += piece.length; done += piece.length;
+        bar("came-bar", done, total);
+        $("came-said").textContent = t(`正在接收 ${Math.floor(done / (total || 1) * 100)}%`, `Receiving ${Math.floor(done / (total || 1) * 100)}%`);
+      }
+      came.urls[file.id] = URL.createObjectURL(new Blob(parts, { type: file.type || "application/octet-stream" }));
+    }
+    $("came-said").textContent = "";
+  } catch (error) {
+    came.over = true;
+    $("came-said").textContent = error.status === 404 || error.status === 410 ? t("电脑已取消发送", "The PC canceled sending") : error.status ? t("接收失败", "Couldn't receive") : t("无法连接", "Can't connect");
+  }
+  came.taking = false;
+  bar("came-bar", 0, null);
+  cameListed();
+  cameDrawn();
+}
+
+function transferDrawn() { sendDrawn(); cameDrawn(); }
+$("send-title").textContent = t("发送到电脑", "Send to PC");
+$("words").placeholder = t("输入要发送的文字", "Text to send");
+$("send-pick").textContent = t("选择照片或文件", "Choose photos or files");
+$("send-words").textContent = t("发送文字", "Send text");
+$("send-cancel").textContent = t("取消", "Cancel");
+$("send-pick").onclick = () => $("send-files").click();
+$("send-files").onchange = () => { const files = Array.from($("send-files").files || []); $("send-files").value = ""; if (files.length) send(files, null); };
+$("send-words").onclick = () => { const words = $("words").value; if (words.trim()) send([], words); };
+$("send-cancel").onclick = () => { sending.stop = true; };
+$("came-take").textContent = t("接收", "Receive");
+$("came-refuse").textContent = t("拒绝", "Decline");
+$("came-close").textContent = t("关闭", "Close");
+$("came-take").onclick = take;
+$("came-refuse").onclick = () => { came.over = true; came.closed = true; cameDrawn(); ask("/v1/take/refuse", { job: came.job }).catch(() => {}); };
+$("came-close").onclick = () => { came.closed = true; cameDrawn(); };
+
 // ---- how the PC is, asked while the page is looked at
 async function look() {
   if (busy || document.hidden) return;
   try { const answer = await ask("/v1/state"); if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); } }
   catch (error) { if (!busy) failed(error); }
 }
-// The app, offered to an Android phone (it has what a page cannot: sending files, the PC's notices).
+// The app, offered to an Android phone (it has what a page cannot: sharing from other apps, finding the PC where its address changed).
 if (/Android/.test(navigator.userAgent)) {
   document.getElementById("app").hidden = false;
   document.getElementById("app-title").textContent = t("下载 Glance APP", "Get the Glance app");
-  document.getElementById("app-how").textContent = t("安装后可在手机与电脑之间互传文件，并使用完整的遥控功能。", "With the app, the phone and PC can send each other files, and every remote control is available.");
+  document.getElementById("app-how").textContent = t("安装后可从相册或其他应用直接分享到电脑，电脑地址变化时也能自动找到。", "With the app, you can share to the PC from Photos or any other app, and it finds the PC when its address changes.");
 }
 if (!key) { said(""); unpaired(t("此浏览器尚未与电脑配对", "This browser is not paired with the PC")); }
 else { said(t("正在连接…", "Connecting…")); look(); setInterval(look, 2000); document.addEventListener("visibilitychange", look); }
