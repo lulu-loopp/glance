@@ -153,10 +153,13 @@ static PLAYS: AtomicBool = AtomicBool::new(false);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
-/// Files it shows carried off it by Glance (see `carry`), by their places among those it shows: their places drawn as
-/// left; put back in them, springing back to their size (since when).
-static AWAY_CELLS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-static LANDED_CELLS: Mutex<Vec<(usize, Instant)>> = Mutex::new(Vec::new());
+/// A file it shows among others: the files it listed (see `Looker::listing_key`), and its place among them.
+pub type Cell = (u64, usize);
+
+/// Files it shows carried off it by Glance (see `carry`): their places drawn as left; put back in them, springing back
+/// to their size (since when). (Gone into another folder meanwhile, the same place there is another file's.)
+static AWAY_CELLS: Mutex<Vec<Cell>> = Mutex::new(Vec::new());
+static LANDED_CELLS: Mutex<Vec<(Cell, Instant)>> = Mutex::new(Vec::new());
 
 /// The longer side at most of the file it shows by itself as it is carried off it (DIPs): its picture made as small.
 const LIFTED_SIDE: f32 = 120.0;
@@ -304,8 +307,8 @@ pub fn tiles(owner: HWND, tiles: Vec<(u64, RECT)>) {
     }
 }
 
-/// The files it shows carried off it now (by their places among those it shows: see `carry`), or none.
-pub fn carry_cells(cells: Vec<usize>) {
+/// The files it shows carried off it now (see `carry`), or none.
+pub fn carry_cells(cells: Vec<Cell>) {
     let changed = std::mem::replace(&mut *AWAY_CELLS.lock().unwrap(), cells.clone()) != cells;
     if changed {
         carried_changed();
@@ -313,7 +316,7 @@ pub fn carry_cells(cells: Vec<usize>) {
 }
 
 /// Files it shows carried off it put back in their places at `at`: no longer carried, springing back to their size.
-pub fn land_cells(cells: Vec<usize>, at: Instant) {
+pub fn land_cells(cells: Vec<Cell>, at: Instant) {
     if cells.is_empty() {
         return;
     }
@@ -326,7 +329,7 @@ pub fn land_cells(cells: Vec<usize>, at: Instant) {
 }
 
 /// Files it shows carried off it put back in their places as they were drawn coming there: drawn full at once.
-pub fn settle_cells(cells: &[usize]) {
+pub fn settle_cells(cells: &[Cell]) {
     if cells.is_empty() {
         return;
     }
@@ -335,9 +338,9 @@ pub fn settle_cells(cells: &[usize]) {
     carried_changed();
 }
 
-/// How the file in the place `cell` among those it shows is held (carried off; else `pressed`, as it is to be dragged
-/// out; else not), and when it was put back in its place, while it springs back to its size.
-fn cell_held(cell: usize, pressed: bool) -> (Held, Option<Instant>) {
+/// How the file `cell` is held (carried off; else `pressed`, as it is to be dragged out; else not), and when it was
+/// put back in its place, while it springs back to its size.
+fn cell_held(cell: Cell, pressed: bool) -> (Held, Option<Instant>) {
     let held = if AWAY_CELLS.lock().unwrap().contains(&cell) {
         Held::Away
     } else if pressed {
@@ -349,15 +352,15 @@ fn cell_held(cell: usize, pressed: bool) -> (Held, Option<Instant>) {
     (held, landed)
 }
 
-/// Whether the file in the place `cell` is carried off it now.
+/// Whether the file `cell` is carried off it now.
 #[cfg(test)]
-pub fn carried_off(cell: usize) -> bool {
+pub fn carried_off(cell: Cell) -> bool {
     matches!(cell_held(cell, false).0, Held::Away)
 }
 
-/// Whether the file in the place `cell` springs back into it now, put back.
+/// Whether the file `cell` springs back into its place now, put back.
 #[cfg(test)]
-pub fn landing_in(cell: usize) -> bool {
+pub fn landing_in(cell: Cell) -> bool {
     cell_held(cell, false).1.is_some()
 }
 
@@ -388,7 +391,7 @@ pub struct Lift {
     window: isize,
     look: Look,
     drag: u64,
-    cell: Option<usize>,
+    cell: Option<Cell>,
 }
 
 impl Lift {
@@ -1167,6 +1170,7 @@ struct Within {
 /// whether they could be read (a folder's), how far scrolled, which picked.
 #[derive(Clone)]
 struct Listing {
+    key: u64,
     members: Vec<Member>,
     rows: bool,
     readable: bool,
@@ -1937,7 +1941,19 @@ impl Looker {
             Body::Folder { members, rows, readable } => (members.clone(), *rows, *readable),
             _ => return None,
         };
-        Some(Listing { members, rows, readable, scroll: self.grid_scroll, picked: self.picked })
+        Some(Listing { key: self.listing_key(), members, rows, readable, scroll: self.grid_scroll, picked: self.picked })
+    }
+
+    /// What the files shown together now are known by: the thing shown, and each file gone into down to them. (A
+    /// file's place among them means that file only with it: see `Cell`.)
+    fn listing_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.items.get(self.at).map(|item| item.key).hash(&mut hasher);
+        for within in &self.within {
+            within.member.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// The file shown: the thing's, the file of its group shown by itself, the folder last gone into.
@@ -2197,9 +2213,28 @@ impl Looker {
         }
         self.motion = Motion::Resting;
         self.slid = None;
-        if !self.plays_on(now) {
+        if !self.frames_wanted(now) {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), FRAME);
+            }
+        }
+    }
+
+    /// Whether it is drawn each frame at rest: what plays moves on, or files put back spring back into their places.
+    fn frames_wanted(&self, now: Instant) -> bool {
+        self.plays_on(now) || cells_landing()
+    }
+
+    /// How the files it shows are carried off it changed (see `carry_cells`): drawn so where it is up, and each frame
+    /// as they spring back into their places.
+    fn carried(&mut self) {
+        if !self.up() {
+            return;
+        }
+        self.draw();
+        if cells_landing() {
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
             }
         }
     }
@@ -2661,7 +2696,7 @@ impl Looker {
             let lit = resting && self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == Hit::Cell(place));
             let picked = listing.picked == Some(place);
             // (Pressed to be dragged out, drawn in a little; carried off, its place drawn as left: see `carry`.)
-            let (held, landed) = cell_held(place, live && self.drag_from.is_some() && self.pressed == Some(Hit::Cell(place)));
+            let (held, landed) = cell_held((listing.key, place), live && self.drag_from.is_some() && self.pressed == Some(Hit::Cell(place)));
             if listing.rows {
                 self.paint_row(frame, theme, at, member, lit, picked, held, landed);
             } else {
@@ -3245,13 +3280,14 @@ impl Looker {
     fn lift(&mut self, frame: &Frame, shape: Shape) -> Option<Lift> {
         let (cell, drag, (px_x, px_y)) = self.lifting.take()?;
         let theme = Theme::new(self.skin, self.dark);
-        let (place, parts) = match cell {
+        let (place, parts, key) = match cell {
             Some(member) => {
                 let listing = self.listing()?;
                 let (cells, _) = self.cells(&listing);
                 let body = self.body_at(shape.size);
                 let cell = *cells.get(member)?;
                 let at = Rect { x: body.x + cell.x, y: body.y + cell.y - self.grid_scroll, w: if listing.rows { body.w } else { cell.w }, h: cell.h };
+                let key = listing.key;
                 let member = listing.members.get(member)?;
                 let recorder = Recorder::new(frame, 1.0, (-at.x, -at.y));
                 if listing.rows {
@@ -3259,7 +3295,7 @@ impl Looker {
                 } else {
                     self.paint_face(&recorder, &theme, at, &member.path, member.seen.is_some());
                 }
-                (at, recorder.parts())
+                (at, recorder.parts(), Some(key))
             }
             None => {
                 let path = self.shown_path()?.to_path_buf();
@@ -3275,13 +3311,14 @@ impl Looker {
                 let at = Rect { x: x - w / 2.0, y: y - h / 2.0, w, h };
                 let recorder = Recorder::new(frame, 1.0, (-at.x, -at.y));
                 self.paint_face(&recorder, &theme, at, &path, seen);
-                (at, recorder.parts())
+                (at, recorder.parts(), None)
             }
         };
         let on = on_screen(place, shape.at, self.scale, self.monitor);
         let over = on_screen(Rect { x: 0.0, y: 0.0, w: shape.at.w, h: shape.at.h }, shape.at, self.scale, self.monitor);
         let from = POINT { x: self.monitor.left + px_x, y: self.monitor.top + px_y };
         let look = Look::of(self.skin, self.dark).frosted(self.frost, true);
+        let cell = cell.zip(key).map(|(place, key)| (key, place));
         Some(Lift { parts, size: (place.w, place.h), at: POINT { x: on.left, y: on.top }, from, px: self.scale, over, window: self.hwnd.0 as isize, look, drag, cell })
     }
 
@@ -3521,6 +3558,9 @@ impl Looker {
     /// show (its clock, its track by a pixel), or its controls or slider change. Its timer stopped once nothing does.
     fn frame_due(&mut self) {
         if !self.up() {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), FRAME);
+            }
             return;
         }
         if !matches!(self.motion, Motion::Resting) {
@@ -3536,14 +3576,13 @@ impl Looker {
         let track = f64::from(self.track_at.map_or(0.0, |track| track.w * self.scale));
         let gone_on = at.floor() != drawn_at.floor() || (length > 0.0 && (at - drawn_at).abs() / length * track >= 0.5);
         // (Files put back in their places drawn as they spring back to their size: see `land_cells`.)
-        let landing = cells_landing();
-        if fresh || gone_on || landing || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
+        if fresh || gone_on || cells_landing() || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
             self.draw();
         }
         if self.hides_pointer() {
             unsafe { SetCursor(None) };
         }
-        if !self.plays_on(now) && !landing {
+        if !self.frames_wanted(now) {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), FRAME);
             }
@@ -3911,12 +3950,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // How the files it shows are carried off it changed (see `carry_cells`): drawn so, and on as they spring back
         // into their places.
         CARRIED => {
-            with(Looker::draw);
-            if cells_landing() {
-                unsafe {
-                    let _ = SetTimer(Some(hwnd), FRAME, FRAME_MS, None);
-                }
-            }
+            with(Looker::carried);
             LRESULT(0)
         }
         // A click on it leaves the keyboard where it was.
@@ -4442,6 +4476,81 @@ mod tests {
         assert_eq!(between(a, b, 1.0), b);
         assert_eq!(between(a, b, 0.5), Rect { x: 50.0, y: 25.0, w: 110.0, h: 60.0 });
         assert_eq!(shrunk(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 }, 0.5), Rect { x: 25.0, y: 12.5, w: 50.0, h: 25.0 });
+    }
+
+    /// A file carried off the files shown together leaves its place among them only: gone into a folder of them as
+    /// it is carried, the file in the same place there is drawn as it is. (The place alone was taken for the file:
+    /// the folder's first row was drawn as left, carried off the folder holding it.)
+    #[test]
+    fn a_place_carried_off_is_that_of_the_files_it_was_among() {
+        let _holding = crate::ui::view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (reads, _read) = std::sync::mpsc::channel();
+        let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None, given: None };
+        let outer = (0..3).map(|place| member(&format!("{place}"), place < 2)).collect::<Vec<_>>();
+        let inner = || Some(Read { body: Body::Folder { members: vec![member(r"0\x.txt", false)], rows: true, readable: true }, about: None });
+        let mut looker = Looker::new(HWND::default(), reads);
+        looker.items = vec![Item { key: 1, title: "a".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a")), from: None, open: None, copy: None, pastes: false, given: None }];
+        (looker.read, looker.measured, looker.asked) = (vec![Some(Read { body: Body::Folder { members: outer, rows: true, readable: true }, about: None })], vec![None], vec![true]);
+        let held = |looker: &Looker| cell_held((looker.listing().expect("files shown together").key, 0), false).0;
+        let outside = looker.listing().unwrap().key;
+        carry_cells(vec![(outside, 0)]);
+        let carried_there = held(&looker);
+        looker.within.push(Within { member: 0, picked: None, scroll: 0.0, member_read: vec![inner(), None, None], member_asked: vec![true; 3] });
+        let inside_first = held(&looker);
+        let first = looker.listing().unwrap().key;
+        looker.within[0] = Within { member: 1, picked: None, scroll: 0.0, member_read: vec![None, inner(), None], member_asked: vec![true; 3] };
+        let second = looker.listing().unwrap().key;
+        carry_cells(Vec::new());
+        assert_eq!(carried_there, Held::Away);
+        assert_eq!(inside_first, Held::Not, "the first file in the folder gone into drawn as carried off");
+        assert!(outside != first && first != second, "two folders' files known alike");
+    }
+
+    /// While files put back spring back into their places it is drawn each frame, coming to rest as it does, and never
+    /// while it is gone: put away as a file it showed was carried off it, it drew no more, its frame timer still set
+    /// as the file was put back, or set as it came to rest though the file had not yet sprung back.
+    #[test]
+    fn it_is_drawn_each_frame_while_files_spring_back_and_never_while_gone() {
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, PM_REMOVE, PeekMessageW, WM_TIMER};
+        /// The window gone as the test ends, failed or not.
+        struct Made(HWND);
+        impl Drop for Made {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let _holding = crate::ui::view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let made = Made(unsafe { make_window() }.expect("a window"));
+        let (reads, _read) = std::sync::mpsc::channel();
+        let mut looker = Looker::new(made.0, reads);
+        // (Its volume's slider long shut, as it is at rest.)
+        looker.slider_open.2 = Instant::now() - 2 * SLIDER_FOR;
+        let ticks = || {
+            std::thread::sleep(Duration::from_millis(60));
+            let mut message = MSG::default();
+            let mut any = false;
+            while unsafe { PeekMessageW(&mut message, Some(made.0), WM_TIMER, WM_TIMER, PM_REMOVE) }.as_bool() {
+                any |= message.wParam.0 == FRAME;
+            }
+            any
+        };
+        let now = Instant::now();
+        land_cells(vec![(9, 0)], now);
+        let springing = looker.frames_wanted(now);
+        looker.carried();
+        let ticked_carried = ticks();
+        unsafe {
+            let _ = SetTimer(Some(made.0), FRAME, 1, None);
+        }
+        looker.frame_due();
+        let ticked_due = ticks();
+        settle_cells(&[(9, 0)]);
+        let at_rest = looker.frames_wanted(Instant::now());
+        drop(looker);
+        assert!(springing, "not drawn each frame as a file springs back into its place");
+        assert!(!at_rest);
+        assert!(!ticked_carried, "drawn each frame while gone, a file put back");
+        assert!(!ticked_due, "its frame timer kept while gone");
     }
 
     /// The look's window is its whole screen's, above all: shown before its sheet is first drawn (its drawing failed,

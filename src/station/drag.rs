@@ -362,7 +362,9 @@ mod tests {
         let data = super::shell_data(&[]).expect("a data object");
         let source: IDropSource = super::Source { data, said: Default::default(), plain: Default::default() }.into();
         let (arrow, no) = unsafe { (LoadCursorW(None, IDC_ARROW).unwrap(), LoadCursorW(None, IDC_NO).unwrap()) };
-        let go_on = || unsafe { source.QueryContinueDrag(false.into(), windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS(0)) };
+        let go_on = || {
+            let _ = unsafe { source.QueryContinueDrag(false.into(), windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS(0)) };
+        };
         unsafe { SetCursor(Some(no)) };
         assert_eq!(unsafe { source.GiveFeedback(super::DROPEFFECT_COPY) }, DRAGDROP_S_USEDEFAULTCURSORS);
         go_on();

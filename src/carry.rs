@@ -34,15 +34,16 @@ use crate::widget::{faded, lifted_shadow, GOING_BACK, LEANING, LEAN_PULLED, LEAN
 
 /// Where a thing carried was lifted off (its room): a thing on a station's lane (a thing on it, copied lately, a file
 /// come lately: what it is pressed as), or a file the look shows (see `ui::look`): one of the files it shows together
-/// by its place among them, else the one it shows by itself (none: what it shows stays where it is).
+/// by the files it listed then (see `look::Cell`) and its place among them, else the one it shows by itself (none: what
+/// it shows stays where it is).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Off {
     Tile(Hit),
-    Look(Option<usize>),
+    Look(Option<crate::ui::look::Cell>),
 }
 
 /// The rooms of `rooms` on a station's lane, and the places of those the look shows.
-fn split(rooms: &[Off]) -> (Vec<Hit>, Vec<usize>) {
+fn split(rooms: &[Off]) -> (Vec<Hit>, Vec<crate::ui::look::Cell>) {
     let mut tiles = Vec::new();
     let mut cells = Vec::new();
     for room in rooms {
@@ -1085,18 +1086,18 @@ mod tests {
         let _device = crate::ui::gfx::held().unwrap();
         let _holding = crate::ui::view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let gfx = Rc::new(Gfx::new().expect("graphics"));
-        let cell = Off::Look(Some(2));
+        let cell = Off::Look(Some((7, 2)));
         let tile = Tile { hit: cell, parts: Vec::new(), home: None, size: (40.0, 30.0), at: POINT { x: 0, y: 0 } };
         let look = crate::ui::menu::Look::of(crate::ui::theme::Skin::Paper, false);
         begin(&gfx, Lifted { carried: vec![cell], count: 1, drag: 0, tiles: vec![tile], from: POINT { x: 5, y: 5 }, px: 1.0, over: RECT::default(), window: HWND::default(), look });
         // (Each read as it is, what is carried put back before any is judged: a carry held as the test fails is let go
         // of as its thread ends, after what it draws with.)
-        let carried = (crate::ui::look::carried_off(2), crate::ui::look::carried_off(1), crate::ui::view::away_tiles());
+        let carried = (crate::ui::look::carried_off((7, 2)), crate::ui::look::carried_off((7, 1)), crate::ui::look::carried_off((8, 2)), crate::ui::view::away_tiles());
         put_back(&[]);
-        let put_back = (crate::ui::look::carried_off(2), crate::ui::look::landing_in(2));
-        crate::ui::look::settle_cells(&[2]);
-        let settled = crate::ui::look::landing_in(2);
-        assert_eq!(carried, (true, false, Vec::new()), "carried off: its place left, the station's as they were");
+        let put_back = (crate::ui::look::carried_off((7, 2)), crate::ui::look::landing_in((7, 2)));
+        crate::ui::look::settle_cells(&[(7, 2)]);
+        let settled = crate::ui::look::landing_in((7, 2));
+        assert_eq!(carried, (true, false, false, Vec::new()), "carried off: its place left (not the same place of other files listed), the station's as they were");
         assert_eq!(put_back, (false, true), "put back: springing back into its place");
         assert!(!settled);
     }
