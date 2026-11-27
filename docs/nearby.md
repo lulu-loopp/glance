@@ -109,8 +109,10 @@ LocalSend app does that for now).
 - **`glance-remote.exe`** (runs as the user, never elevated) stays the only process that opens a port. It gains the
   module `nearby`: discovery, the HTTPS server, the client, and the trusted list. It runs while the remote or nearby
   transfer is on (its task starts it at sign-in). Nearby on with the remote off starts it with phone control off.
-  The firewall rule "Glance Nearby" is the helper's program-scoped rule, local subnet only: TCP (any port: it
-  receives on another where 53317 is taken), and UDP 53317. The uninstaller removes it with the remote's.
+  The firewall rule "Glance Nearby" is the helper's program-scoped rule: TCP from any address (any port: it
+  receives on another where 53317 is taken; any address since adding by address, see "By address"), and UDP 53317
+  from the local subnet only. The sensors make both rules anew as they start, so an earlier Glance's rules become
+  this one's. The uninstaller removes it with the remote's.
 - **`glance.exe`** serves a named pipe `\\.\pipe\Glance.Nearby.<user SID>`:
   - DACL: the user and SYSTEM only. `PIPE_REJECT_REMOTE_CLIENTS`.
   - The helper connects and keeps the connection. Messages are JSON lines.
@@ -121,10 +123,13 @@ LocalSend app does that for now).
     - `progress {session, done, of}` (at most 10 a second)
     - `came {session, files[{file, name, size}]}`
     - `failed {session, why}`
-    - `devices [{id, alias, kind, ...}]` (when the list changes)
+    - `devices {devices, added}` (when either changes: the devices heard lately, and those added by address)
+    - `me {port, addresses[{network, address}]}` (where other devices reach this PC, see "By address")
+    - `added {job, outcome}` (how an `add` went)
     - `sent {job, ...}` (progress and result of a send)
   - Glance → helper: `send {job, to, files[{path, name}]}` (a folder sent as its files, each named by its place in
-    it, "folder/inner/file", as LocalSend names them), `cancel {job}`, `pin {job, pin}`, `announce`
+    it, "folder/inner/file", as LocalSend names them), `cancel {job}`, `pin {job, pin}`, `announce`,
+    `add {job, address}`
   - Everything the helper says is data, checked: a `came` file must be a plain name, and the file must exist in the
     station folder.
 - **Glance not running.** Unknown devices are refused, trusted ones taken. The helper writes each finished session
@@ -326,6 +331,46 @@ Seen on an OPPO Find N6 (ColorOS 17, 2026-11-12): with the app optimised for the
 the background (the log's `Hans ... blackList` holds its uid), and the content-trigger job, every constraint met, is
 never made ready (`Restricted due to: unknown:104`, then `Ready: false` with each flag true) till the app is opened,
 when the photo goes at once. Hence the question above.
+
+## By address (2026-11-27)
+
+Campus networks rarely pass multicast between their subnets, so two PCs on one campus do not find each other nearby.
+Knowing the other's address, either adds it by hand. Hole punching was looked at and left: it always needs a public
+rendezvous (EasyTier, iroh and libp2p all keep public nodes) and fails on symmetric NAT. IPv6 needs none: campus
+networks (CERNET's `2001:da8::/32`) give global addresses with no address translation, so the IPv6 address is
+recommended. Not solved: Wi-Fi client isolation, a dorm router passing no IPv6, NAT66 at a campus edge.
+
+- **Listening.** The helper listens on `[::]` with `IPV6_V6ONLY` off (IPv4 arrives mapped, read canonical), on
+  53320, else a port of the system's. The phone's server binds the wildcard (dual-stack already).
+- **Addresses told.** Per network that has a gateway (WSL's and Hyper-V's own networks have none and are left out),
+  its IPv6 address meant to last (global `2000::/3`, DAD preferred, by hand or DHCP first, then one made of the
+  card's address, then the longest valid: never a privacy address), then its IPv4 ones. Glance devices say them in
+  `info`/`register` as `addresses: ["[2001:da8::1]:53320", "10.0.0.2:53320"]`, so each keeps all of the other's.
+  The phone tells its Wi-Fi and Ethernet ones (LinkAddress flags: not temporary, not deprecated).
+- **Adding.** An address typed (IPv4 or IPv6, a port or not, brackets or not, nothing looked up) is tried on the port
+  given, else 53320 then 53317, stopping at the first that answers anything. Over HTTPS with any certificate taken,
+  its fingerprint kept: `GET /info` must name that fingerprint (else it is no LocalSend device). Where no TLS is
+  spoken, plain HTTP and the fingerprint as said. Then this PC itself is refused, the device registered with (it
+  finds this PC as one announced), and kept (`nearby.added` in the helper's config: fingerprint, alias, model, kind,
+  glance, https, addresses, since) unless known already (found, added, a paired phone). Outcomes: `added
+  {fingerprint, known}`, `not_an_address`, `unreachable`, `not_local_send`, `itself`.
+- **Staying found.** Every 60 s (and on `announce`) each device added is registered with, at its addresses in order
+  till one answers (FRESH is 180 s). A device added is updated only from proven contacts (a certificate presented, or
+  reached pinned): the address it spoke from first, then those it tells, then those known before, 8 at most. What a
+  device only says moves nothing.
+- **Adding is not trusting.** What a device added sends is asked about as any other's.
+- **PC.** 附近传输 has 本机地址 under 接收附近设备的文件 ("其他设备在附近列表中找不到本机时，可输入以下地址添加。跨网段
+  连接时，优先使用 IPv6 地址"), a row per address ("以太网 · IPv6", the address, 复制 → 已复制 for 2 s), the port shown
+  only where it is neither 53320 nor 53317. The pane's "附近的设备" heading has a plus ("按地址添加" as the pointer
+  rests on it) beside refresh, opening a box: "输入对方的 IP 地址", "对方的地址显示在其 Glance 设置的“附近传输”页面中",
+  取消/添加. Tried: "正在连接 X", the field and 添加 greyed. Outcomes: the box closes and the card opens into the
+  list, ringing, or "此设备已在列表中" (its card rings), "IP 地址格式不正确", "该地址为本机地址", or "无法连接到 X" with
+  "请确认对方已开启“接收附近设备的文件”，或改用对方的 IPv6 地址" (no LocalSend there says the same). A card of a
+  device added says its address ("Glance · Windows · 2001:da8::1c"), and "未连接" while it does not answer (Station's
+  发送到 too). 设备 has a group "按地址添加的设备" with 移除.
+- **Phone.** "按地址添加" ends the list of devices to send to (a dialog, "IPv4 或 IPv6 地址", the same outcomes).
+  Devices added not answering are listed as 未连接. The nearby card lists 本机地址 rows with 复制, and 设备 lists those
+  added with 移除.
 
 ## Order of work
 
