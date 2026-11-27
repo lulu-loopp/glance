@@ -1479,6 +1479,8 @@ enum Switch {
     /// Nearby transfer, and whether it shows at the screen's edge (see `Settings::nearby_notice`).
     Nearby,
     NearbyNotice,
+    /// Whether AI tools on this PC may read what Glance knows (see `agent`).
+    Agent,
 }
 
 /// The remote's switches, the lights' program fetched (`lights`) or not, on a laptop or not: the lights set, the
@@ -1735,6 +1737,8 @@ enum Target {
     NetEaseRestart,
     /// Puts Glance in Claude Code's status line (asked first), or takes it out (see `ai::statusline`).
     ClaudeLimits(bool),
+    /// Copies what an AI tool is sent to add Glance's MCP server itself (see `agent::mcp_prompt`).
+    AgentConfig,
     /// Writes one of an AI provider's keys (see `Row::AiKey`), or takes the one given away.
     AiKey(String, usize),
     AiKeyRemove(String, usize),
@@ -1823,6 +1827,8 @@ enum Row {
     Group(&'static str),
     /// NetEase Cloud Music's lyrics plugin (InfLink-rs): how it is, and installing or taking it back.
     NetEase,
+    /// What an AI tool is sent to add Glance's MCP server itself, to be copied (while AI tools may read Glance).
+    AgentConfig,
     /// Claude's limits read through Claude Code's status line: whether they are, and putting Glance there or taking it
     /// out.
     ClaudeLimits,
@@ -2253,6 +2259,8 @@ struct Ui {
     uninstaller: Option<std::path::PathBuf>,
     /// When the diagnostics were last copied.
     copied_at: Option<Instant>,
+    /// When the MCP configuration was last copied.
+    agent_copied_at: Option<Instant>,
     /// The diagnostics being sent (on a thread of its own), and how the
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
@@ -2598,6 +2606,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
+            agent_copied_at: None,
             sending: None,
             sent: None,
             followed: crate::reports::list(),
@@ -3321,6 +3330,11 @@ impl Ui {
                 rows.push(Row::Choice(Field::Language));
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
                 rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden)]);
+                rows.push(Row::Group(pick(self.lang, "AI 工具", "AI tools")));
+                rows.push(Row::Switch(Switch::Agent));
+                if self.settings.agent_interface {
+                    rows.push(Row::AgentConfig);
+                }
                 rows.push(Row::Group(pick(self.lang, "更新", "Updates")));
                 if crate::notice::unread().is_some() {
                     rows.push(Row::Notice);
@@ -4496,6 +4510,14 @@ impl Ui {
                 },
                 vec![(p("添加文件夹", "Add folders"), Target::AddFolder, if self.may_add_folder() && self.choosing_folders.is_none() { Button::Plain } else { Button::Quiet })],
             ),
+            Row::AgentConfig => {
+                let copied = self.agent_copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
+                (
+                    p("连接 AI 工具", "Connect an AI tool"),
+                    p("复制后发送给 AI 工具，即可由其自行完成配置", "Send it to an AI tool, and it sets itself up").to_string(),
+                    vec![(if copied { p("已复制", "Copied") } else { p("复制提示词", "Copy prompt") }, Target::AgentConfig, Button::Plain)],
+                )
+            }
             Row::Guide => (
                 p("使用引导", "Guide"),
                 p("再次查看如何呼出面板、调整布局与使用快捷键", "Shows again how to open panels, arrange them and use the shortcuts"),
@@ -5228,6 +5250,18 @@ impl Ui {
                 };
                 return (p("接收附近设备的文件", "Receive files from nearby devices"), Some(hint), self.nearby_on);
             }
+            // (What they read named, and where it may go from them.)
+            Switch::Agent => {
+                let hint = if self.settings.agent_interface && crate::agent::state() == crate::agent::State::Failed {
+                    p("未能开启。关闭后再次开启即可重试", "Couldn't turn on. Turn it off and on again to retry")
+                } else {
+                    p(
+                        "本机的 AI 工具可通过 MCP 读取硬件读数、程序与设备名称、磁盘用量、文件名与路径、网络地址与 AI Token 用量，不能更改任何内容。AI 工具可能将读取的内容发送至其模型服务",
+                        "AI tools on this PC can read, through MCP, hardware readings, program and device names, disk usage, file names and paths, network addresses and AI Token usage. They can't change anything. AI tools may send what they read to their model provider",
+                    )
+                };
+                return (p("允许 AI 工具读取本机信息", "Let AI tools read this PC's information"), Some(Cow::Borrowed(hint)), self.settings.agent_interface);
+            }
             Switch::NearbyNotice => (
                 p("在屏幕边缘提示", "Show at the screen edge"),
                 Some(p("有设备请求发送或收到文件时，在工作台所在的边缘提示", "When a device asks to send or files arrive, on the edge where Workbench is")),
@@ -5271,6 +5305,7 @@ impl Ui {
             Switch::OverlayOutline => settings.overlay.outline ^= true,
             Switch::TrayHidden => settings.tray_hidden ^= true,
             Switch::NearbyNotice => settings.nearby_notice ^= true,
+            Switch::Agent => settings.agent_interface ^= true,
             Switch::Nearby => {
                 // What the system then reports, not what was asked (see `tick`).
                 if self.remote_there && self.switching.is_none() && self.reading_switches.is_none() {
@@ -6352,6 +6387,11 @@ You can disconnect here at any time, and the original status line command will b
             }
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
             Target::ClaudeLimits(put_in) => self.claude_asked(put_in),
+            Target::AgentConfig => {
+                if crate::diagnostics::copy(self.hwnd, &crate::agent::mcp_prompt(self.lang == Lang::Zh)) {
+                    self.agent_copied_at = Some(Instant::now());
+                }
+            }
             Target::AiKey(id, field) => self.begin_key(id, field),
             Target::AiKeyRemove(id, field) => self.keep_key(&id, field, None),
             Target::NetEase(_) => {}
@@ -6557,6 +6597,7 @@ You can disconnect here at any time, and the original status line command will b
                 },
                 Row::Quit => vec![Target::Quit],
                 Row::Guide => vec![Target::Guide],
+                Row::AgentConfig => vec![Target::AgentConfig],
                 Row::PcName => vec![Target::PcName],
                 Row::Device(Known::Phone(id)) => vec![Target::OpenPhone(id)],
                 Row::Device(Known::Trusted(fingerprint)) => vec![Target::Untrust(fingerprint)],
@@ -6729,7 +6770,7 @@ You can disconnect here at any time, and the original status line command will b
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Notice, Target::NoticeRead | Target::NoticeLink) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Notice, Target::NoticeRead | Target::NoticeLink) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) | (Row::AgentConfig, Target::AgentConfig) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Manage(_), Target::Manage) => true,
@@ -7911,7 +7952,7 @@ You can disconnect here at any time, and the original status line command will b
                     frame.icon(Icon::Megaphone, Point { x: left + ROW_SIDE + 8.0, y: top + 10.0 }, 16.0, palette.selection);
                     field_label(frame, palette, &name, Some(&detail), Font::new(Family::Segoe, 14.0, 600.0), hint, words_left, y + row_height / 2.0, room);
                 }
-                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Manage(_) | Row::NetEase | Row::ClaudeLimits | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::AgentConfig | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Manage(_) | Row::NetEase | Row::ClaudeLimits | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;

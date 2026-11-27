@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds a signed release: glance.exe and glance-sensors.exe, then the
+    Builds a signed release: glance.exe, glance-sensors.exe and glance-cli.exe, then the
     installer with its uninstaller, each signed through Artifact Signing
     (see sign.ps1).
 
@@ -36,7 +36,7 @@ $makensis = if ($found) { $found.Source } else { Join-Path $env:LOCALAPPDATA 'ta
 if (-not (Test-Path -LiteralPath $makensis)) { throw 'makensis not found; install NSIS 3.08 or newer' }
 
 if ($Sign) {
-    & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'target\release\glance.exe'), (Join-Path $root 'target\release\glance-sensors.exe')
+    & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'target\release\glance.exe'), (Join-Path $root 'target\release\glance-sensors.exe'), (Join-Path $root 'target\release\glance-cli.exe')
     & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'remote\target\release\glance-remote.exe')
     # The installer signs its uninstaller and itself as it is made (glance.nsi).
     & $makensis /V2 /DSIGN 'installer\glance.nsi'
@@ -81,7 +81,7 @@ function Get-DebugId([string]$program) {
     }
     throw "$program names no PDB"
 }
-foreach ($name in 'glance', 'glance-sensors') {
+foreach ($name in 'glance', 'glance-sensors', 'glance-cli') {
     $program = Join-Path $root "target\release\$name.exe"
     $symbols = Join-Path $root "symbols\$version\$name\$(Get-DebugId $program)"
     New-Item -ItemType Directory -Force -Path $symbols | Out-Null

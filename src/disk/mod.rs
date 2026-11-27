@@ -337,6 +337,104 @@ fn told_as(by_name: Kind, flags: u16, within: Within) -> FileIs {
     FileIs { kind: if within == Within::Game { Kind::Game } else { by_name }, system: false }
 }
 
+/// How the files in the folder at `inner`, in `folder` whose files are told as `within`, are told (Windows' own folder
+/// at `windows`, where it is on the drive): Windows' own folder's are the system's, and all in it but its Temp; a game
+/// library's are a game's.
+fn within_of(index: &Index, folder: u32, within: Within, windows: Option<u32>, inner: u32) -> Within {
+    let name = index.folded_name(inner);
+    if Some(inner) == windows {
+        Within::System
+    } else if Some(folder) == windows && name == "temp" {
+        Within::Plain
+    } else if within == Within::Plain && GAME_LIBRARIES.contains(&name) {
+        Within::Game
+    } else {
+        within
+    }
+}
+
+/// How the files in the folder at `folder` are told, from the folders above it (see `within_of`).
+fn within_at(index: &Index, folder: u32, windows: Option<u32>) -> Within {
+    let mut chain = vec![folder];
+    let mut at = folder;
+    while at != ROOT && at < index.len() {
+        at = index.entry(at).parent;
+        chain.push(at);
+    }
+    chain.reverse();
+    chain.windows(2).fold(Within::Plain, |within, pair| within_of(index, pair[0], within, windows, pair[1]))
+}
+
+/// A file met on a walk (see `walk`): its place, its flags, its size and when it was written, how it is told, and
+/// whether it is in the Recycle Bin.
+#[derive(Clone, Copy, Debug)]
+pub struct Met {
+    pub place: u32,
+    pub flags: u16,
+    pub stat: crate::search::index::Stat,
+    pub is: FileIs,
+    pub in_bin: bool,
+}
+
+/// What a walk met besides the files (see `walk`): the folders whose names could not be listed (what they held is not
+/// known, or as it was listed before).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Walked {
+    pub unread: u64,
+}
+
+/// How many entries a walk goes through between asking whether to go on.
+const ASKED_EVERY: u32 = 4096;
+
+/// Every file in the folder at `folder` of `index` (the drive at `root`, the places on this PC told by `places`), at
+/// any depth, given to `each`, nothing through links, told as the survey tells them (by their extensions and the
+/// folders they are in, from the root down: see `within_of`); the Recycle Bin's too where `bin` says, or where the
+/// folder is in it. `going` is asked every few thousand entries: none, once it says to stop.
+pub fn walk(index: &Index, root: &str, places: &Places, folder: u32, bin: bool, going: &mut dyn FnMut() -> bool, each: &mut dyn FnMut(&Met)) -> Option<Walked> {
+    let windows = places.windows.as_deref().and_then(|path| on_drive(path, root)).and_then(|rest| if rest.as_os_str().is_empty() { Some(ROOT) } else { index.place_of(rest) });
+    let mut recycle = None;
+    index.each_in(ROOT, |place, entry| {
+        if entry.folder() && index.folded_name(place) == "$recycle.bin" {
+            recycle = Some(place);
+        }
+    });
+    let started_in_bin = recycle.is_some_and(|recycle| folder == recycle || index.lies_in(folder, recycle));
+    // (Asked first too: of many small walks one after another, none would meet enough to ask.)
+    if !going() {
+        return None;
+    }
+    let mut walked = Walked::default();
+    let mut met = 0u32;
+    let mut stack = vec![(folder, within_at(index, folder, windows), started_in_bin)];
+    while let Some((at, within, in_bin)) = stack.pop() {
+        if index.entry(at).flags & flag::UNREAD != 0 {
+            walked.unread += 1;
+        }
+        let mut stopped = false;
+        index.each_in(at, |place, entry| {
+            met += 1;
+            if met.is_multiple_of(ASKED_EVERY) && !stopped && !going() {
+                stopped = true;
+            }
+            if stopped {
+                return;
+            }
+            if entry.folder() {
+                let into_bin = Some(place) == recycle;
+                if entry.flags & flag::LINK == 0 && (bin || in_bin || !into_bin) {
+                    stack.push((place, within_of(index, at, within, windows, place), in_bin || into_bin));
+                }
+                return;
+            }
+            each(&Met { place, flags: entry.flags, stat: index.stat(place), is: file_is(index.folded_name(place), entry.flags, within), in_bin });
+        });
+        if stopped {
+            return None;
+        }
+    }
+    Some(walked)
+}
+
 /// What the files of an extension come to as the lists are read: their bytes and count, how much is of each kind,
 /// where they light the map, and the kind the extension itself tells.
 #[derive(Default)]
@@ -404,17 +502,7 @@ impl Survey {
                     if entry.flags & flag::LINK != 0 {
                         return;
                     }
-                    let name = index.folded_name(place);
-                    let inner = if Some(place) == windows {
-                        Within::System
-                    } else if Some(folder) == windows && name == "temp" {
-                        Within::Plain
-                    } else if within == Within::Plain && GAME_LIBRARIES.contains(&name) {
-                        Within::Game
-                    } else {
-                        within
-                    };
-                    stack.push((place, inner, under_onedrive, slot));
+                    stack.push((place, within_of(index, folder, within, windows, place), under_onedrive, slot));
                     return;
                 }
                 let stat = index.stat(place);

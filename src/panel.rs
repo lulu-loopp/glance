@@ -5526,6 +5526,8 @@ impl History {
 
     /// `sample` added, the oldest let go so that no more than `keep` are kept.
     pub fn push(&self, sample: Sample, keep: usize) {
+        // (Counted into its minute too, where a day of them is kept for AI tools: see `agent::history`.)
+        crate::agent::history::heard(&sample);
         let sample = Arc::new(sample);
         let mut now = self.now.lock().unwrap();
         let from = (now.len() + 1).saturating_sub(keep);

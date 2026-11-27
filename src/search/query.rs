@@ -34,6 +34,9 @@ pub struct Query {
     only: Option<Only>,
     /// The order the names found are in.
     order: Order,
+    /// The folder the names must be in (at any depth), where only those of one are found: its drive's root ("C:\\")
+    /// and its path from there.
+    under: Option<(String, std::path::PathBuf)>,
 }
 
 /// What the names found are put in order by: how well they meet what was typed (the best first), when they were last
@@ -204,14 +207,29 @@ impl Query {
         self.order
     }
 
+    /// The same, only names in the folder at `rest` of the drive at `root` ("C:\\") found, at any depth.
+    pub fn under(self, root: &str, rest: &std::path::Path) -> Query {
+        Query { under: Some((root.to_string(), rest.to_path_buf())), ..self }
+    }
+
     /// The names in `index` (of the drive whose root is `root`) meeting it: how many there are, how many of them are
     /// folders', and the best `most` folders and the best `most` files, best first; in another order (see `Order`),
     /// the first `most` of all of them in it, folders and files together.
     pub fn find(&self, index: &Index, root: &str, most: usize) -> (usize, usize, Vec<Hit>) {
+        // (Only one folder's names asked for: of its drive alone, and none where it is not there.)
+        let under = match &self.under {
+            None => None,
+            Some((at, rest)) => match index.place_of(rest).filter(|_| at.eq_ignore_ascii_case(root)) {
+                Some(folder) => Some(folder),
+                None => return (0, 0, Vec::new()),
+            },
+        };
         let threads = (index.len() as usize).div_ceil(1 << 20).clamp(1, 4);
         let candidates = self.candidates(index, threads);
         // (Many, they are met on several threads at once.)
-        let meet = |places: &[u32]| places.iter().filter_map(|&place| self.meets(index, place).map(|score| (score, place))).collect::<Vec<_>>();
+        let meet = |places: &[u32]| {
+            places.iter().filter(|&&place| under.is_none_or(|folder| index.lies_in(place, folder))).filter_map(|&place| self.meets(index, place).map(|score| (score, place))).collect::<Vec<_>>()
+        };
         let met: Vec<(f32, u32)> = if candidates.len() < 1 << 16 {
             meet(&candidates)
         } else {
@@ -608,6 +626,18 @@ mod tests {
     fn found_as(query: Query) -> (usize, Vec<Shown>) {
         let (total, _, hits) = query.find(&drive(), "C:\\", 10);
         (total, hits.into_iter().map(|hit| (hit.path.display().to_string(), hit.marks)).collect())
+    }
+
+    /// Asked for only what is in one folder: names in it at any depth are found, and counted, those elsewhere not (the
+    /// folder itself neither); a folder not there, or on another drive, holds none.
+    #[test]
+    fn names_under_a_folder_alone_are_found() {
+        let paths = |found: (usize, Vec<Shown>)| (found.0, found.1.into_iter().map(|(path, _)| path).collect::<Vec<_>>());
+        assert_eq!(paths(found_as(Query::read("readme").under("C:\\", std::path::Path::new("docs")))), (2, vec![r"C:\Docs\Readme.md".to_string(), r"C:\Docs\my readme.txt".to_string()]));
+        assert_eq!(paths(found_as(Query::read("readme").under("C:\\", std::path::Path::new("")))).0, 4);
+        assert_eq!(paths(found_as(Query::read("readme").under("C:\\", std::path::Path::new("readme")))).0, 0);
+        assert_eq!(paths(found_as(Query::read("readme").under("C:\\", std::path::Path::new("Music")))).0, 0);
+        assert_eq!(paths(found_as(Query::read("readme").under("D:\\", std::path::Path::new("Docs")))).0, 0);
     }
 
     #[test]

@@ -314,3 +314,45 @@ fn ages_go_by_week_month_half_year_year_three_years() {
     assert_eq!(age_of(NOW - 800 * day, NOW), 4);
     assert_eq!(age_of(NOW - 2000 * day, NOW), 5);
 }
+
+/// The files met under a folder, by their names, each with its kind, whether it is the system's and whether it is in
+/// the Recycle Bin (the bin's walked too or not).
+fn walked(index: &Index, path: &str, bin: bool) -> Vec<(String, Kind, bool, bool)> {
+    let mut met = Vec::new();
+    let folder = if path.is_empty() { ROOT } else { at(index, path) };
+    walk(index, "C:\\", &places(), folder, bin, &mut || true, &mut |file| met.push((index.name(file.place).to_string_lossy().into_owned(), file.is.kind, file.is.system, file.in_bin))).unwrap();
+    met.sort_by(|a, b| a.0.cmp(&b.0));
+    met
+}
+
+/// A walk tells each file as the survey does, wherever it starts: below Windows' own folder its files are the system's
+/// (but its Temp's), below a game library's they are a game's. The Recycle Bin is walked only where asked, or where the
+/// walk starts in it.
+#[test]
+fn a_walk_tells_files_by_the_folders_above_where_it_starts() {
+    let index = pc();
+    assert_eq!(walked(&index, r"Windows\System32", false), [("kernel.dll".to_string(), Kind::System, true, false)]);
+    assert_eq!(walked(&index, r"Windows\Temp", false), [("log.txt".to_string(), Kind::Document, false, false)]);
+    assert_eq!(walked(&index, r"Games\X", false), [("data.bin".to_string(), Kind::Game, false, false)]);
+    let all = walked(&index, "", false);
+    assert_eq!(all.len(), 11, "every file but the bin's (the one in the cloud alone among them)");
+    assert!(!all.iter().any(|(name, ..)| name == "$R1.zip"));
+    let with_bin = walked(&index, "", true);
+    assert!(with_bin.contains(&("$R1.zip".to_string(), Kind::Archive, false, true)));
+    assert_eq!(walked(&index, r"$Recycle.Bin\S-1", false), [("$R1.zip".to_string(), Kind::Archive, false, true)]);
+}
+
+/// A walk asked to stop stops, and tells it did: asked once a few thousand entries were met (the folder among them),
+/// nothing more given after.
+#[test]
+fn a_walk_asked_to_stop_stops() {
+    let things = (0..10_000).map(|_| File("a.txt", 1, NOW, FILE)).collect();
+    let index = drive(vec![Folder("many", things)]);
+    let mut asked = 0;
+    let mut met = 0;
+    assert!(walk(&index, "C:\\", &places(), ROOT, false, &mut || { asked += 1; asked == 1 }, &mut |_| met += 1).is_none());
+    assert_eq!((asked, met), (2, ASKED_EVERY as usize - 2), "asked as it begins, and again a few thousand on");
+    // A walk too small to ask on the way is asked as it begins.
+    let small = drive(vec![File("one.txt", 1, NOW, FILE)]);
+    assert!(walk(&small, "C:\\", &places(), ROOT, false, &mut || false, &mut |_| panic!("nothing met")).is_none());
+}

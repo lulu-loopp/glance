@@ -371,7 +371,7 @@ impl Sensors {
 }
 
 /// A token's user (as a SID string) and integrity level (its RID).
-fn token_facts(token: HANDLE) -> Option<(String, u32)> {
+pub(crate) fn token_facts(token: HANDLE) -> Option<(String, u32)> {
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, TokenIntegrityLevel, TokenUser, TOKEN_MANDATORY_LABEL, TOKEN_USER};
     unsafe {

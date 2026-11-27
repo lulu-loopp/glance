@@ -2,6 +2,8 @@
 // content) have no program to use them yet: the ports are under way.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+#[cfg(windows)]
+mod agent;
 #[cfg(any(windows, target_os = "macos"))]
 mod ai;
 #[cfg(windows)]
@@ -263,6 +265,7 @@ impl App {
             notes::follow_settings(&held);
             station::recent::follow_settings(&held);
             folders::follow(&held.storage_folders);
+            agent::follow(&held);
         }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
@@ -425,7 +428,7 @@ const SINGLE_INSTANCE: PCWSTR = w!("Local\\Glance.SingleInstance.Debug");
 
 /// Whether Glance already runs in this session.
 #[cfg(windows)]
-fn already_running() -> bool {
+pub(crate) fn already_running() -> bool {
     match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, SINGLE_INSTANCE) } {
         Ok(mutex) => {
             let _ = unsafe { CloseHandle(mutex) };
@@ -495,6 +498,11 @@ pub fn run() {
         }
         // Claude Code's status line, where the user put Glance there (see `ai::statusline`).
         [_, flag] if flag == ai::statusline::ASKED => std::process::exit(ai::statusline::run()),
+        // An MCP server for AI tools, as `glance-cli.exe mcp` is, for a client set up with Glance itself (see `agent`).
+        [_, flag] if flag == "mcp" => {
+            agent::mcp::serve();
+            std::process::exit(0)
+        }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
         // The last of an uninstall, not waited for: the uninstaller that ran, once nothing holds it any more.
         [_, flag, folder, uninstaller] if flag == elevation::FINISH_UNINSTALL => done(
@@ -670,6 +678,8 @@ pub fn run() {
     }
     notes::follow_settings(&app().settings.lock().unwrap());
     station::recent::follow_settings(&app().settings.lock().unwrap());
+    // What AI tools on this PC may read, if the user lets them (see `agent`).
+    agent::follow(&app().settings.lock().unwrap());
     notes::start(|| app().controller.wake());
     todo::start(|| app().controller.wake());
     // The to-dos told of by Windows' notifications as they come due (see `remind`).
@@ -685,7 +695,7 @@ pub fn run() {
     ai::start(
         || {
             let settings = app().settings.lock().unwrap();
-            settings.places().shows(settings::Part::Ai) || settings.widgets.iter().any(settings::WidgetAt::shows_ai) || ui::settings_window::shows_ai()
+            settings.places().shows(settings::Part::Ai) || settings.widgets.iter().any(settings::WidgetAt::shows_ai) || ui::settings_window::shows_ai() || agent::wants_ai()
         },
         |tool| ui::view::ai::module_of(tool).is_some_and(|id| ui::prefs::module_on_in(&app().settings.lock().unwrap().view, "ai", id)),
         || app().controller.ai_changed(),
@@ -851,6 +861,18 @@ pub fn run_sensors() {
 /// The sensors have a program of their own on Windows alone.
 #[cfg(not(windows))]
 pub fn run_sensors() {
+    std::process::exit(1);
+}
+
+/// `glance-cli.exe`: what Glance knows read from a terminal, or by AI tools as an MCP server (see `agent::cli`).
+#[cfg(windows)]
+pub fn run_cli() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(agent::cli::run(&arguments));
+}
+
+#[cfg(not(windows))]
+pub fn run_cli() {
     std::process::exit(1);
 }
 
