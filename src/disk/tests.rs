@@ -350,6 +350,9 @@ fn a_walk_asked_to_stop_stops() {
     let index = drive(vec![Folder("many", things)]);
     let mut asked = 0;
     let mut met = 0;
-    assert!(walk(&index, "C:\\", &places(), ROOT, false, &mut || { asked += 1; false }, &mut |_| met += 1).is_none());
-    assert_eq!((asked, met), (1, ASKED_EVERY as usize - 2));
+    assert!(walk(&index, "C:\\", &places(), ROOT, false, &mut || { asked += 1; asked == 1 }, &mut |_| met += 1).is_none());
+    assert_eq!((asked, met), (2, ASKED_EVERY as usize - 2), "asked as it begins, and again a few thousand on");
+    // A walk too small to ask on the way is asked as it begins.
+    let small = drive(vec![File("one.txt", 1, NOW, FILE)]);
+    assert!(walk(&small, "C:\\", &places(), ROOT, false, &mut || false, &mut |_| panic!("nothing met")).is_none());
 }

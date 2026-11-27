@@ -938,6 +938,10 @@ pub fn find_while(query: &Query, most: usize, going: impl Fn() -> bool) -> Optio
         found.folders += folders;
         found.hits.extend(hits);
     }
+    // (Asked once more after the last drive's names are gone through, as it may take a while.)
+    if !going() {
+        return None;
+    }
     // In another order: the first `most` of all, folders and files together.
     if query.order().other() {
         query::in_order(&mut found.hits, query.order());

@@ -61,8 +61,9 @@ fn make(name: &str, sid: &str, first: bool) -> Option<End> {
     // The system all; the user (and whoever owns the pipe), reading and writing (FILE_GENERIC_READ |
     // FILE_GENERIC_WRITE, which holds FILE_CREATE_PIPE_INSTANCE): an instance after the first is made by them, as a
     // duplex pipe asks, and any process of the user's holds the owner's rights, so its clients cannot be given fewer.
-    // No process below medium integrity writes to it.
-    let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;0x0012019F;;;OW)(A;;0x0012019F;;;{sid})S:(ML;;NW;;;ME)"));
+    // No process below medium integrity reads it or writes to it, so none opens it (a sandboxed program of the user's
+    // could otherwise hold its instances open, unread, and leave none for the user's own).
+    let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;0x0012019F;;;OW)(A;;0x0012019F;;;{sid})S:(ML;;NWNR;;;ME)"));
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut descriptor, None) }.ok()?;
     let attributes = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() };
@@ -87,7 +88,7 @@ struct Served {
 /// and one connected while all are served waits, not served yet, for one of them to go.
 fn accept(first: End, name: &str, sid: &str, stop: &Arc<Event>) {
     use windows::Win32::Foundation::WAIT_OBJECT_0;
-    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    use windows::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
     use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     let served = Arc::new(Served { count: Mutex::new(0), gone: Condvar::new() });
@@ -117,6 +118,16 @@ fn accept(first: End, name: &str, sid: &str, stop: &Arc<Event>) {
             Err(_) => false,
         };
         if !connected {
+            if stop.is_set() {
+                break;
+            }
+            // (A client gone before it was taken, say: the instance made ready again, never let go of, so that the
+            // pipe is never without one, which another program could then make in Glance's stead.)
+            if unsafe { DisconnectNamedPipe(end.0) }.is_ok() {
+                listening = Some(end);
+            } else if unsafe { WaitForMultipleObjects(&[stop.0], false, 200) } == WAIT_OBJECT_0 {
+                break;
+            }
             continue;
         }
         listening = make(name, sid, false);
@@ -149,20 +160,21 @@ fn accept(first: End, name: &str, sid: &str, stop: &Arc<Event>) {
     }
 }
 
-/// Who a client is, as its token tells: its user, and whether it runs elevated.
+/// Who a client is, as its token tells: whether it is a process of this user's at medium integrity or above, and
+/// whether it runs elevated.
 struct Client {
-    sid: Option<String>,
+    users: bool,
     elevated: bool,
 }
 
-/// The client at the other end of `end`, as the token it opened the pipe with tells (once something was read from
-/// it: Windows lets no server act as its client before).
-fn client(end: &End) -> Client {
+/// The client at the other end of `end` (this user's being `sid`), as the token it opened the pipe with tells (once
+/// something was read from it: Windows lets no server act as its client before).
+fn client(end: &End, sid: &str) -> Client {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Security::{RevertToSelf, TOKEN_QUERY};
     use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
-    let mut told = Client { sid: None, elevated: false };
+    let mut told = Client { users: false, elevated: false };
     if unsafe { ImpersonateNamedPipeClient(end.0) }.is_err() {
         return told;
     }
@@ -170,11 +182,17 @@ fn client(end: &End) -> Client {
     let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }.is_ok();
     let _ = unsafe { RevertToSelf() };
     if opened {
-        told = Client { sid: crate::elevation::token_sid(token), elevated: crate::elevation::token_elevated(token) };
+        told = Client { users: super::token_is_users(token, sid), elevated: crate::elevation::token_elevated(token) };
         let _ = unsafe { CloseHandle(token) };
     }
     told
 }
+
+/// How long a call that was told to stop (its time over, its client gone, the interface turned off) is waited for to
+/// end, beyond which it is let run on alone: one stuck in Windows (a folder opened through a link to a network share
+/// that does not answer) neither keeps its client waiting nor the interface from turning off. Its turn stays taken
+/// till it does end.
+const LET_GO_AFTER: u32 = 1_000;
 
 /// Writes `answer` to `end` as a line: false where it could not be (the client gone, the interface turned off).
 fn tell(end: &End, answer: &Value, stop: &Event) -> bool {
@@ -203,8 +221,8 @@ fn serve(end: Arc<End>, sid: &str, stop: &Arc<Event>) {
     };
     // Then who it is (only this user's processes: the system, whom the pipe lets in as all Glance's pipes do, has
     // no need of it).
-    let client = client(&end);
-    if client.sid.as_deref() != Some(sid) {
+    let client = client(&end, sid);
+    if !client.users {
         let _ = unsafe { DisconnectNamedPipe(end.0) };
         return;
     }
@@ -258,28 +276,28 @@ fn serve(end: Arc<End>, sid: &str, stop: &Arc<Event>) {
             tell(&end, &failed(Some(&id), &Failure::new("busy", "Glance could not take the call now. Try again.")), stop);
             continue;
         };
-        // While it runs, whether the client goes (a line it sends meanwhile kept for after: the call then waited for
-        // alone, as what comes next is read once this is answered).
-        let gone = match lines.next(&end, &[&done, stop], None) {
-            Line::Woken(0) => false,
-            Line::Read(line) => {
-                lines.put_back(line);
-                let waited = unsafe { windows::Win32::System::Threading::WaitForMultipleObjects(&[done.0, stop.0], false, windows::Win32::System::Threading::INFINITE) };
-                waited != windows::Win32::Foundation::WAIT_OBJECT_0
-            }
-            _ => true,
-        };
-        if gone {
+        // While it runs, whether the client goes, or asks another call before this one is answered (one at a time:
+        // the connection then closed, which stops this one), or its time is over. Then it is told to stop, and
+        // waited for a moment more.
+        let within = u32::try_from(call.left().as_millis()).unwrap_or(u32::MAX).saturating_add(LET_GO_AFTER);
+        let came = lines.next(&end, &[&done, stop], Some(within));
+        let ended = came == Line::Woken(0) || {
             call.cancelled.store(true, Ordering::Relaxed);
+            let waited = unsafe { windows::Win32::System::Threading::WaitForMultipleObjects(&[done.0], false, LET_GO_AFTER) };
+            waited == windows::Win32::Foundation::WAIT_OBJECT_0
+        };
+        if ended {
+            let _ = working.join();
         }
-        let _ = working.join();
-        if gone {
+        // (Its client gone, or the interface off: nothing to answer.)
+        if !matches!(came, Line::Woken(0) | Line::Late) {
             break;
         }
         let answer = match answered.lock().unwrap().take() {
             Some(Ok(result)) => json!({ "id": id, "result": result }),
             Some(Err(failure)) => failed(Some(&id), &failure),
-            None => failed(Some(&id), &Failure::new("unknown_error", "The call ended without an answer.")),
+            // (Still running, let run on alone: its time is over.)
+            None => failed(Some(&id), &Failure::new("timeout", format!("The call took longer than {} seconds. Ask about a smaller folder, or try again once the drive's index is ready.", CALL_TIME.as_secs()))),
         };
         let line = serde_json::to_vec(&answer).unwrap_or_default();
         let answer = if line.len() + 1 > ANSWER_MOST { failed(Some(&id), &Failure::new("result_too_large", "The answer is too large. Ask for fewer results.")) } else { answer };

@@ -140,19 +140,16 @@ impl Lines {
         Lines { held: Vec::new(), most }
     }
 
-    /// `line`, read, to be read again next.
-    pub fn put_back(&mut self, mut line: Vec<u8>) {
-        line.push(b'\n');
-        line.append(&mut self.held);
-        self.held = line;
-    }
-
     /// The next line (without its end), read from `end` as `End::read` waits (`within` from now, for the whole line).
     pub fn next(&mut self, end: &End, also: &[&Event], within: Option<u32>) -> Line {
         let until = within.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms.into()));
         let mut buffer = vec![0u8; 64 << 10];
         loop {
             if let Some(at) = self.held.iter().position(|&byte| byte == b'\n') {
+                // (Its end counted in: no longer than allowed, however it came in.)
+                if at + 1 > self.most {
+                    return Line::TooLong;
+                }
                 let mut line: Vec<u8> = self.held.drain(..=at).collect();
                 line.pop();
                 if line.last() == Some(&b'\r') {
@@ -174,5 +171,38 @@ impl Lines {
                 Came::Late => return Line::Late,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
+
+    /// The two ends of a pipe of this test's own.
+    fn ends(name: &str) -> (End, End) {
+        let name = HSTRING::from(format!(r"\\.\pipe\glance.test.{}.{name}", std::process::id()));
+        let server = unsafe { CreateNamedPipeW(&name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 1 << 16, 1 << 16, 0, None) };
+        let client = unsafe { CreateFileW(&name, (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None) }.unwrap();
+        (End(server), End(client))
+    }
+
+    /// A line is no longer than allowed with its end, however it comes in: one byte more is too long, even where it
+    /// came whole in one read.
+    #[test]
+    fn a_line_longer_than_allowed_is_not_read() {
+        let (server, client) = ends("long");
+        let mut fitting = vec![b'a'; 9];
+        fitting.push(b'\n');
+        let mut longer = vec![b'b'; 10];
+        longer.push(b'\n');
+        assert_eq!(client.write_all(&[fitting, longer].concat(), &[]), Came::Done(()));
+        let mut lines = Lines::new(10);
+        assert_eq!(lines.next(&server, &[], Some(1000)), Line::Read(vec![b'a'; 9]));
+        assert_eq!(lines.next(&server, &[], Some(1000)), Line::TooLong);
+        drop(client);
+        assert_eq!(Lines::new(10).next(&server, &[], Some(1000)), Line::Closed);
     }
 }

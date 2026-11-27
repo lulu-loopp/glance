@@ -364,7 +364,8 @@ pub fn history(args: &Args) -> Result<Value, Failure> {
 struct Point {
     t: u64,
     weight: u32,
-    values: Vec<Option<f64>>,
+    /// Each series' value, and how many samples it stands for (a minute's: those of its samples that had it).
+    values: Vec<Option<(f64, u32)>>,
 }
 
 /// `series` over the last `seconds` before the newest of `samples` (every one Glance holds) and of `minutes` (the day
@@ -383,17 +384,19 @@ fn history_of(samples: &[std::sync::Arc<Sample>], minutes: Option<&super::histor
         .iter()
         .map(|minute| (Point { t: minute.start, weight: minute.samples, values: series.iter().map(|series| minutes.and_then(|minutes| minutes.value(minute, series))).collect() }, MINUTE_MS))
         .collect();
-    points.extend(samples.iter().filter(|sample| sample.t >= from).map(|sample| (Point { t: sample.t, weight: 1, values: series.iter().map(|series| series.of(sample)).collect() }, interval)));
-    // Spans with nothing read in them: where a point is missing, the next coming nearer where the one after it was
-    // due than where its own was (more than one and a half times as far as points come there: a point a little late,
-    // as samples come, is not one missing).
+    points.extend(samples.iter().filter(|sample| sample.t >= from).map(|sample| (Point { t: sample.t, weight: 1, values: series.iter().map(|series| series.of(sample).map(|value| (value, 1))).collect() }, interval)));
+    // Spans with nothing read in them: where a point is missing, the next coming more than half its own spacing
+    // after the one after the last was due (a sample a little late, as samples come, is not one missing). From the
+    // minutes to the samples, the first sample may come up to a minute after the last whole minute: the minute it
+    // falls in is told by the samples alone, from it on.
     let mut gaps = Vec::new();
     for pair in points.windows(2) {
         let (before, after) = (&pair[0], &pair[1]);
-        let spacing = before.1.max(after.1);
-        // (A minute's point stands at its start: the minute reaches on to its end.)
-        let end = before.0.t + if before.1 == MINUTE_MS { MINUTE_MS } else { 0 };
-        if after.0.t > end + spacing + spacing / 2 {
+        let due = before.0.t + before.1;
+        let slack = if before.1 == MINUTE_MS && after.1 != MINUTE_MS { MINUTE_MS } else { after.1 / 2 };
+        if after.0.t > due + slack {
+            // (A minute's point stands at its start: the minute reaches on to its end.)
+            let end = if before.1 == MINUTE_MS { due } else { before.0.t };
             gaps.push(json!({ "from_ms": end, "to_ms": after.0.t }));
         }
     }
@@ -413,16 +416,16 @@ fn history_of(samples: &[std::sync::Arc<Sample>], minutes: Option<&super::histor
                 let (_, weight, sums) = buckets.last_mut().unwrap();
                 *weight += point.weight;
                 for (sum, value) in sums.iter_mut().zip(&point.values) {
-                    if let Some(value) = value {
-                        sum.0 += value * f64::from(point.weight);
-                        sum.1 += f64::from(point.weight);
+                    if let Some((value, weight)) = value {
+                        sum.0 += value * f64::from(*weight);
+                        sum.1 += f64::from(*weight);
                     }
                 }
             }
-            buckets.into_iter().map(|(t, weight, sums)| Point { t, weight, values: sums.into_iter().map(|(sum, count)| (count > 0.0).then(|| sum / count)).collect() }).collect()
+            buckets.into_iter().map(|(t, weight, sums)| Point { t, weight, values: sums.into_iter().map(|(sum, count)| (count > 0.0).then(|| (sum / count, count as u32))).collect() }).collect()
         }
     };
-    let value = |value: Option<f64>| value.map_or(Value::Null, |value| json!((value * 1000.0).round() / 1000.0));
+    let value = |value: Option<(f64, u32)>| value.map_or(Value::Null, |(value, _)| json!((value * 1000.0).round() / 1000.0));
     let mut told = Map::new();
     let mut unknown = Vec::new();
     for (at, series) in series.iter().enumerate() {
@@ -543,6 +546,29 @@ mod tests {
         };
         assert_eq!(told["dates"], json!([at(today - 2 * 86_400_000 + 3_600_000 * 12), at(today - 86_400_000 + 3_600_000 * 12), at(today + 1)]));
         assert_eq!(told["days"], json!([{ "tool": "claude", "tokens": [5, 6, 7] }]));
+    }
+
+    /// Minutes averaged together count each series' own readings, not the minutes' samples: a minute where it was
+    /// read once weighs as one reading. A minute missing among them is a gap.
+    #[test]
+    fn minutes_together_weigh_each_reading() {
+        let mut minutes = crate::agent::history::Minutes::default();
+        for second in 0..60 {
+            minutes.add(&sample(600_000 + second * 1000, (second == 0).then_some(100.0)));
+        }
+        for second in 0..60 {
+            minutes.add(&sample(660_000 + second * 1000, Some(0.0)));
+        }
+        // (A minute with nothing, then two more.)
+        for second in 0..120 {
+            minutes.add(&sample(780_000 + second * 1000, Some(5.0)));
+        }
+        let samples = vec![Arc::new(sample(900_000, Some(5.0)))];
+        minutes.add(&samples[0]);
+        let told = history_of(&samples, Some(&minutes), &[Series::CpuPercent], 3600, Some(120_000), 1000);
+        let first = told["series"]["cpu.percent"][0].as_f64().unwrap();
+        assert!((first - 100.0 / 61.0).abs() < 0.01, "{first}");
+        assert_eq!(told["covered"]["gaps"], json!([{ "from_ms": 720_000, "to_ms": 780_000 }]));
     }
 
     /// Samples a few milliseconds late, as they come, leave no gap between them: one missing does.

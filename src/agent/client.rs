@@ -9,8 +9,10 @@ use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERRO
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_SHARE_NONE, FILE_WRITE_DATA, OPEN_EXISTING};
 use windows::Win32::System::Pipes::WaitNamedPipeW;
 
-/// How long a pipe all of whose instances are taken is waited for (ms).
-const BUSY_WAIT: u32 = 5_000;
+/// How long a pipe all of whose instances are taken is waited for, all told (ms), and how long at a time, between
+/// looks at whether the call was given up.
+const BUSY_WAIT: u64 = 5_000;
+const BUSY_STEP: u32 = 250;
 /// How long Glance is waited for to say which interface it speaks (ms).
 const HELLO_WITHIN: u32 = 5_000;
 /// How long a call is waited for, beyond the time Glance gives it (ms).
@@ -33,15 +35,21 @@ fn connect(stop: &Event) -> Result<(End, Lines), Failure> {
 /// A connection to Glance's pipe, past `hello`.
 fn connect_saying(hello: &Value, stop: &Event) -> Result<(End, Lines), Failure> {
     let name = super::pipe_name().ok_or_else(|| Failure::new("glance_not_running", "This Windows user could not be told."))?;
+    let busy_until = std::time::Instant::now() + std::time::Duration::from_millis(BUSY_WAIT);
     let end = loop {
+        if stop.is_set() {
+            return Err(Failure::new("cancelled", "The call was cancelled."));
+        }
         // (Reading and writing data alone: what the pipe lets this user do.)
         let opened = unsafe { CreateFileW(&HSTRING::from(&name), (FILE_GENERIC_READ | FILE_WRITE_DATA).0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None) };
         match opened {
             Ok(handle) => break End(handle),
             Err(error) if error.code() == ERROR_PIPE_BUSY.to_hresult() => {
-                if !unsafe { WaitNamedPipeW(&HSTRING::from(&name), BUSY_WAIT) }.as_bool() {
+                if std::time::Instant::now() >= busy_until {
                     return Err(Failure::new("busy", "Glance is answering other AI tools. Try again."));
                 }
+                // (An instance freed, or a moment gone by: tried again either way, the call given up or not.)
+                let _ = unsafe { WaitNamedPipeW(&HSTRING::from(&name), BUSY_STEP) };
             }
             Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Err(unreached()),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => return Err(Failure::new("access_denied", "Glance's interface is not open to this process.")),
@@ -70,7 +78,8 @@ fn connect_saying(hello: &Value, stop: &Event) -> Result<(End, Lines), Failure> 
     }
 }
 
-/// Whether the process serving the pipe at `end` runs as this Windows user.
+/// Whether the process serving the pipe at `end` runs as this Windows user, at medium integrity or above (a pipe of
+/// that name a sandboxed program of the user's made first is not Glance's).
 fn served_by_this_user(end: &End) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::TOKEN_QUERY;
@@ -89,9 +98,9 @@ fn served_by_this_user(end: &End) -> bool {
     if !opened {
         return false;
     }
-    let sid = crate::elevation::token_sid(token);
+    let users = crate::elevation::user_sid().is_some_and(|sid| super::token_is_users(token, &sid));
     let _ = unsafe { CloseHandle(token) };
-    sid.is_some() && sid == crate::elevation::user_sid()
+    users
 }
 
 /// Call `tool` asked of Glance with `args`, and its answer: given up, the connection closed (which stops it there),

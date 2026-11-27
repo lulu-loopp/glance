@@ -255,7 +255,8 @@ impl Series {
 pub struct Minute {
     pub start: u64,
     pub samples: u32,
-    values: Vec<(u32, f32)>,
+    /// Each series' average over the minute, by its number, and how many of the minute's samples had it.
+    values: Vec<(u32, f32, u16)>,
 }
 
 /// A day of minutes, and the one under way.
@@ -316,8 +317,8 @@ impl Minutes {
     /// The minute under way kept as it is.
     fn close(&mut self) {
         if let Some((start, samples, sums)) = self.open.take() {
-            let mut values: Vec<(u32, f32)> = sums.into_iter().map(|(number, (sum, count))| (number, (sum / f64::from(count)) as f32)).collect();
-            values.sort_unstable_by_key(|&(number, _)| number);
+            let mut values: Vec<(u32, f32, u16)> = sums.into_iter().map(|(number, (sum, count))| (number, (sum / f64::from(count)) as f32, u16::try_from(count).unwrap_or(u16::MAX))).collect();
+            values.sort_unstable_by_key(|&(number, ..)| number);
             self.kept.push_back(Minute { start, samples, values });
         }
     }
@@ -327,10 +328,12 @@ impl Minutes {
         self.kept.iter().filter(|minute| minute.start >= from && minute.start + MINUTE_MS <= until).cloned().collect()
     }
 
-    /// `series`' average over `minute`: none where no sample of it had it.
-    pub fn value(&self, minute: &Minute, series: &Series) -> Option<f64> {
+    /// `series`' average over `minute`, and how many of its samples had it: none where none did.
+    pub fn value(&self, minute: &Minute, series: &Series) -> Option<(f64, u32)> {
         let number = *self.numbers.get(series.name().as_str())?;
-        minute.values.binary_search_by_key(&number, |&(number, _)| number).ok().map(|at| f64::from(minute.values[at].1))
+        let at = minute.values.binary_search_by_key(&number, |&(number, ..)| number).ok()?;
+        let (_, average, count) = minute.values[at];
+        Some((f64::from(average), u32::from(count)))
     }
 
     /// How many minutes are kept, and when the first began.
@@ -417,9 +420,9 @@ pub(crate) mod tests {
         let kept = minutes.between(0, u64::MAX);
         assert_eq!(kept.len(), 1);
         assert_eq!((kept[0].start, kept[0].samples), (base, 3));
-        assert_eq!(minutes.value(&kept[0], &Series::CpuPercent), Some(20.0));
-        assert_eq!(minutes.value(&kept[0], &Series::MemoryUsed), Some(100.0));
-        assert_eq!(minutes.value(&kept[0], &Series::Program("rustc.exe".into(), ProgramSeries::Cpu)), Some(50.0));
+        assert_eq!(minutes.value(&kept[0], &Series::CpuPercent), Some((20.0, 2)), "of the two samples that had it");
+        assert_eq!(minutes.value(&kept[0], &Series::MemoryUsed), Some((100.0, 3)));
+        assert_eq!(minutes.value(&kept[0], &Series::Program("rustc.exe".into(), ProgramSeries::Cpu)), Some((50.0, 3)));
         assert_eq!(minutes.value(&kept[0], &Series::GameFps), None);
         // A day on: the first minute let go of.
         minutes.add(&sample(base + 2 * MINUTE_MS, None));

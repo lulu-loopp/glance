@@ -16,6 +16,7 @@ pub const BEFORE: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
 /// The `_meta` keys a request of the current version tells its version by.
 const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 const SERVER_KEY: &str = "io.modelcontextprotocol/serverInfo";
 
 /// How long the tool list may be kept by a client (ms): it changes only with Glance's version.
@@ -98,31 +99,40 @@ pub fn serve() {
             }
         };
         if let Value::Array(batch) = message {
-            // (A batch, as 2025-03-26 allowed: its answers together, once all are had.)
+            // (A batch, as 2025-03-26 alone allowed: its answers together, once all are had, its calls kept under their
+            // ids before any is asked, so that a cancelling heard meanwhile stops one not begun yet too.)
+            if state.lock().unwrap().agreed.as_deref() != Some("2025-03-26") {
+                send(&out, &error_message(Value::Null, -32600, "Batches are not supported in this protocol version.", None));
+                continue;
+            }
             if batch.is_empty() {
                 send(&out, &error_message(Value::Null, -32600, "An empty batch.", None));
                 continue;
             }
+            for message in &batch {
+                kept_as_call(message, &state);
+            }
             let (out, state) = (out.clone(), state.clone());
             std::thread::spawn(move || {
-                let answers: Vec<Value> = batch.iter().filter_map(|message| answered(message, &state, true)).collect();
+                let answers: Vec<Value> = batch.iter().filter_map(|message| answered(message, &state)).collect();
                 if !answers.is_empty() {
                     send(&out, &Value::Array(answers));
                 }
             });
             continue;
         }
-        // A call asked of Glance answered on a thread of its own: what comes meanwhile (its cancelling) is heard.
-        if message.get("method").and_then(Value::as_str) == Some("tools/call") && message.get("id").is_some() {
+        // A call asked of Glance answered on a thread of its own: what comes meanwhile (its cancelling) is heard, the
+        // call kept under its id first, before anything after it is read.
+        if kept_as_call(&message, &state) {
             let (out, state) = (out.clone(), state.clone());
             std::thread::spawn(move || {
-                if let Some(answer) = answered(&message, &state, false) {
+                if let Some(answer) = answered(&message, &state) {
                     send(&out, &answer);
                 }
             });
             continue;
         }
-        if let Some(answer) = answered(&message, &state, false) {
+        if let Some(answer) = answered(&message, &state) {
             send(&out, &answer);
         }
     }
@@ -148,8 +158,20 @@ fn error_message(id: Value, code: i64, message: &str, data: Option<Value>) -> Va
     json!({ "jsonrpc": "2.0", "id": id, "error": error })
 }
 
+/// Whether `message` is a call of a tool (a request): kept under its id, as one under way, if it is.
+fn kept_as_call(message: &Value, state: &Mutex<State>) -> bool {
+    let id = message.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64());
+    match id {
+        Some(id) if message.get("method").and_then(Value::as_str) == Some("tools/call") => {
+            state.lock().unwrap().calls.insert(id.to_string(), (Arc::new(Event::new()), false));
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The answer to `message` (none to a notification, or a call cancelled): a call asked of Glance waited for here.
-fn answered(message: &Value, state: &Mutex<State>, in_batch: bool) -> Option<Value> {
+fn answered(message: &Value, state: &Mutex<State>) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(error_message(Value::Null, -32600, "A message must be an object.", None));
     };
@@ -173,7 +195,14 @@ fn answered(message: &Value, state: &Mutex<State>, in_batch: bool) -> Option<Val
             notified(method, &params, state);
             Answer::None
         }
-        Some(id) => asked(id, method, &params, state, in_batch),
+        Some(id) => {
+            let answer = asked(id, method, &params, state);
+            // (A call refused before it ran is no longer kept as one under way.)
+            if method == "tools/call" {
+                state.lock().unwrap().calls.remove(&id.to_string());
+            }
+            answer
+        }
     };
     let id = id?;
     match answer {
@@ -196,11 +225,22 @@ fn notified(method: &str, params: &Value, state: &Mutex<State>) {
 }
 
 /// The answer to request `id`, `method` with `params`.
-fn asked(id: &Value, method: &str, params: &Value, state: &Mutex<State>, in_batch: bool) -> Answer {
-    // As of which version: the one it says (the current way), else the one agreed on shaking hands.
-    let said = params.get("_meta").and_then(|meta| meta.get(VERSION_KEY)).and_then(Value::as_str);
+fn asked(id: &Value, method: &str, params: &Value, state: &Mutex<State>) -> Answer {
+    // As of which version: the one it says (the current way, with what else that asks of every request), else the
+    // one agreed on shaking hands.
+    let meta = params.get("_meta");
+    let said = match meta.and_then(|meta| meta.get(VERSION_KEY)) {
+        None => None,
+        Some(Value::String(version)) => Some(version.as_str()),
+        Some(_) => return Answer::Error(-32602, format!("{VERSION_KEY} must be a string."), None),
+    };
     let era = match said {
-        Some(version) if CURRENT.contains(&version) => Era { version: version.to_string(), current: true },
+        Some(version) if CURRENT.contains(&version) => {
+            if !meta.and_then(|meta| meta.get(CAPABILITIES_KEY)).is_some_and(Value::is_object) {
+                return Answer::Error(-32602, format!("{CAPABILITIES_KEY} must be given, as an object."), None);
+            }
+            Era { version: version.to_string(), current: true }
+        }
         Some(version) if BEFORE.contains(&version) => Era { version: version.to_string(), current: false },
         Some(version) => {
             let supported: Vec<&str> = CURRENT.iter().chain(BEFORE.iter()).copied().collect();
@@ -257,15 +297,15 @@ fn asked(id: &Value, method: &str, params: &Value, state: &Mutex<State>, in_batc
             if !(arguments.is_object() || arguments.is_null()) {
                 return Answer::Error(-32602, "A tool's arguments must be an object.".into(), None);
             }
-            // (Kept under its id while it runs: a cancelling heard meanwhile stops it.)
+            // (Kept under its id while it runs, as it was read: a cancelling heard meanwhile stops it, one heard before
+            // it began keeps it from beginning, and a call cancelled is not answered.)
             let key = id.to_string();
-            let stop = Arc::new(Event::new());
-            state.lock().unwrap().calls.insert(key.clone(), (stop.clone(), false));
-            let answer = super::client::call(name, &arguments, &stop);
+            let stop = state.lock().unwrap().calls.entry(key.clone()).or_insert_with(|| (Arc::new(Event::new()), false)).0.clone();
+            let answer = (!stop.is_set()).then(|| super::client::call(name, &arguments, &stop));
             let (_, cancelled) = state.lock().unwrap().calls.remove(&key).unwrap_or((stop, false));
-            if cancelled && !in_batch {
+            let Some(answer) = answer.filter(|_| !cancelled) else {
                 return Answer::None;
-            }
+            };
             result(&era, called(answer, &era))
         }
         _ => Answer::Error(-32601, format!("Method not found: {method}"), None),
@@ -319,7 +359,7 @@ mod tests {
     }
 
     fn ask(state: &Mutex<State>, message: Value) -> Option<Value> {
-        answered(&message, state, false)
+        answered(&message, state)
     }
 
     /// A client that shakes hands is answered the version it asked for where it is one spoken, else the latest of
@@ -359,6 +399,36 @@ mod tests {
         assert_eq!(refused["error"]["code"], -32022);
         assert_eq!(refused["error"]["data"]["requested"], "1900-01-01");
         assert_eq!(refused["error"]["data"]["supported"][0], "2026-07-28");
+    }
+
+    /// A request of the current version says, beside its version as a string, what its client can do: refused
+    /// without, as with a version that is not a string.
+    #[test]
+    fn a_request_of_the_current_version_says_what_it_asks_of_every_one() {
+        let state = state();
+        let missing = ask(&state, json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } })).unwrap();
+        assert_eq!(missing["error"]["code"], -32602);
+        let number = ask(&state, json!({ "jsonrpc": "2.0", "id": 2, "method": "ping", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": 20260728, "io.modelcontextprotocol/clientCapabilities": {} } } })).unwrap();
+        assert_eq!(number["error"]["code"], -32602);
+        let fine = ask(&state, json!({ "jsonrpc": "2.0", "id": 3, "method": "ping", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } })).unwrap();
+        assert_eq!(fine["result"]["resultType"], "complete");
+    }
+
+    /// A call cancelled before it began is not asked of Glance, nor answered, and is no longer kept as one under way;
+    /// one refused before it ran is not kept either.
+    #[test]
+    fn a_call_cancelled_before_it_begins_is_not_answered() {
+        let state = state();
+        let call = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "glance_status", "arguments": {} } });
+        assert!(kept_as_call(&call, &state));
+        assert_eq!(ask(&state, json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } })), None);
+        assert_eq!(ask(&state, call), None);
+        assert!(state.lock().unwrap().calls.is_empty());
+        let unknown = json!({ "jsonrpc": "2.0", "id": "u", "method": "tools/call", "params": { "name": "delete_files" } });
+        assert!(kept_as_call(&unknown, &state));
+        assert_eq!(ask(&state, unknown).unwrap()["error"]["code"], -32602);
+        assert!(state.lock().unwrap().calls.is_empty());
+        assert!(!kept_as_call(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &state));
     }
 
     /// What is not a request is refused as JSON-RPC asks, a method not had told apart from a tool not had.

@@ -399,6 +399,10 @@ pub fn walk(index: &Index, root: &str, places: &Places, folder: u32, bin: bool, 
         }
     });
     let started_in_bin = recycle.is_some_and(|recycle| folder == recycle || index.lies_in(folder, recycle));
+    // (Asked first too: of many small walks one after another, none would meet enough to ask.)
+    if !going() {
+        return None;
+    }
     let mut walked = Walked::default();
     let mut met = 0u32;
     let mut stack = vec![(folder, within_at(index, folder, windows), started_in_bin)];

@@ -155,6 +155,15 @@ pub fn follow(settings: &crate::settings::Settings) {
     let _ = sender.send(on);
 }
 
+/// The integrity level (a token's label's RID) a process must have at least to be served by the pipe or to serve it:
+/// medium, an ordinary program's (a browser's sandbox, at low, is neither).
+pub(crate) const MEDIUM: u32 = 0x2000;
+
+/// Whether `token` (opened to be queried) is of this Windows user's (`sid`), at medium integrity or above.
+pub(crate) fn token_is_users(token: windows::Win32::Foundation::HANDLE, sid: &str) -> bool {
+    crate::link::token_facts(token).is_some_and(|(user, integrity)| user == sid && integrity >= MEDIUM)
+}
+
 /// When an agent last asked what AI tools spent (ms since 1970): it is read for a while after, as if it were shown.
 static AI_ASKED: AtomicU64 = AtomicU64::new(0);
 
