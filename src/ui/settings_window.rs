@@ -5151,7 +5151,7 @@ impl Ui {
             }
             Switch::NearbyNotice => (
                 p("在屏幕边缘提示", "Show at the screen edge"),
-                Some(p("有设备请求发送或收到文件时，在工作台所在的边缘提示", "When a device asks to send or files arrive, at the edge Workbench is on")),
+                Some(p("有设备请求发送或收到文件时，在工作台所在的边缘提示", "When a device asks to send or files arrive, on the edge where Workbench is")),
                 self.settings.nearby_notice,
             ),
             // The version this is, where the user looks for a newer one.
