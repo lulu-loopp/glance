@@ -253,6 +253,14 @@ pub fn answer(stream: &mut impl Write, status: u16, json: Option<&str>) -> io::R
     stream.flush()
 }
 
+/// How `address` is named as a request's host: an IPv6 address in brackets, as a URL writes it.
+pub fn host_of(address: std::net::IpAddr) -> String {
+    match address {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
 /// A request's head: `method` at `path` (with its query) of `host`, with a body of `length` bytes as JSON where
 /// `json`, else as bytes.
 pub fn ask(stream: &mut impl Write, method: &str, path: &str, host: &str, length: u64, json: bool) -> io::Result<()> {

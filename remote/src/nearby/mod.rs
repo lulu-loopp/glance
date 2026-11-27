@@ -16,7 +16,7 @@ pub mod tls;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -71,6 +71,10 @@ pub struct Info {
     /// It is Glance's (a PC's or a phone's), as it says beside what LocalSend's devices say (which they pass over).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub glance: bool,
+    /// Where else it is reached, as Glance's devices say beside the rest (each network's address and the port): a
+    /// device added by its address is reached at another once that one no longer answers (see `Added`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<SocketAddr>,
 }
 
 /// A device known on the network: what it said of itself, where it was, when it was last heard.
@@ -156,12 +160,32 @@ pub enum Event {
     /// It is over: the files that came whole (none, where it was cancelled or failed before any did), and why it
     /// ended short, where it did.
     Came { session: String, from: Sender, files: Vec<Came>, short: Option<String> },
-    /// The devices seen lately, as they are now.
-    Devices { devices: Vec<Device> },
+    /// The devices seen lately, as they are now, and those added by their addresses (found or not).
+    Devices { devices: Vec<Device>, added: Vec<Added> },
+    /// Where other devices reach this PC: its port, and each network's address.
+    Me { port: u16, addresses: Vec<discover::Address> },
+    /// A device asked to be added by its address (see `link::Command::Add`): how that went.
+    Added { job: u64, outcome: Adding },
     /// A sending of this PC's: how it goes.
     Sending { job: u64, state: send::State },
     /// A device found nearby that Glance asked to trust (see `link::Command::Trust`): trusted, or why not.
     Trusted { fingerprint: String, why_not: Option<String> },
+}
+
+/// How a device asked to be added by its address went (see `run::Running::add`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Adding {
+    /// Added, as the device of `fingerprint`: `known` where it was already, found nearby or added before.
+    Added { fingerprint: String, known: bool },
+    /// What was given is no address.
+    NotAnAddress,
+    /// Nothing answered there.
+    Unreachable,
+    /// Something answered, but not as a LocalSend device does.
+    NotLocalSend,
+    /// It is this PC.
+    Itself,
 }
 
 /// What tells Glance and asks it.
@@ -193,6 +217,8 @@ pub struct Kept {
     pub trusted: Vec<Trusted>,
     /// Devices not trusted are turned away, not asked about.
     pub others_refused: bool,
+    /// The devices added by their addresses (see `Added`).
+    pub added: Vec<Added>,
     /// The most one file may be, and all of one sending, as the station can hold them (Glance keeps them: none
     /// kept, `MOST_FILE` and no more than the drive holds).
     pub most_file: Option<u64>,
@@ -216,6 +242,44 @@ pub struct Trusted {
     pub phone: Option<String>,
     /// It said it is Glance's (see `Info::glance`), as it was trusted.
     pub glance: bool,
+}
+
+/// A device added by its address, where it is not found nearby (on another network, as across a campus): known by its
+/// certificate (as it proved holding it when it was added, or as it said, where it speaks plain HTTP), told of this PC
+/// now and then (see `run::Running::reach_added`), and reached at the addresses it was added by or told, the one that
+/// last answered first.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Added {
+    pub fingerprint: String,
+    pub alias: String,
+    pub model: Option<String>,
+    pub kind: Option<String>,
+    pub glance: bool,
+    pub https: bool,
+    pub addresses: Vec<SocketAddr>,
+    /// When it was added (seconds since 1970).
+    pub since: u64,
+}
+
+/// The most addresses a device added is kept with.
+const MOST_ADDRESSES: usize = 8;
+
+impl Added {
+    /// Reached at `first` (it answered there), and told at `others` too: `first` first, then the others, then those
+    /// known before, each once, `MOST_ADDRESSES` at most. Whether that changed what is kept.
+    pub fn reached_at(&mut self, first: SocketAddr, others: &[SocketAddr]) -> bool {
+        let mut addresses = vec![first];
+        for address in others.iter().chain(&self.addresses) {
+            if !addresses.contains(address) {
+                addresses.push(*address);
+            }
+        }
+        addresses.truncate(MOST_ADDRESSES);
+        let changed = addresses != self.addresses;
+        self.addresses = addresses;
+        changed
+    }
 }
 
 impl Kept {
@@ -351,6 +415,8 @@ pub struct Receiver {
     asking: Mutex<Option<IpAddr>>,
     /// The devices heard lately (see `discover`).
     pub devices: Mutex<HashMap<String, Device>>,
+    /// Where other devices reach this PC, network by network (see `discover::addresses`), as last looked at.
+    addresses: Mutex<Vec<discover::Address>>,
     callers: Mutex<HashMap<IpAddr, usize>>,
 }
 
@@ -373,32 +439,34 @@ impl Receiver {
             }
         }
         let receipts = Receipt::folder(&inbox);
-        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(None), devices: Mutex::default(), callers: Mutex::default() })
+        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(None), devices: Mutex::default(), addresses: Mutex::default(), callers: Mutex::default() })
     }
 
     /// Serves what comes to `listener`, a thread to each, for as long as it listens.
     pub fn serve(self: &Arc<Self>, listener: TcpListener) {
         for stream in listener.incoming().flatten() {
-            let Ok(peer) = stream.peer_addr() else { continue };
+            // (Who calls, as its address is: one over IPv4 reaches a listener of both kinds as an IPv6 address that maps
+            // it, and is the same device as one heard over IPv4.)
+            let Ok(from) = stream.peer_addr().map(|peer| peer.ip().to_canonical()) else { continue };
             {
                 let mut callers = self.callers.lock().unwrap();
-                if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&peer.ip()).copied().unwrap_or(0) >= AT_ONCE_EACH {
+                if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&from).copied().unwrap_or(0) >= AT_ONCE_EACH {
                     continue;
                 }
-                *callers.entry(peer.ip()).or_default() += 1;
+                *callers.entry(from).or_default() += 1;
             }
             let receiver = self.clone();
             std::thread::spawn(move || {
-                if let Err(error) = receiver.connection(stream, peer.ip()) {
+                if let Err(error) = receiver.connection(stream, from) {
                     if error.kind() != std::io::ErrorKind::UnexpectedEof && error.kind() != std::io::ErrorKind::ConnectionReset {
-                        crate::journal::note(format!("nearby: {}: {error}", peer.ip()));
+                        crate::journal::note(format!("nearby: {from}: {error}"));
                     }
                 }
                 let mut callers = receiver.callers.lock().unwrap();
-                if let Some(count) = callers.get_mut(&peer.ip()) {
+                if let Some(count) = callers.get_mut(&from) {
                     *count -= 1;
                     if *count == 0 {
-                        callers.remove(&peer.ip());
+                        callers.remove(&from);
                     }
                 }
             });
@@ -467,13 +535,58 @@ impl Receiver {
     /// runs: told so from then on), else as it was started.
     pub fn me(&self) -> Info {
         let name = (self.kept)().name;
-        Info { alias: if name.trim().is_empty() { self.info.alias.clone() } else { name }, ..self.info.clone() }
+        let port = self.info.port.unwrap_or(PORT);
+        let addresses = self.addresses.lock().unwrap().iter().map(|address| SocketAddr::new(address.address, port)).collect();
+        Info { alias: if name.trim().is_empty() { self.info.alias.clone() } else { name }, addresses, ..self.info.clone() }
     }
 
     /// What this PC says of itself, as an answer to `register` and `info`.
     fn about(&self) -> String {
         let info = &self.me();
-        json!({ "alias": info.alias, "version": VERSION, "deviceModel": info.device_model, "deviceType": info.device_type, "fingerprint": info.fingerprint, "download": false, "glance": true }).to_string()
+        json!({ "alias": info.alias, "version": VERSION, "deviceModel": info.device_model, "deviceType": info.device_type, "fingerprint": info.fingerprint, "download": false, "glance": true, "addresses": info.addresses }).to_string()
+    }
+
+    /// Where other devices reach this PC, as looked at now (`discover::addresses`): kept, and Glance told where it
+    /// changed.
+    pub fn addressed(&self, addresses: Vec<discover::Address>) {
+        let changed = {
+            let mut kept = self.addresses.lock().unwrap();
+            let changed = *kept != addresses;
+            *kept = addresses;
+            changed
+        };
+        if changed {
+            self.tell_me();
+        }
+    }
+
+    /// Glance told where other devices reach this PC.
+    pub fn tell_me(&self) {
+        let addresses = self.addresses.lock().unwrap().clone();
+        self.told.tell(Event::Me { port: self.info.port.unwrap_or(PORT), addresses });
+    }
+
+    /// Glance told the devices seen lately, and those added by their addresses.
+    pub fn tell_devices(&self) {
+        self.told.tell(Event::Devices { devices: self.devices_now(), added: self.added() });
+    }
+
+    /// The devices added by their addresses (see `Added`), as kept now.
+    pub fn added(&self) -> Vec<Added> {
+        (self.kept)().added
+    }
+
+    /// What is kept of the devices added by their addresses, changed by `change` (Glance told where it changed).
+    pub fn change_added(&self, change: &(dyn Fn(&mut Vec<Added>) -> bool + Sync)) {
+        let changed = std::sync::atomic::AtomicBool::new(false);
+        (self.keep)(&|kept| {
+            if change(&mut kept.added) {
+                changed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        if changed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.tell_devices();
+        }
     }
 
     fn asked(&self, method: &str, path: &str, head: &http::Head, body: &[u8], from: IpAddr, verified: Option<String>) -> Result<Option<(u16, String)>, Refused> {
@@ -525,11 +638,23 @@ impl Receiver {
         let changed = {
             let mut devices = self.devices.lock().unwrap();
             let changed = devices.get(&fingerprint).is_none_or(|was| was.alias != device.alias || was.address != device.address || was.port != device.port);
-            devices.insert(fingerprint, device);
+            devices.insert(fingerprint.clone(), device.clone());
             changed
         };
+        // A device added by its address that proved itself (a certificate presented, or reached pinned to it): kept as
+        // reached where it spoke from, and at the addresses it tells of, its name as it says now.
+        if verified.is_some() && self.added().iter().any(|added| added.fingerprint.eq_ignore_ascii_case(&fingerprint)) {
+            let at = SocketAddr::new(address, device.port);
+            self.change_added(&|added| {
+                let Some(added) = added.iter_mut().find(|added| added.fingerprint.eq_ignore_ascii_case(&fingerprint)) else { return false };
+                let named = added.alias != device.alias || added.model != device.model;
+                added.alias = device.alias.clone();
+                added.model = device.model.clone();
+                added.reached_at(at, &info.addresses) || named
+            });
+        }
         if changed {
-            self.told.tell(Event::Devices { devices: self.devices_now() });
+            self.tell_devices();
         }
     }
 

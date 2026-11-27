@@ -4,10 +4,11 @@
 //! hears (or, where that fails, answers in the group, as the protocol allows).
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -31,16 +32,61 @@ pub struct Discovery {
     registered: Mutex<HashMap<String, Instant>>,
 }
 
-/// The IPv4 address of each network this PC is on and up (not its loopback).
-pub fn networks() -> Vec<Ipv4Addr> {
+/// The IPv4 addresses among `addresses`: the networks this PC announces itself on.
+fn networks_of(addresses: &[Address]) -> Vec<Ipv4Addr> {
+    addresses
+        .iter()
+        .filter_map(|address| match address.address {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+/// An address another device reaches this PC at: on which network (as Windows names it), and the address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Address {
+    pub network: String,
+    pub address: IpAddr,
+}
+
+/// An IPv6 address of a network as Windows keeps it: the address, how its prefix and the rest came (Windows'
+/// `NL_PREFIX_ORIGIN` and `NL_SUFFIX_ORIGIN`), and how long it is valid (seconds).
+#[derive(Clone, Copy, Debug)]
+pub struct V6 {
+    pub address: Ipv6Addr,
+    pub prefix: i32,
+    pub suffix: i32,
+    pub valid: u32,
+}
+
+/// The addresses of a network another device may reach this PC at over IPv6 (ones of the Internet's, 2000::/3: an
+/// address of the link alone, fe80::, reaches nothing beyond it), the one meant to last longest: given by hand or by
+/// the network's DHCP, then one made of the network card's own address, then the one valid longest (an address made
+/// up for privacy is replaced within a day or a week). None where there is none.
+pub fn lasting(addresses: &[V6]) -> Option<Ipv6Addr> {
+    // (Windows' NL_PREFIX_ORIGIN: IpPrefixOriginManual 1, IpPrefixOriginDhcp 3. NL_SUFFIX_ORIGIN: IpSuffixOriginManual
+    // 1, IpSuffixOriginDhcp 3, IpSuffixOriginLinkLayerAddress 4.)
+    let rank = |v6: &V6| match (v6.prefix, v6.suffix) {
+        (1 | 3, _) | (_, 1 | 3) => 0,
+        (_, 4) => 1,
+        _ => 2,
+    };
+    addresses.iter().filter(|v6| v6.address.segments()[0] & 0xe000 == 0x2000).min_by_key(|v6| (rank(v6), std::cmp::Reverse(v6.valid))).map(|v6| v6.address)
+}
+
+/// What other devices may reach this PC at, network by network (each up, not its loopback): its IPv6 address meant
+/// to last (see `lasting`), first, then its IPv4 ones (not those of the link alone, 169.254.x.x). Only addresses in
+/// use are counted (an IPv6 one still being checked as unique, or deprecated, is not).
+pub fn addresses() -> Vec<Address> {
     use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH};
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
-    use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+    use windows::Win32::Networking::WinSock::{IpDadStatePreferred, AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
     let mut size = 16u32 << 10;
     let mut buffer: Vec<u64> = Vec::new();
     for _ in 0..3 {
         buffer = vec![0u64; size as usize / 8 + 1];
-        let result = unsafe { GetAdaptersAddresses(AF_INET.0 as u32, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, None, Some(buffer.as_mut_ptr().cast()), &mut size) };
+        let result = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, None, Some(buffer.as_mut_ptr().cast()), &mut size) };
         match result {
             0 => break,
             // (Too small: as large as it said, and again.)
@@ -53,6 +99,8 @@ pub fn networks() -> Vec<Ipv4Addr> {
     while !adapter.is_null() {
         let this = unsafe { &*adapter };
         if this.OperStatus == IfOperStatusUp && this.IfType != IF_TYPE_SOFTWARE_LOOPBACK {
+            let network = unsafe { this.FriendlyName.to_string() }.unwrap_or_default();
+            let (mut v4s, mut v6s) = (Vec::new(), Vec::new());
             let mut unicast = this.FirstUnicastAddress;
             while !unicast.is_null() {
                 let address = unsafe { &*unicast };
@@ -61,15 +109,45 @@ pub fn networks() -> Vec<Ipv4Addr> {
                     let v4 = unsafe { &*(socket as *const SOCKADDR_IN) };
                     let ip = Ipv4Addr::from(u32::from_be(unsafe { v4.sin_addr.S_un.S_addr }));
                     if !ip.is_loopback() && !ip.is_link_local() {
-                        found.push(ip);
+                        v4s.push(ip);
                     }
+                } else if !socket.is_null() && unsafe { (*socket).sa_family } == AF_INET6 && address.DadState == IpDadStatePreferred {
+                    let v6 = unsafe { &*(socket as *const SOCKADDR_IN6) };
+                    v6s.push(V6 { address: Ipv6Addr::from(unsafe { v6.sin6_addr.u.Byte }), prefix: address.PrefixOrigin.0, suffix: address.SuffixOrigin.0, valid: address.ValidLifetime });
                 }
                 unicast = address.Next;
             }
+            found.extend(lasting(&v6s).map(|v6| Address { network: network.clone(), address: IpAddr::V6(v6) }));
+            found.extend(v4s.into_iter().map(|v4| Address { network: network.clone(), address: IpAddr::V4(v4) }));
         }
         adapter = this.Next;
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A network's IPv6 address told to other devices is one of the Internet's (never one of the link alone, nor a
+    /// local one), the one meant to last: given by hand or by DHCP, then one made of the card's own address, then the
+    /// one valid longest (not an address made up for privacy, replaced within days).
+    #[test]
+    fn the_ipv6_address_told_is_the_one_meant_to_last() {
+        let v6 = |text: &str, prefix: i32, suffix: i32, valid: u32| V6 { address: text.parse().unwrap(), prefix, suffix, valid };
+        // (Prefix by router advertisement 4, suffix random 5: a privacy address, valid a day, beside the lasting one.)
+        let made_up = v6("2001:da8:215:3c01:a1b2:c3d4:e5f6:1", 4, 5, 86_400);
+        let lasting_random = v6("2001:da8:215:3c01:1111:2222:3333:4444", 4, 5, 2_592_000);
+        let link = v6("fe80::1", 0, 4, u32::MAX);
+        let local = v6("fd00::1", 1, 1, u32::MAX);
+        assert_eq!(lasting(&[made_up, lasting_random, link, local]), Some(lasting_random.address));
+        let card = v6("2001:da8:215:3c01:2e0:4cff:fe68:1", 4, 4, 86_400);
+        assert_eq!(lasting(&[made_up, lasting_random, card]), Some(card.address));
+        let dhcp = v6("2001:da8:215:3c01::5a2", 3, 3, 3_600);
+        assert_eq!(lasting(&[made_up, card, dhcp]), Some(dhcp.address));
+        assert_eq!(lasting(&[link, local]), None);
+        assert_eq!(lasting(&[]), None);
+    }
 }
 
 impl Discovery {
@@ -101,7 +179,11 @@ impl Discovery {
         // Its networks, joined as they come, and this PC announced on each new one.
         let watching = discovery.clone();
         std::thread::spawn(move || loop {
-            let now = networks();
+            // (Every address other devices reach this PC at, kept by the receiver to tell them and Glance; its IPv4
+            // ones the networks announced on.)
+            let addresses = addresses();
+            watching.receiver.addressed(addresses.clone());
+            let now = networks_of(&addresses);
             let new: Vec<Ipv4Addr> = {
                 let mut out = watching.out.lock().unwrap();
                 let new = now.iter().filter(|network| !out.1.contains(network)).copied().collect();

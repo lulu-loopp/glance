@@ -36,6 +36,8 @@ pub enum Command {
     /// Trust the device found nearby whose fingerprint is `fingerprint`, once it is reached pinned to it (told as
     /// `Event::Trusted`).
     Trust { fingerprint: String },
+    /// Add the device at `address` (an IP address, with a port or not), as asking `job` (told as `Event::Added`).
+    Add { job: u64, address: String },
 }
 
 /// Something to be sent, and the name the device is told: a file where it is (a folder's files named by their places

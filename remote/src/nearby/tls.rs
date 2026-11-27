@@ -10,7 +10,7 @@
 //! its fingerprint is the sender's beyond doubt. Its issuer is nobody's business: every device signs its own.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
@@ -82,6 +82,22 @@ impl Own {
             .with_custom_certificate_verifier(verifier)
             .with_client_auth_cert(vec![self.cert.clone()], self.key())?;
         Ok(Arc::new(config))
+    }
+}
+
+impl Own {
+    /// How this PC reaches a device known only by its address (its fingerprint not known yet): presenting its own
+    /// certificate, and taking the one the device presents (the handshake proves the device holds it), whose
+    /// fingerprint is kept (`Seen::fingerprint`), to be held against what the device says of itself.
+    pub fn client_seeing(&self) -> Result<(Arc<rustls::ClientConfig>, Arc<Seen>), rustls::Error> {
+        let provider = provider();
+        let seen = Arc::new(Seen { fingerprint: Mutex::new(None), algorithms: provider.signature_verification_algorithms });
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()?
+            .dangerous()
+            .with_custom_certificate_verifier(seen.clone())
+            .with_client_auth_cert(vec![self.cert.clone()], self.key())?;
+        Ok((Arc::new(config), seen))
     }
 }
 
@@ -170,6 +186,39 @@ impl ServerCertVerifier for Pinned {
         } else {
             Err(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure))
         }
+    }
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, signed: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, signed, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, signed: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, signed, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// The receiver's certificate, whichever it is, its fingerprint kept (see `Own::client_seeing`).
+#[derive(Debug)]
+pub struct Seen {
+    fingerprint: Mutex<Option<String>>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl Seen {
+    /// The fingerprint of the certificate the device presented, once it has.
+    pub fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.lock().unwrap().clone()
+    }
+}
+
+impl ServerCertVerifier for Seen {
+    fn verify_server_cert(&self, cert: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+        *self.fingerprint.lock().unwrap() = Some(fingerprint(cert));
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, signed: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {

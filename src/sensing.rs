@@ -92,6 +92,7 @@ pub fn run() {
         return;
     };
     std::thread::Builder::new().name("glance sensors: tasks kept".into()).spawn(keep_tasks).expect("a thread started");
+    std::thread::Builder::new().name("glance sensors: firewall kept".into()).spawn(crate::phone::keep_firewall).expect("a thread started");
     // The driver in place (its installer not waited for: see `ensure_pawnio`).
     if let Ok(exe) = std::env::current_exe() {
         crate::elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));

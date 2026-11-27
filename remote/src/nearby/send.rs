@@ -149,7 +149,7 @@ fn offered(own: &tls::Own, device: &Device, path: &str, body: &[u8], job: &Job, 
                 std::thread::sleep(LOOK_EVERY);
             }
         });
-        let answer = asked(stream, "POST", path, &device.address.to_string(), body);
+        let answer = asked(stream, "POST", path, &http::host_of(device.address), body);
         *answered.lock().unwrap() = true;
         answer
     })
@@ -167,14 +167,67 @@ fn asked(mut stream: impl Read + Write, method: &str, path: &str, host: &str, bo
 
 /// This PC as it tells of itself to another (with its port and protocol, which an answer leaves out).
 fn mine(me: &Info) -> Value {
-    json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "glance": true })
+    json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "glance": true, "addresses": me.addresses })
+}
+
+/// How reaching a device by its address alone went wrong.
+#[derive(Debug, PartialEq)]
+pub enum Unreached {
+    /// Nothing answered there.
+    Nothing,
+    /// Something answered, but not as a LocalSend device does (or it said it holds another certificate than the one
+    /// it presented).
+    NotLocalSend,
+}
+
+/// What the device at `at` says of itself (`info`), reached by its address alone: over HTTPS, its fingerprint the
+/// one of the certificate it presented (one that says it is another's is no LocalSend device); where it does not speak
+/// TLS there (a LocalSend with encryption off), over plain HTTP, its fingerprint as it says. Its port and protocol
+/// are set as it was reached.
+pub fn reached(own: &tls::Own, at: SocketAddr) -> Result<Info, Unreached> {
+    let socket = TcpStream::connect_timeout(&at, REACH).map_err(|_| Unreached::Nothing)?;
+    let _ = socket.set_read_timeout(Some(ANSWER));
+    let _ = socket.set_write_timeout(Some(ANSWER));
+    let (config, seen) = own.client_seeing().map_err(|_| Unreached::NotLocalSend)?;
+    let tls = rustls::ClientConnection::new(config, rustls::pki_types::ServerName::IpAddress(at.ip().into())).map_err(|_| Unreached::NotLocalSend)?;
+    let info = |answer: std::io::Result<(u16, Vec<u8>)>| -> Result<Info, Unreached> {
+        match answer {
+            Ok((200, body)) => serde_json::from_slice::<Info>(&body).ok().filter(|info| !info.fingerprint.is_empty()).ok_or(Unreached::NotLocalSend),
+            _ => Err(Unreached::NotLocalSend),
+        }
+    };
+    match asked(rustls::StreamOwned::new(tls, socket), "GET", "/info", &http::host_of(at.ip()), b"") {
+        Ok(answer) => {
+            let mut said = info(Ok(answer))?;
+            let proven = seen.fingerprint().ok_or(Unreached::NotLocalSend)?;
+            if !said.fingerprint.eq_ignore_ascii_case(&proven) {
+                return Err(Unreached::NotLocalSend);
+            }
+            said.fingerprint = proven;
+            said.port = Some(at.port());
+            said.protocol = Some("https".into());
+            Ok(said)
+        }
+        // (No TLS spoken there, the handshake fails on what came: asked again over plain HTTP.)
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            let socket = TcpStream::connect_timeout(&at, REACH).map_err(|_| Unreached::Nothing)?;
+            let _ = socket.set_read_timeout(Some(ANSWER));
+            let _ = socket.set_write_timeout(Some(ANSWER));
+            let mut said = info(asked(socket, "GET", "/info", &http::host_of(at.ip()), b""))?;
+            said.fingerprint = said.fingerprint.to_ascii_uppercase();
+            said.port = Some(at.port());
+            said.protocol = Some("http".into());
+            Ok(said)
+        }
+        Err(_) => Err(Unreached::NotLocalSend),
+    }
 }
 
 /// Tells the device at `address` (which announced `info`) of this PC (`register`): what it says of itself back.
 pub fn register(own: &tls::Own, me: &Info, address: IpAddr, info: &Info) -> std::io::Result<Info> {
     let https = info.protocol.as_deref() != Some("http");
     let stream = connect(own, address, info.port.unwrap_or(super::PORT), https, &info.fingerprint, ANSWER)?;
-    let (status, body) = asked(stream, "POST", "/register", &address.to_string(), mine(me).to_string().as_bytes())?;
+    let (status, body) = asked(stream, "POST", "/register", &http::host_of(address), mine(me).to_string().as_bytes())?;
     if status != 200 {
         return Err(std::io::Error::other(format!("register answered {status}")));
     }
@@ -188,7 +241,7 @@ pub fn proven(own: &tls::Own, device: &Device) -> std::io::Result<Info> {
         return Err(std::io::Error::other("it does not speak HTTPS"));
     }
     let stream = connect(own, device.address, device.port, true, &device.fingerprint, ANSWER)?;
-    let (status, body) = asked(stream, "GET", "/info", &device.address.to_string(), b"")?;
+    let (status, body) = asked(stream, "GET", "/info", &http::host_of(device.address), b"")?;
     if status != 200 {
         return Err(std::io::Error::other(format!("info answered {status}")));
     }
@@ -245,7 +298,7 @@ pub fn send(own: &tls::Own, me: &Info, device: &Device, files: &[Outgoing], numb
 }
 
 fn sending(own: &tls::Own, me: &Info, device: &Device, outgoing: &[Outgoing], job: &Job, tell: &(dyn Fn(State) + Sync)) -> std::io::Result<State> {
-    let host = device.address.to_string();
+    let host = http::host_of(device.address);
     // What each is: its id (its place), its name, how large it is, what it is; words their own preview, as LocalSend
     // tells text (alone, a message the device shows, answering 204: nothing to upload).
     let mut files = Vec::new();

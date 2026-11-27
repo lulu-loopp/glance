@@ -498,9 +498,51 @@ pub fn turn_sending(on: bool) -> bool {
     set(None, None, Some(on)).2
 }
 
+/// The firewall opened for the helper at `helper` as it runs for phones (`remote`) and for devices nearby (`nearby`,
+/// receiving or sending), and closed for what it does not run for (see `set`): each rule made anew, as it is now.
+fn open_firewall(helper: &Path, remote: bool, nearby: bool) {
+    let program = format!("program={}", helper.display());
+    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby)] {
+        let name = format!("name={rule}");
+        // (Whatever rule of that name there was goes first: one, and current.)
+        firewall(&["delete", "rule", &name]);
+        if !wanted {
+            continue;
+        }
+        let open = |protocol: &str, port: Option<u16>, from: &str| {
+            let port = port.map(|port| format!("localport={port}"));
+            let mut arguments = vec!["add", "rule", &name, "dir=in", "action=allow", protocol];
+            arguments.extend(port.as_deref());
+            arguments.extend([from, "profile=any", &program]);
+            firewall(&arguments);
+        };
+        if rule == RULE {
+            // (What phones ask of it, and their looking for it when its address has changed.)
+            open("protocol=TCP", Some(PORT), "remoteip=localsubnet");
+            open("protocol=UDP", Some(PORT), "remoteip=localsubnet");
+        } else {
+            // (What devices send and ask of it, on the port it receives on, another where that one was taken; and
+            // their saying they are there.)
+            open("protocol=TCP", None, "remoteip=any");
+            open("protocol=UDP", Some(NEARBY_PORT), "remoteip=localsubnet");
+        }
+    }
+}
+
+/// The firewall opened as the helper runs now (see `open_firewall`), its rules made anew as this Glance makes them: as
+/// the sensors start (they have the rights), so that rules an earlier Glance made are this one's once it is installed.
+pub fn keep_firewall() {
+    let Some(helper) = helper() else { return };
+    let (remote, nearby, send) = kept_flags();
+    let running = elevation::remote_enabled(&helper);
+    open_firewall(&helper, running && remote, running && (nearby || send));
+}
+
 /// The helper set to run for phones (`remote`), for devices nearby to send to it (`nearby`), and to send to devices
-/// nearby while they may not (`send`), each as asked, or else as it is: told what it runs for, the firewall opened to
-/// the local network for it as each needs (devices nearby find it alike, sending or receiving; closed as none does),
+/// nearby while they may not (`send`), each as asked, or else as it is: told what it runs for, the firewall opened for
+/// it as each needs (closed as none does): to the local network for phones, which control this PC; to every address
+/// for what devices send and ask (a device added by its address may be on another network, as across a campus: what a
+/// device not trusted sends is asked about, wherever it is), and to the local network for their saying they are there,
 /// and its task made and run anew while any is on (so it takes what it was told), else stopped and gone. Whether each
 /// is on then.
 fn set(remote: Option<bool>, nearby: Option<bool>, send: Option<bool>) -> (bool, bool, bool) {
@@ -512,32 +554,7 @@ fn set(remote: Option<bool>, nearby: Option<bool>, send: Option<bool>) -> (bool,
     let _ = asked(&helper, &["remote", word(remote)]);
     let _ = asked(&helper, &["nearby", word(nearby)]);
     let _ = asked(&helper, &["nearby", "send", word(send)]);
-    let program = format!("program={}", helper.display());
-    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby || send)] {
-        let name = format!("name={rule}");
-        // (Whatever rule of that name there was goes first: one, and current.)
-        firewall(&["delete", "rule", &name]);
-        if !wanted {
-            continue;
-        }
-        let open = |protocol: &str, port: Option<u16>| {
-            let port = port.map(|port| format!("localport={port}"));
-            let mut arguments = vec!["add", "rule", &name, "dir=in", "action=allow", protocol];
-            arguments.extend(port.as_deref());
-            arguments.extend(["remoteip=localsubnet", "profile=any", &program]);
-            firewall(&arguments);
-        };
-        if rule == RULE {
-            // (What phones ask of it, and their looking for it when its address has changed.)
-            open("protocol=TCP", Some(PORT));
-            open("protocol=UDP", Some(PORT));
-        } else {
-            // (What devices send and ask of it, on the port it receives on, another where that one was taken; and
-            // their saying they are there.)
-            open("protocol=TCP", None);
-            open("protocol=UDP", Some(NEARBY_PORT));
-        }
-    }
+    open_firewall(&helper, remote, nearby || send);
     let is_on = elevation::set_remote(&helper, remote || nearby || send);
     // Ended while it kept the screens dark its own way, it has not put them back: it is asked to now.
     if !is_on {

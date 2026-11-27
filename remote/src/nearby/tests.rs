@@ -55,11 +55,15 @@ fn both(name: &str, answer: Option<Answer>, kept: Kept) -> Both {
 
 /// The same, its user answering after thinking `thinks`.
 fn thinking(name: &str, answer: Option<Answer>, thinks: Duration, kept: Kept) -> Both {
+    thinking_on(name, answer, thinks, kept, TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap())
+}
+
+/// The same, serving on `listener`.
+fn thinking_on(name: &str, answer: Option<Answer>, thinks: Duration, kept: Kept, listener: TcpListener) -> Both {
     let dir = folder(name);
     let heard = Arc::new(Heard { answer, thinks, ..Heard::default() });
     let kept = Arc::new(Mutex::new(kept));
     let (reading, keeping) = (kept.clone(), kept.clone());
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let info = Info { alias: "Glance PC".into(), device_model: Some("Windows".into()), device_type: Some("desktop".into()), port: Some(port), protocol: Some("https".into()), ..Info::default() };
     let told: Arc<dyn Told> = heard.clone();
@@ -498,4 +502,85 @@ fn words_this_pc_sends_go_as_words() {
     let came = receipts().into_iter().find(|receipt| !receipt.files.is_empty()).expect("the files came");
     let text = came.files.iter().find(|file| file.name == "周四开会.txt").expect("the words came as a file");
     assert_eq!(std::fs::read(both.receiver.inbox().join(&text.file)).unwrap(), words.as_bytes());
+}
+
+/// A device added by its address, over IPv6 as over IPv4: reached by the address alone, known by the certificate it
+/// proved holding (never by what it only says), kept with the address it answered at first, and told of this PC, which
+/// it then finds; added again at another address, it is known already, and kept at that one first. This PC's own
+/// address, what is no address, an address nothing answers at, and something there that is no LocalSend device are
+/// each said so.
+#[test]
+fn a_device_added_by_its_address_is_kept_and_finds_this_pc() {
+    let this = both("add-this", None, Kept { on: true, ..Kept::default() });
+    let v6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let there = thinking_on("add-there", None, Duration::ZERO, Kept { on: true, ..Kept::default() }, v6);
+    let at_v6 = format!("[::1]:{}", there.device.port);
+    let fingerprint = there.receiver.own.fingerprint.clone();
+    assert_eq!(this.receiver.add(&at_v6, &[]), Adding::Added { fingerprint: fingerprint.clone(), known: false });
+    let kept = this.kept.lock().unwrap().added.clone();
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].fingerprint.as_str(), kept[0].alias.as_str(), kept[0].https), (fingerprint.as_str(), "Glance PC", true));
+    assert_eq!(kept[0].addresses.first(), Some(&at_v6.parse().unwrap()));
+    // (Told of this PC: it found it, by the certificate this PC presented.)
+    assert!(there.receiver.devices_now().iter().any(|device| device.fingerprint == this.receiver.own.fingerprint && device.address == IpAddr::from(std::net::Ipv6Addr::LOCALHOST)));
+    // (Glance was told of it among the devices added.)
+    assert!(this.heard.events.lock().unwrap().iter().any(|event| matches!(event, Event::Devices { added, .. } if added.iter().any(|added| added.fingerprint == fingerprint))));
+
+    // Added again, at the address typed without brackets or port, the port looked for as given.
+    assert_eq!(this.receiver.add(" ::1 ", &[1, there.device.port]), Adding::Added { fingerprint: fingerprint.clone(), known: true });
+    assert_eq!(this.kept.lock().unwrap().added.len(), 1);
+
+    assert_eq!(this.receiver.add(&format!("127.0.0.1:{}", this.device.port), &[]), Adding::Itself);
+    assert_eq!(this.receiver.add("10.21.140", &[]), Adding::NotAnAddress);
+    let closed = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let nobody = closed.local_addr().unwrap();
+    drop(closed);
+    assert_eq!(this.receiver.add(&nobody.to_string(), &[]), Adding::Unreachable);
+    // (Something that answers every request with a page not found, over plain HTTP: no LocalSend device.)
+    let other = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let other_at = other.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in other.incoming().flatten() {
+            let mut stream = stream;
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    assert_eq!(this.receiver.add(&other_at.to_string(), &[]), Adding::NotLocalSend);
+    assert_eq!(this.kept.lock().unwrap().added.len(), 1);
+}
+
+/// A device added and gone from where it was reached is reached again at another address it is known at, and kept
+/// with that one first.
+#[test]
+fn a_device_added_is_reached_at_another_address_once_one_no_longer_answers() {
+    let this = both("again-this", None, Kept { on: true, ..Kept::default() });
+    let there = both("again-there", None, Kept { on: true, ..Kept::default() });
+    let fingerprint = there.receiver.own.fingerprint.clone();
+    let closed = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let gone: std::net::SocketAddr = closed.local_addr().unwrap();
+    drop(closed);
+    let reached: std::net::SocketAddr = format!("127.0.0.1:{}", there.device.port).parse().unwrap();
+    this.kept.lock().unwrap().added.push(Added { fingerprint: fingerprint.clone(), alias: "Glance PC".into(), https: true, addresses: vec![gone, reached], ..Added::default() });
+    let info = Info { fingerprint: fingerprint.clone(), protocol: Some("https".into()), ..Info::default() };
+    assert!(!this.receiver.tell_added(&fingerprint, gone, &Info { port: Some(gone.port()), ..info.clone() }));
+    assert!(this.receiver.tell_added(&fingerprint, reached, &Info { port: Some(reached.port()), ..info }));
+    assert_eq!(this.kept.lock().unwrap().added[0].addresses, [reached, gone]);
+    assert!(this.receiver.devices_now().iter().any(|device| device.fingerprint == fingerprint));
+}
+
+/// A device that only says it is one added (no certificate presented, as an older LocalSend registers) changes
+/// nothing kept of it: anyone on the network could say so.
+#[test]
+fn a_device_added_is_not_moved_by_what_another_only_says() {
+    let this = both("said-this", None, Kept { on: true, ..Kept::default() });
+    let at: std::net::SocketAddr = "10.21.140.12:53320".parse().unwrap();
+    this.kept.lock().unwrap().added.push(Added { fingerprint: "AB".into(), alias: "实验室电脑".into(), https: true, addresses: vec![at], ..Added::default() });
+    let said = Info { alias: "Someone".into(), fingerprint: "AB".into(), port: Some(53320), ..Info::default() };
+    this.receiver.heard(&said, IpAddr::from([10, 9, 9, 9]), None);
+    let kept = this.kept.lock().unwrap().added[0].clone();
+    assert_eq!((kept.alias.as_str(), kept.addresses.as_slice()), ("实验室电脑", &[at][..]));
+    this.receiver.heard(&said, IpAddr::from([10, 9, 9, 9]), Some("AB"));
+    assert_eq!(this.kept.lock().unwrap().added[0].addresses.first(), Some(&"10.9.9.9:53320".parse().unwrap()));
 }
