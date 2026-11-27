@@ -59,6 +59,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 /// runs as the user, and its sensors, which run elevated.
 pub const APP: &str = "glance.exe";
 pub const SENSORS: &str = "glance-sensors.exe";
+/// What AI tools and a terminal read Glance through (see `agent`): run by them, as the user.
+pub const CLI: &str = "glance-cli.exe";
 /// The folder in Glance's own an OpenRGB put there with it is in (see `openrgb`).
 pub const OPENRGB: &str = "OpenRGB";
 
@@ -82,6 +84,13 @@ pub fn is_elevated() -> bool {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
         return false;
     }
+    let elevated = token_elevated(token);
+    let _ = unsafe { CloseHandle(token) };
+    elevated
+}
+
+/// Whether `token` (opened to be queried) is elevated.
+pub fn token_elevated(token: HANDLE) -> bool {
     let mut elevation = TOKEN_ELEVATION::default();
     let mut size = 0u32;
     let ok = unsafe {
@@ -94,7 +103,6 @@ pub fn is_elevated() -> bool {
         )
     }
     .is_ok();
-    let _ = unsafe { CloseHandle(token) };
     ok && elevation.TokenIsElevated != 0
 }
 
@@ -219,7 +227,7 @@ fn folders_hold(folder: &Path) -> bool {
 
 /// What an install folder may already hold: an earlier Glance (and what an install of it leaves while it runs, or
 /// if it was cut short).
-const INSTALLED: [&str; 13] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", OPENRGB, INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
+const INSTALLED: [&str; 14] = [APP, SENSORS, CLI, "glance-remote.exe", "uninstall.exe", "resources", "licenses", OPENRGB, INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
 /// What an install leaves while it runs (or left, cut short): none of it is an earlier Glance's own files.
 const UNDER_WAY: [&str; 6] = [INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
 /// Held, sharing nothing, by the install under way, for the whole of it: another finds it held, and does nothing.
@@ -852,7 +860,7 @@ fn remove(path: &Path) -> std::io::Result<()> {
 }
 
 /// The programs Glance installs that run.
-const PROGRAMS: [&str; 3] = [APP, SENSORS, "glance-remote.exe"];
+const PROGRAMS: [&str; 4] = [APP, SENSORS, CLI, "glance-remote.exe"];
 /// How long a program of Glance's that was ended is waited for to be gone.
 const ENDED_WITHIN_MS: u32 = 15_000;
 
@@ -1422,11 +1430,16 @@ pub fn may_start_unasked() -> bool {
 pub fn user_sid() -> Option<String> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let sid = token_sid(token);
+    let _ = unsafe { CloseHandle(token) };
+    sid
+}
+
+/// The user `token` (opened to be queried) is of, by its SID's words.
+pub fn token_sid(token: HANDLE) -> Option<String> {
     let mut buffer = vec![0u64; 64];
     let mut size = 0u32;
-    let read = unsafe { GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr().cast()), (buffer.len() * 8) as u32, &mut size) };
-    let _ = unsafe { CloseHandle(token) };
-    read.ok()?;
+    unsafe { GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr().cast()), (buffer.len() * 8) as u32, &mut size) }.ok()?;
     let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
     sid_string(user.User.Sid)
 }

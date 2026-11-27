@@ -631,6 +631,18 @@ impl Index {
         Some(folder)
     }
 
+    /// Whether the entry at `place` is in `folder`, at any depth (not it itself).
+    pub fn lies_in(&self, place: u32, folder: u32) -> bool {
+        let mut at = place;
+        while at != ROOT && at < self.len() {
+            at = self.entry(at).parent;
+            if at == folder {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Whether what changes in `folder` may change what `other` holds: it is it, or in it, or it is on the way to it.
     pub fn concerns(&self, folder: u32, other: u32) -> bool {
         let within = |mut at: u32, of: u32| loop {

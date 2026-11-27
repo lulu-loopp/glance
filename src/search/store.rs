@@ -17,22 +17,28 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, GetFileSizeEx, FILE_ATTRI
 use windows::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READONLY};
 
 const MAGIC: &[u8; 8] = b"GLNCSRCH";
-/// (4: each entry's stat kept after the entries. 5: whether each file is kept in the cloud alone.)
-const VERSION: u32 = 5;
+/// (4: each entry's stat kept after the entries. 5: whether each file is kept in the cloud alone. 6: whether it was
+/// listed with an administrator's rights.)
+const VERSION: u32 = 6;
 /// One kept with no more than that missing: searched as it was, and listed again whole behind it, as one whose
 /// journal went past where it was kept is (see `super::begun`).
 const BEFORE: u32 = 4;
+/// One kept with all but whether it was listed with an administrator's rights (see `Kept::elevated`).
+const UNSAID: u32 = 5;
 /// How long what is kept before the index is (bytes).
 const HEADER: usize = 48;
 
 /// What the index was kept with: the drive it is of, its journal and where it had come to (the changes before that
 /// are in it, or its folders they changed marked to be listed), where it has one, and whether every folder was listed
-/// at least once (else its first listing was under way: the folders not yet listed are marked to be).
+/// at least once (else its first listing was under way: the folders not yet listed are marked to be); and whether it was
+/// listed by a Glance with an administrator's rights (none: kept before that was kept with it), whose index may hold
+/// names others may not list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kept {
     pub serial: u32,
     pub journal: Option<Cursor>,
     pub whole: bool,
+    pub elevated: Option<bool>,
 }
 
 /// A drive's change journal (by its id), and where in it changes are read from next.
@@ -210,7 +216,7 @@ pub(super) fn keep_in(folder: &Path, index: &Index, kept: Kept) -> io::Result<In
         let mut out = Summed { out: BufWriter::with_capacity(1 << 20, std::fs::File::create(&new)?), sum: Sum::new() };
         out.write_all(MAGIC)?;
         out.write_all(&VERSION.to_le_bytes())?;
-        let flags = u32::from(index.by_id()) | u32::from(kept.journal.is_some()) << 1 | u32::from(!kept.whole) << 2;
+        let flags = u32::from(index.by_id()) | u32::from(kept.journal.is_some()) << 1 | u32::from(!kept.whole) << 2 | u32::from(kept.elevated == Some(true)) << 3;
         out.write_all(&flags.to_le_bytes())?;
         out.write_all(&kept.serial.to_le_bytes())?;
         out.write_all(&0u32.to_le_bytes())?;
@@ -279,11 +285,12 @@ fn read(path: &std::path::Path, serial: u32) -> Option<(Index, Kept)> {
         let u64_at = |at: usize| Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?));
         let flags = u32_at(12)?;
         let version = u32_at(8)?;
-        if !matches!(version, VERSION | BEFORE) || u32_at(16)? != serial || flags & !7 != 0 {
+        if !matches!(version, VERSION | UNSAID | BEFORE) || u32_at(16)? != serial || flags & !15 != 0 || (version != VERSION && flags & 8 != 0) {
             return None;
         }
-        let journal = (flags & 2 != 0 && version == VERSION).then(|| Some(Cursor { journal: u64_at(24)?, next: u64_at(32)? as i64 })).flatten();
-        (flags & 1 != 0, Kept { serial, journal, whole: flags & 4 == 0 }, u64_at(40)?, body.len())
+        let journal = (flags & 2 != 0 && version != BEFORE).then(|| Some(Cursor { journal: u64_at(24)?, next: u64_at(32)? as i64 })).flatten();
+        let elevated = (version == VERSION).then_some(flags & 8 != 0);
+        (flags & 1 != 0, Kept { serial, journal, whole: flags & 4 == 0, elevated }, u64_at(40)?, body.len())
     };
     Some((Index::read(bytes, HEADER, end, by_id, made)?, kept))
 }
@@ -312,7 +319,7 @@ mod tests {
     fn an_index_kept_before_is_searched_and_listed_again() {
         let folder = std::env::temp_dir().join(format!("glance-search-before-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
-        let kept = Kept { serial: 0xABCE, journal: Some(Cursor { journal: 7, next: 99 }), whole: true };
+        let kept = Kept { serial: 0xABCE, journal: Some(Cursor { journal: 7, next: 99 }), whole: true, elevated: Some(false) };
         drop(keep_in(&folder, &index(&["a.txt"]), kept).unwrap());
         let path = file(&folder, 0xABCE, 1);
         let as_version = |version: u32| {
@@ -324,9 +331,13 @@ mod tests {
             bytes[end..].copy_from_slice(&sum.0.to_le_bytes());
             std::fs::write(&path, bytes).unwrap();
         };
+        as_version(5);
+        let (read, read_kept) = kept_in(&folder, 0xABCE).unwrap();
+        assert_eq!((names(&read), read_kept), (vec!["a.txt".to_string()], Kept { elevated: None, ..kept }), "kept before its rights were said");
+        drop(read);
         as_version(4);
         let (read, read_kept) = kept_in(&folder, 0xABCE).unwrap();
-        assert_eq!((names(&read), read_kept), (vec!["a.txt".to_string()], Kept { journal: None, ..kept }));
+        assert_eq!((names(&read), read_kept), (vec!["a.txt".to_string()], Kept { journal: None, elevated: None, ..kept }));
         drop(read);
         as_version(3);
         assert!(kept_in(&folder, 0xABCE).is_none());
@@ -339,7 +350,7 @@ mod tests {
     fn indexes_are_kept_one_after_another() {
         let folder = std::env::temp_dir().join(format!("glance-search-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
-        let kept = Kept { serial: 0xABCD, journal: Some(Cursor { journal: 7, next: 99 }), whole: true };
+        let kept = Kept { serial: 0xABCD, journal: Some(Cursor { journal: 7, next: 99 }), whole: true, elevated: Some(true) };
         let first = keep_in(&folder, &index(&["a.txt"]), kept).unwrap();
         assert_eq!(names(&first), ["a.txt"]);
         let (read, read_kept) = kept_in(&folder, 0xABCD).unwrap();
@@ -348,7 +359,7 @@ mod tests {
         assert!(std::fs::remove_file(file(&folder, 0xABCD, 1)).is_err());
         drop((first, read));
 
-        let second = keep_in(&folder, &index(&["b.txt"]), Kept { journal: None, ..kept }).unwrap();
+        let second = keep_in(&folder, &index(&["b.txt"]), Kept { journal: None, elevated: Some(false), ..kept }).unwrap();
         let third = keep_in(&folder, &index(&["c.txt"]), Kept { whole: false, ..kept }).unwrap();
         assert!(!kept_in(&folder, 0xABCD).unwrap().1.whole, "kept as listed in part");
         drop(second);
@@ -364,7 +375,7 @@ mod tests {
         bytes[middle] ^= 0x40;
         std::fs::write(&last, bytes).unwrap();
         let (read, read_kept) = kept_in(&folder, 0xABCD).unwrap();
-        assert_eq!((names(&read), read_kept.journal), (vec!["b.txt".to_string()], None));
+        assert_eq!((names(&read), read_kept.journal, read_kept.elevated), (vec!["b.txt".to_string()], None, Some(false)));
         // Another drive's are not read.
         assert!(kept_in(&folder, 0x1234).is_none());
         drop(read);

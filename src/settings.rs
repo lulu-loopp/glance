@@ -1013,6 +1013,8 @@ pub struct Settings {
     /// kept by the station, see `station::keep`).
     #[serde(default)]
     pub nearby_folder: Option<std::path::PathBuf>,
+    /// Whether AI tools on this PC may read what Glance knows, through `glance-cli.exe` (see `agent`).
+    pub agent_interface: bool,
     pub view: serde_json::Value,
 }
 
@@ -1219,6 +1221,7 @@ impl Default for Settings {
             todo_day_at: "09:00".into(),
             nearby_notice: true,
             nearby_folder: None,
+            agent_interface: false,
             view: serde_json::Value::Null,
         }
     }

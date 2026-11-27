@@ -23,6 +23,7 @@ Unicode true
 !define EXE "glance.exe"
 !define SENSORS "glance-sensors.exe"
 !define REMOTE "glance-remote.exe"
+!define CLI "glance-cli.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
 !define PAWNIO_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
 
@@ -248,6 +249,8 @@ Section "Glance"
   File "..\target\release\${SENSORS}"
   ; The phone remote: another program, run only if turned on in the settings, never elevated.
   File "..\remote\target\release\${REMOTE}"
+  ; What AI tools and a terminal read Glance through, run by them as the user (only while the settings let them).
+  File "..\target\release\${CLI}"
   SetOutPath "$PLUGINSDIR\payload\resources"
   File "..\resources\PawnIO_setup.exe"
   ; What Glance is built from and ships with, and the source the modules'

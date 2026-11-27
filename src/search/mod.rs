@@ -194,7 +194,7 @@ pub fn within(path: &Path, most: usize) -> Holds {
 }
 
 /// `path` as its drive's root ("C:\\") and what follows it: none where it is not on a drive by its letter.
-fn rooted(path: &Path) -> Option<(String, PathBuf)> {
+pub fn rooted(path: &Path) -> Option<(String, PathBuf)> {
     use std::path::{Component, Prefix};
     let mut parts = path.components();
     let Some(Component::Prefix(prefix)) = parts.next() else { return None };
@@ -335,6 +335,9 @@ pub struct Standing {
     /// Whether it is listed whole (else names are still being found).
     pub ready: bool,
     pub names: usize,
+    /// Whether its index holds its names as they are now, or as they were as Glance last ran (read as kept, what
+    /// changed since not found yet).
+    pub current: bool,
 }
 
 /// What was found.
@@ -445,14 +448,27 @@ fn follow(volume: &Arc<Volume>) {
     let drive = &volume.drive;
     let pool = walk::pool();
     let journal = if drive.by_id() { journal::query(drive).ok() } else { None };
-    let kept = store::kept(drive.serial);
+    let elevated = elevated();
+    // (One listed with other rights than this Glance's: not taken where it may hold names they may not list, else
+    // listed again whole behind it.)
+    let kept = store::kept(drive.serial).and_then(|(index, kept)| match rights(kept.elevated, elevated) {
+        Rights::Same => Some((index, kept, false)),
+        Rights::Fewer => Some((index, kept, true)),
+        Rights::More => None,
+    });
     let mut keeping = Keeping::new();
     if let Some(journal) = journal {
         // (Where the journal is now, for an index not read on from where it was kept: what changes while its folders
         // are listed is read after.)
-        let from_now = store::Kept { serial: drive.serial, journal: Some(store::Cursor { journal: journal.id, next: journal.next }), whole: false };
-        let kept = kept.filter(|(index, _)| index.by_id());
-        let whole = match (begun(kept.as_ref().map(|(_, kept)| kept), &journal), kept) {
+        let from_now = store::Kept { serial: drive.serial, journal: Some(store::Cursor { journal: journal.id, next: journal.next }), whole: false, elevated: Some(elevated) };
+        let kept = kept.filter(|(index, ..)| index.by_id());
+        let relisted = kept.as_ref().is_some_and(|&(_, _, relisted)| relisted);
+        let kept = kept.map(|(index, kept, _)| (index, kept));
+        let begun = match begun(kept.as_ref().map(|(_, kept)| kept), &journal) {
+            Begun::ReadOn if relisted => Begun::Relisted,
+            begun => begun,
+        };
+        let whole = match (begun, kept) {
             // (Its folders marked to be listed listed first: a first listing cut short goes on.)
             (Begun::ReadOn, Some((index, kept))) => {
                 volume.put(index);
@@ -484,8 +500,8 @@ fn follow(volume: &Arc<Volume>) {
         });
         // What was kept found at once, and listed again (nothing kept says what changed while Glance was not
         // running); else all of it listed.
-        let whole = match kept.filter(|(index, kept)| index.by_id() == drive.by_id() && kept.journal.is_none()) {
-            Some((index, kept)) => {
+        let whole = match kept.filter(|(index, kept, _)| index.by_id() == drive.by_id() && kept.journal.is_none()) {
+            Some((index, kept, _)) => {
                 volume.put(index);
                 volume.ready.store(kept.whole, Ordering::Relaxed);
                 mark_all(volume);
@@ -493,9 +509,35 @@ fn follow(volume: &Arc<Volume>) {
             }
             None => false,
         };
-        *volume.kept.lock().unwrap() = Some(store::Kept { serial: drive.serial, journal: None, whole });
+        *volume.kept.lock().unwrap() = Some(store::Kept { serial: drive.serial, journal: None, whole, elevated: Some(elevated) });
         sweep(volume, pool, &mut keeping, true);
         follow_watch(volume, &told, pool, keeping);
+    }
+}
+
+/// Whether this Glance runs with an administrator's rights: what it lists, its index holds.
+fn elevated() -> bool {
+    static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ELEVATED.get_or_init(crate::elevation::is_elevated)
+}
+
+/// The rights an index kept was listed with, against those of this Glance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rights {
+    Same,
+    /// Fewer, or perhaps fewer: it may lack names this Glance lists.
+    Fewer,
+    /// More, or perhaps more: it may hold names this Glance's user may not list.
+    More,
+}
+
+/// The rights an index kept by a Glance elevated or not (`kept`: none where it did not say) was listed with, against
+/// those of this one, `elevated` or not.
+fn rights(kept: Option<bool>, elevated: bool) -> Rights {
+    match kept {
+        Some(kept) if kept == elevated => Rights::Same,
+        _ if elevated => Rights::Fewer,
+        _ => Rights::More,
     }
 }
 
@@ -855,7 +897,7 @@ pub fn standing() -> Vec<Standing> {
                 }
                 Err(_) => volume.names.load(Ordering::Relaxed),
             };
-            Standing { root: volume.drive.path.clone(), ready: volume.ready.load(Ordering::Relaxed), names }
+            Standing { root: volume.drive.path.clone(), ready: volume.ready.load(Ordering::Relaxed), names, current: volume.current.load(Ordering::Relaxed) }
         })
         .collect()
 }
@@ -876,12 +918,20 @@ pub fn files_named(name: &str, extensions: &[&str]) -> Vec<PathBuf> {
 /// The names meeting `query` on every drive: how many there are, how many are folders', and the best `most` folders
 /// and the best `most` files, best first.
 pub fn find(query: &Query, most: usize) -> Found {
+    find_while(query, most, || true).unwrap_or_default()
+}
+
+/// As `find`, `going` asked before each drive is searched: none once it says to stop.
+pub fn find_while(query: &Query, most: usize, going: impl Fn() -> bool) -> Option<Found> {
     if query.is_empty() {
-        return Found::default();
+        return Some(Found::default());
     }
     let volumes = VOLUMES.lock().unwrap().clone();
     let mut found = Found::default();
     for volume in &volumes {
+        if !going() {
+            return None;
+        }
         let index = volume.index.read().unwrap();
         let (total, folders, hits) = query.find(&index, &volume.drive.path, most);
         found.total += total;
@@ -892,7 +942,7 @@ pub fn find(query: &Query, most: usize) -> Found {
     if query.order().other() {
         query::in_order(&mut found.hits, query.order());
         found.hits.truncate(most);
-        return found;
+        return Some(found);
     }
     query::sort(&mut found.hits);
     let (mut folders, mut files) = (0, 0);
@@ -901,7 +951,7 @@ pub fn find(query: &Query, most: usize) -> Found {
         *shown += 1;
         *shown <= most
     });
-    found
+    Some(found)
 }
 
 #[cfg(test)]
@@ -932,6 +982,19 @@ mod tests {
         }
     }
 
+    /// An index listed with an administrator's rights is never searched by a Glance without them: it holds names its user
+    /// may not list. One kept before the rights it was listed with were kept with it may be such: not searched either.
+    /// One listed with fewer rights than this Glance's is searched, and listed again whole behind it.
+    #[test]
+    fn an_index_listed_with_other_rights_is_not_searched_as_it_was() {
+        assert_eq!(rights(Some(false), false), Rights::Same);
+        assert_eq!(rights(Some(true), true), Rights::Same);
+        assert_eq!(rights(Some(true), false), Rights::More);
+        assert_eq!(rights(None, false), Rights::More);
+        assert_eq!(rights(Some(false), true), Rights::Fewer);
+        assert_eq!(rights(None, true), Rights::Fewer);
+    }
+
     /// An index kept is read on from where it was kept while the journal still holds all since. Kept before what the
     /// journal holds now (Glance not running while it went on), or with another journal, it is searched as it was kept
     /// and listed again behind it, not listed whole from nothing: two drives here were listed from nothing as search
@@ -939,12 +1002,12 @@ mod tests {
     #[test]
     fn a_kept_index_the_journal_has_gone_past_is_searched_as_it_was_and_listed_again() {
         let journal = Journal { id: 7, first: 1000, next: 5000 };
-        let kept = |id: u64, next: i64| store::Kept { serial: 1, journal: Some(store::Cursor { journal: id, next }), whole: true };
+        let kept = |id: u64, next: i64| store::Kept { serial: 1, journal: Some(store::Cursor { journal: id, next }), whole: true, elevated: Some(false) };
         assert_eq!(begun(Some(&kept(7, 1000)), &journal), Begun::ReadOn);
         assert_eq!(begun(Some(&kept(7, 5000)), &journal), Begun::ReadOn);
         assert_eq!(begun(Some(&kept(7, 999)), &journal), Begun::Relisted);
         assert_eq!(begun(Some(&kept(8, 3000)), &journal), Begun::Relisted);
-        assert_eq!(begun(Some(&store::Kept { serial: 1, journal: None, whole: true }), &journal), Begun::Relisted);
+        assert_eq!(begun(Some(&store::Kept { serial: 1, journal: None, whole: true, elevated: Some(false) }), &journal), Begun::Relisted);
         assert_eq!(begun(None, &journal), Begun::Listed);
     }
 
@@ -989,7 +1052,7 @@ mod tests {
         let index = RwLock::new(Index::new(drive.root_id, true));
         let first = walk::round(&index, &drive, &[ROOT], &pool, Some(Instant::now()));
         assert_eq!(first.folders, 1, "the root alone listed");
-        let kept = store::Kept { serial: drive.serial, journal: Some(cursor), whole: false };
+        let kept = store::Kept { serial: drive.serial, journal: Some(cursor), whole: false, elevated: Some(false) };
         drop(store::keep_in(&kept_in, &index.read().unwrap(), kept).unwrap());
         drop(index);
 
