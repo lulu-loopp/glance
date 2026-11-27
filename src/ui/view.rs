@@ -8002,6 +8002,11 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 if current {
                     copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(*hit), Mark::Centre(cx + side / 2.0, cy + side / 2.0, side));
                 }
+                // (Why its name written in, under it or at the foot, was refused: on its picture, no line under it.
+                // Drawn by its picture alone, its name is written in a box beside it, which says why itself.)
+                if let Some(said) = scene.naming.filter(|written| current && (named || footed) && written.of.names(*hit)).and_then(|written| written.said.as_deref()) {
+                    naming::paint_said_on(frame, theme, said, (cx, cy, side, side));
+                }
                 let shown = if named { fitted(frame, &tile.label, theme.small, side + GRID_GAP - 2.0).to_string() } else { String::new() };
                 match written {
                     Some(written) => {
@@ -13208,6 +13213,13 @@ seven".into()));
                 }
             }
             assert_eq!(texts.iter().filter(|text| *text == "新名字").count(), usize::from(shows != "nowhere"), "{shows}: {texts:?}");
+            // Refused, why said on its picture, under it or at the foot alike. (Said nowhere: Enter seemed to do nothing.)
+            let refused = NameWritten { of: Named::Item(1), text: "新名字".encode_utf16().collect(), caret: 3, anchor: 0, caret_on: true, said: Some("此位置已有同名的项目".into()) };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: Some(Hit::Shelf(3)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, sound_open: false, naming: Some(&refused) };
+            let said = Said::default();
+            paint_bench(&said, &scene, theme.ink("station"), (0.0, 0.0, room.0, room.1), Rect { x: 0.0, y: 0.0, w: room.0, h: room.1 }, &bench, Shape::of(room), &mut Vec::new());
+            let texts: Vec<String> = said.3.borrow().iter().map(|(text, ..)| text.clone()).collect();
+            assert_eq!(texts.iter().any(|text| text.starts_with("此位置")), shows != "nowhere", "{shows}: why it was refused, {texts:?}");
         }
     }
 

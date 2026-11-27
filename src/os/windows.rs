@@ -89,6 +89,13 @@ pub fn accent(dark: bool) -> Option<u32> {
     Some(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32)
 }
 
+/// Whether two names are one to the file system: alike case aside, as NTFS compares them (`CompareStringOrdinal`).
+pub fn names_alike(a: &str, b: &str) -> bool {
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+    let (a, b): (Vec<u16>, Vec<u16>) = (a.encode_utf16().collect(), b.encode_utf16().collect());
+    (unsafe { CompareStringOrdinal(&a, &b, true) }) == CSTR_EQUAL
+}
+
 /// The file or folder at `from` given the name `to`, where nothing has it (one that does: `AlreadyExists`): moved, not
 /// copied, on the same drive.
 pub fn move_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {

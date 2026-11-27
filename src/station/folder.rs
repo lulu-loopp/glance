@@ -146,7 +146,7 @@ impl Folder {
     /// it, which goes with it. As Glance named it where nothing of `shown` is left; none where the link cannot be made.
     pub fn named(&self, name: &str, shown: &str) -> Option<PathBuf> {
         let own = self.path(name);
-        let shown = crate::os::file_name_of(shown, 120);
+        let shown = crate::os::file_name_of(shown, NAME_MOST);
         if shown.is_empty() {
             return Some(own);
         }
@@ -158,7 +158,7 @@ impl Folder {
         Some(link)
     }
 
-    /// Where the folder `name` sent from a device nearby is given out, the first of its files kept as `first` (see
+/// Where the folder `name` sent from a device nearby is given out, the first of its files kept as `first` (see
     /// `sent_folder`).
     pub fn sent_folder_path(&self, first: &str, name: &str) -> PathBuf {
         self.named_dir(first).join(part_name(name))
@@ -246,10 +246,15 @@ fn same(one: impl std::io::Read, other: impl std::io::Read) -> std::io::Result<b
     }
 }
 
+/// The most characters a name its files are given out by holds (see `Folder::named`, `Folder::sent_file`): where they
+/// are given out held within the most a path holds, their own folder's deep in the user's. A name written for one holds
+/// no more.
+pub const NAME_MOST: usize = 120;
+
 /// A part of a name a file was sent by (a folder's it is in, or its own), as a name may hold it (see
 /// `os::file_name_of`): "_" where nothing of it is left.
 fn part_name(part: &str) -> String {
-    let kept = crate::os::file_name_of(part, 120);
+    let kept = crate::os::file_name_of(part, NAME_MOST);
     if kept.is_empty() { "_".to_string() } else { kept }
 }
 
@@ -443,6 +448,17 @@ mod tests {
         std::fs::write(folder.dir.join(SHELF), b"{ not").unwrap();
         assert_eq!(folder.load(), Shelf::default());
         assert!(folder.dir.join("station.json.unread").exists());
+    }
+
+    /// A name as long as one written for a file it keeps may be (see `NAME_MOST`) is given out whole, its kind's ending
+    /// with it.
+    #[test]
+    fn a_name_as_long_as_one_written_is_given_out_whole() {
+        let folder = folder("long");
+        let kept = folder.keep(b"one", "png", false).unwrap();
+        let name = format!("{}.png", "图".repeat(NAME_MOST - 4));
+        let given = folder.named(&kept, &name).expect("given out");
+        assert_eq!(given.file_name().unwrap().to_string_lossy(), name);
     }
 
     #[test]

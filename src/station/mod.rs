@@ -293,20 +293,40 @@ pub fn tags_menu(thing: Thing, at: windows::Win32::Foundation::POINT, over_the_p
     Some((crate::ui::menu::Menu::open_at(rows, look, at, false, over_the_panel)?, chosen))
 }
 
-/// A new tag made at once, `things` of it, named as Windows names a new folder (see `new_tag_name`): its name to be
+/// A new tag made at once, `things` of it, named as Windows names a new folder (see `NewTags::name`): its name to be
 /// written in where it shows (see `ui::naming`).
 pub fn new_tag(things: &[Thing]) -> crate::ui::naming::Naming {
-    let name = new_tag_name(&run::shown().tags, crate::update::language());
+    let shown = run::shown();
     let (ids, keys, parts) = apart(things);
+    // (Named and asked for together: asked in the order they were named, as the station makes them.)
+    let mut asked = NEW_TAGS.lock().unwrap();
+    let name = asked.name(&shown.tags, shown.tags_made, crate::update::language());
     run::ask(run::Ask::NewTag(name.clone(), ids, keys.clone(), parts));
+    drop(asked);
     crate::ui::naming::Naming::new_tag(name, keys)
 }
 
-/// What a new tag is named among `tags`: "新建标签", or where a tag has that name, "新建标签 2", and so on, the first no
-/// tag has.
-fn new_tag_name(tags: &[shelf::Tag], lang: crate::ui::text::Lang) -> String {
-    let base = lang.pick("新建标签", "New tag");
-    (1..).map(|n| if n == 1 { base.to_string() } else { format!("{base} {n}") }).find(|name| !tags.iter().any(|tag| tag.name == *name)).unwrap()
+/// The new tags asked for (see `new_tag`): their number, and, by the number each was asked as, the names of those the
+/// station has not made yet as it last showed (see `run::Shown::tags_made`), which no other is given.
+static NEW_TAGS: std::sync::Mutex<NewTags> = std::sync::Mutex::new(NewTags { asked: 0, waiting: Vec::new() });
+
+struct NewTags {
+    asked: u64,
+    waiting: Vec<(u64, String)>,
+}
+
+impl NewTags {
+    /// What a new tag asked for now is named, the station showing `tags`, `made` of those asked made: "新建标签", or
+    /// where a tag has that name or one asked for not yet made, "新建标签 2", and so on, the first none has.
+    fn name(&mut self, tags: &[shelf::Tag], made: u64, lang: crate::ui::text::Lang) -> String {
+        self.waiting.retain(|(number, _)| *number > made);
+        let base = lang.pick("新建标签", "New tag");
+        let taken = |name: &str| tags.iter().any(|tag| tag.name == name) || self.waiting.iter().any(|(_, waiting)| waiting == name);
+        let name = (1..).map(|n| if n == 1 { base.to_string() } else { format!("{base} {n}") }).find(|name| !taken(name)).unwrap();
+        self.asked += 1;
+        self.waiting.push((self.asked, name.clone()));
+        name
+    }
 }
 
 /// What a tag's menu does (see `tag_menu`).
@@ -351,9 +371,13 @@ pub enum Renaming {
 /// How `what` is renamed where it shows (see `ui::naming`), where it has a name to rename (see `renaming`; part of what a
 /// thing holds together as `shelf::What::part_renamed_by` says).
 pub fn renamed(what: Renaming) -> Option<crate::ui::naming::Naming> {
+    renamed_in(what, crate::update::language())
+}
+
+/// How `what` is renamed where it shows, its words in `lang` (see `renamed`).
+fn renamed_in(what: Renaming, lang: crate::ui::text::Lang) -> Option<crate::ui::naming::Naming> {
     use crate::ui::naming::Naming;
     use crate::ui::view::naming::Named;
-    let lang = crate::update::language();
     let of = match what {
         Renaming::Item(id) => Named::Item(id),
         Renaming::Part(id, at) => Named::Part(id, at),
@@ -362,7 +386,7 @@ pub fn renamed(what: Renaming) -> Option<crate::ui::naming::Naming> {
     let there = |path: std::path::PathBuf| {
         let folder = thumbs::looked(&path) == Some(thumbs::Looked::Folder);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Naming::file(of, name, folder, lang, move |written| rename_there(&path, written, lang)))
+        Some(Naming::file(of, name, folder, crate::ui::naming::FILE_MOST, lang, move |written| rename_there(&path, written, lang)))
     };
     match what {
         Renaming::Part(id, at) => {
@@ -370,10 +394,7 @@ pub fn renamed(what: Renaming) -> Option<crate::ui::naming::Naming> {
             let item = shown.items.iter().find(|item| item.id == id)?;
             match item.what.part_renamed_by(at)? {
                 shelf::Renamed::There(path) => there(path.to_path_buf()),
-                shelf::Renamed::Own { name, folder } => Some(Naming::file(of, name, folder, lang, move |written| {
-                    run::ask(run::Ask::Part(id, at, run::PartAct::Rename(written.to_string())));
-                    Ok(())
-                })),
+                shelf::Renamed::Own { name, folder } => Some(Naming::file(of, name, folder, folder::NAME_MOST, lang, move |written| rename_own(id, Some(at), written, lang))),
             }
         }
         Renaming::Item(id) => {
@@ -389,15 +410,26 @@ pub fn renamed(what: Renaming) -> Option<crate::ui::naming::Naming> {
                         }
                         _ => name,
                     };
-                    Some(Naming::file(of, name, folder, lang, move |written| {
-                        run::ask(run::Ask::Rename(id, written.to_string()));
-                        Ok(())
-                    }))
+                    Some(Naming::file(of, name, folder, folder::NAME_MOST, lang, move |written| rename_own(id, None, written, lang)))
                 }
             }
         }
         Renaming::Recent(entry @ recent::Entry::File(_)) => there(recent::paths_of(entry)?.into_iter().next()?),
         Renaming::Recent(recent::Entry::Burst(..)) => None,
+    }
+}
+
+/// What the station keeps itself, `id` or part `part` of it, given out by `name` from now on: asked of the station, its
+/// answer waited for (on the thread trying what was written: see `ui::naming`). Why not, where not: it was told done at
+/// once, what it was asked refused unsaid (sent to meanwhile, holding others; a name another of what it holds has).
+fn rename_own(id: u64, part: Option<usize>, name: &str, lang: crate::ui::text::Lang) -> Result<(), String> {
+    let (answer, answered) = std::sync::mpsc::channel();
+    run::ask(run::Ask::Rename(id, part, name.to_string(), answer));
+    match answered.recv() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(shelf::NotRenamed::Taken)) => Err(lang.pick("此位置已有同名的项目", "An item with this name already exists here").to_string()),
+        Ok(Err(shelf::NotRenamed::Changed)) => Err(lang.pick("此项目已更改", "This item has changed").to_string()),
+        Ok(Err(shelf::NotRenamed::Gone)) | Err(_) => Err(lang.pick("此项目已不存在", "This item no longer exists").to_string()),
     }
 }
 
@@ -1010,11 +1042,42 @@ mod tests {
     fn a_new_tag_is_named_as_a_new_folder_is() {
         let tags = |names: &[&str]| names.iter().enumerate().map(|(at, name)| shelf::Tag { id: at as u32, name: (*name).into() }).collect::<Vec<_>>();
         let zh = crate::ui::text::Lang::Zh;
-        assert_eq!(new_tag_name(&tags(&[]), zh), "新建标签");
-        assert_eq!(new_tag_name(&tags(&["工作"]), zh), "新建标签");
-        assert_eq!(new_tag_name(&tags(&["新建标签"]), zh), "新建标签 2");
-        assert_eq!(new_tag_name(&tags(&["新建标签", "新建标签 2", "新建标签 4"]), zh), "新建标签 3");
-        assert_eq!(new_tag_name(&tags(&["New tag"]), crate::ui::text::Lang::En), "New tag 2");
+        // (Each made before the next is asked for, the station showing it.)
+        let alone = |names: &[&str], lang| {
+            let mut asked = NewTags { asked: 0, waiting: Vec::new() };
+            asked.name(&tags(names), 0, lang)
+        };
+        assert_eq!(alone(&[], zh), "新建标签");
+        assert_eq!(alone(&["工作"], zh), "新建标签");
+        assert_eq!(alone(&["新建标签"], zh), "新建标签 2");
+        assert_eq!(alone(&["新建标签", "新建标签 2", "新建标签 4"], zh), "新建标签 3");
+        assert_eq!(alone(&["New tag"], crate::ui::text::Lang::En), "New tag 2");
+        // Asked for again before the station shows the first made (busy copying), not given its name: the two were
+        // made one tag. Shown made, what the station shows names them, a name of them taken by nothing free again.
+        let mut asked = NewTags { asked: 0, waiting: Vec::new() };
+        assert_eq!(asked.name(&tags(&[]), 0, zh), "新建标签");
+        assert_eq!(asked.name(&tags(&[]), 0, zh), "新建标签 2");
+        assert_eq!(asked.name(&tags(&["新建标签"]), 1, zh), "新建标签 3");
+        assert_eq!(asked.name(&tags(&["工作", "新建标签 2", "新建标签 3"]), 3, zh), "新建标签");
+    }
+
+    /// A name written for what the station keeps itself holds no more than it is given out by (see `folder::NAME_MOST`),
+    /// one for a file where it is as much as Windows takes: written longer, it was cut short as it was given out, its
+    /// kind's ending lost.
+    #[test]
+    fn a_name_written_holds_what_it_is_given_out_by() {
+        let item = |id: u64, what: shelf::What| shelf::Item { id, what, added_ms: id, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new(), held: false, freed_ms: 0 };
+        let arrived = |name: &str| shelf::Arrived { file: format!("n1-{name}"), name: name.into() };
+        run::pretend(
+            vec![
+                item(1, shelf::What::Picture { file: "n1-1.png".into(), name: String::new() }),
+                item(2, shelf::What::Came { files: vec![arrived("a.jpg"), arrived("b.jpg")] }),
+                item(3, shelf::What::Files { paths: vec![std::path::PathBuf::from(r"C:\a.txt")], kept: Vec::new() }),
+            ],
+            crate::settings::ShelfView::List,
+        );
+        let most = |what: Renaming| renamed_in(what, crate::ui::text::Lang::Zh).map(|naming| naming.most());
+        assert_eq!((most(Renaming::Item(1)), most(Renaming::Part(2, 1)), most(Renaming::Item(3))), (Some(folder::NAME_MOST), Some(folder::NAME_MOST), Some(crate::ui::naming::FILE_MOST)));
     }
 
     /// The menu of a thing kept at hand offers to rename it, and to give it its own name again only where it was given

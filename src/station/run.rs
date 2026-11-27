@@ -46,8 +46,9 @@ pub enum Ask {
     /// The files come lately that stay are others now (see `shelf::Item::held`).
     Held,
     Remove(u64),
-    /// `id`, one it keeps itself, given out by this name from now on (see `shelf::What::renamed_by`).
-    Rename(u64, String),
+    /// `id`, one it keeps itself, given out by this name from now on (see `shelf::What::renamed_by`), or a part of it
+    /// sent with others (see `shelf::What::part_renamed_by`), answered whether it is (see `super::rename_own`).
+    Rename(u64, Option<usize>, String, std::sync::mpsc::Sender<Result<(), super::shelf::NotRenamed>>),
     /// The file or folder at the first path renamed to the second (see `super::rename_there`).
     Moved(std::path::PathBuf, std::path::PathBuf),
     /// All that does not stay taken off: of what was put on it, or (with `true`) of what was copied lately.
@@ -105,7 +106,7 @@ pub enum Marked {
 }
 
 /// What is done with part of what a thing holds together (see `Ask::Part`): put on the clipboard, opened, shown in
-/// Explorer, taken out of it as a thing of its own, taken off, given out by a name of its own (one sent).
+/// Explorer, taken out of it as a thing of its own, taken off (renamed: see `Ask::Rename`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PartAct {
     Copy,
@@ -113,7 +114,6 @@ pub enum PartAct {
     Show,
     TakeOut,
     Remove,
-    Rename(String),
 }
 
 /// What holds things together, shown with them (see `Shown::unfolded`): a thing on the station, by its number; files
@@ -208,6 +208,8 @@ pub struct Shown {
     /// their numbers; files come lately together, where they are those of them (see `unfolds`). Till Glance ends.
     pub unfolded: Vec<u64>,
     pub unfolded_files: Vec<super::recent::Key>,
+    /// How many new tags it was asked to make it has made, or found none to make for (see `super::new_tag`).
+    pub tags_made: u64,
 }
 
 impl Shown {
@@ -453,7 +455,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, folded: Default::default(), view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, folders_over: false, copied: None, receiving: None, arrived: None, unfolded: Vec::new(), unfolded_files: Vec::new() })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, folded: Default::default(), view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, folders_over: false, copied: None, receiving: None, arrived: None, unfolded: Vec::new(), unfolded_files: Vec::new(), tags_made: 0 })));
 }
 
 /// For pictures: what is pretended (see `pretend`) with these tags, and what is pinned `folded` away.
@@ -660,6 +662,8 @@ struct Station {
     /// What holds things together shown unfolded (see `Shown::unfolded`).
     unfolded: Vec<u64>,
     unfolded_files: Vec<super::recent::Key>,
+    /// How many new tags it was asked to make it has made (see `Shown::tags_made`).
+    tags_made: u64,
 }
 
 thread_local! {
@@ -684,7 +688,7 @@ fn run(asks: Receiver<Ask>) {
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new() }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new(), tags_made: 0 }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -824,6 +828,7 @@ impl Station {
                 Ask::Pin(id, pinned) => self.keep.pin(id, pinned, super::now_ms()),
                 Ask::Tag(ids, tag, on) => self.keep.tags(|shelf| shelf.tag(&ids, tag, on, super::now_ms())),
                 Ask::NewTag(name, mut ids, files, parts) => {
+                    self.tags_made += 1;
                     ids.extend(self.keep.take_parts(parts));
                     let mut made = None;
                     self.keep.tags(|shelf| {
@@ -862,7 +867,9 @@ impl Station {
                 }
                 Ask::Held => self.hold(),
                 Ask::Remove(id) => self.keep.remove(id),
-                Ask::Rename(id, name) => self.keep.rename(id, &name),
+                Ask::Rename(id, part, name, answer) => {
+                    let _ = answer.send(self.keep.rename(id, part, &name));
+                }
                 Ask::Moved(from, to) => self.keep.moved(&from, &to),
                 Ask::Clear(copied) => self.keep.clear(copied),
                 Ask::Copy(id) | Ask::PasteOut(id) => {
@@ -1102,7 +1109,6 @@ impl Station {
                 self.keep.take_part(id, at);
             }
             PartAct::Remove => self.keep.remove_part(id, at),
-            PartAct::Rename(name) => self.keep.rename_part(id, at, &name),
         }
     }
 
@@ -1244,7 +1250,7 @@ impl Station {
         let items = &self.keep.shelf.items;
         let mut unfolded = self.unfolded.clone();
         unfolded.retain(|id| items.iter().any(|item| item.id == *id && item.what.parts() > 1));
-        let shown = Shown { items: items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, folded: settings.folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, folders_over: self.folders_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone(), unfolded, unfolded_files: self.unfolded_files.clone() };
+        let shown = Shown { items: items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, folded: settings.folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, folders_over: self.folders_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone(), unfolded, unfolded_files: self.unfolded_files.clone(), tags_made: self.tags_made };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
@@ -1268,7 +1274,7 @@ mod tests {
             id
         });
         let (_, asks) = std::sync::mpsc::channel();
-        let mut station = super::Station { keep, window: Default::default(), asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new() };
+        let mut station = super::Station { keep, window: Default::default(), asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new(), unfolded: Vec::new(), unfolded_files: Vec::new(), tags_made: 0 };
         let order = |station: &super::Station| shelf::listed(&station.keep.shelf.items, true, shelf::Filter::Pinned, false).rest.iter().map(|item| item.id).collect::<Vec<_>>();
         let was = order(&station);
         assert_eq!(was, [b, a]);

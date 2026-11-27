@@ -37,7 +37,7 @@ const BLINK: Duration = Duration::from_millis(530);
 /// The most a name holds (UTF-16 units): what is kept at hand's, a tag's, a file's (Windows' own most).
 const APP_MOST: usize = 64;
 const TAG_MOST: usize = 24;
-const FILE_MOST: usize = 255;
+pub const FILE_MOST: usize = 255;
 
 /// What is done with what is written, as it is kept.
 pub type Kept = Box<dyn FnOnce(&str)>;
@@ -102,7 +102,8 @@ impl Naming {
     /// Explorer has it). What is written taken as a file's name is (see `os::name_written`) given to `rename` where it
     /// is another: done, or why not. Written empty, or as it was, it is left as it was; one a name may not be is
     /// refused, said why.
-    pub fn file(of: Named, shown: String, folder: bool, lang: super::text::Lang, rename: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> Naming {
+    /// (At most `most` UTF-16 units: a file's where it is, `FILE_MOST`.)
+    pub fn file(of: Named, shown: String, folder: bool, most: usize, lang: super::text::Lang, rename: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> Naming {
         let was = shown.clone();
         let tried = move |written: &str| match crate::os::name_written(written) {
             Ok(None) => Ok(()),
@@ -112,7 +113,15 @@ impl Naming {
             Err(crate::os::NameRefused::Device) => Err(lang.pick("此名称由系统保留", "This name is reserved by Windows").into()),
         };
         let chosen = if folder { units(&shown) } else { units(stem(&shown)) };
-        Naming { of: Of::Named(of), shown, most: FILE_MOST, chosen, keep: Keeping::Tried(Arc::new(tried)) }
+        Naming { of: Of::Named(of), shown, most, chosen, keep: Keeping::Tried(Arc::new(tried)) }
+    }
+}
+
+impl Naming {
+    /// The most what is written holds (UTF-16 units).
+    #[cfg(test)]
+    pub fn most(&self) -> usize {
+        self.most
     }
 }
 
@@ -656,7 +665,7 @@ mod tests {
         let asked = Arc::new(Mutex::new(Vec::<String>::new()));
         let naming = |shown: &str, folder: bool| {
             let asked = asked.clone();
-            Naming::file(Named::Item(1), shown.into(), folder, Lang::Zh, move |name| {
+            Naming::file(Named::Item(1), shown.into(), folder, FILE_MOST, Lang::Zh, move |name| {
                 asked.lock().unwrap().push(name.to_string());
                 if name == "在用.txt" { Err("在用".into()) } else { Ok(()) }
             })

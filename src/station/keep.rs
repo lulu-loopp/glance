@@ -421,17 +421,10 @@ impl Keep {
     }
 
     /// `id`, one it keeps itself, given out by `name` from now on (see `Shelf::rename`).
-    pub fn rename(&mut self, id: u64, name: &str) {
-        if self.shelf.rename(id, name) {
-            self.save();
-        }
-    }
-
-    /// Part `at` of `id`, sent with others, given out by `name` from now on (see `Shelf::rename_part`).
-    pub fn rename_part(&mut self, id: u64, at: usize, name: &str) {
-        if self.shelf.rename_part(id, at, name) {
-            self.save();
-        }
+    pub fn rename(&mut self, id: u64, part: Option<usize>, name: &str) -> Result<(), super::shelf::NotRenamed> {
+        self.shelf.rename(id, part, name)?;
+        self.save();
+        Ok(())
     }
 
     /// The bytes part `at` of `id` keeps of its own (see `What::part_own_files`).

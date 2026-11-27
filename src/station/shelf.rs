@@ -162,9 +162,30 @@ fn entry_files(files: &[Arrived], at: usize) -> Vec<usize> {
     files.iter().enumerate().filter(|(_, arrived)| arrived.folder() == Some(top.as_str())).map(|(place, _)| place).collect()
 }
 
+/// Why a name was not given to what the station keeps itself (see `Shelf::rename`): it is gone, it is no longer what
+/// was renamed (it holds others now, or that part of it is not there), or another of what it holds has that name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotRenamed {
+    Gone,
+    Changed,
+    Taken,
+}
+
 /// Entry `at` of `files` (see `entries`) given out by `name` from now on: a file, as itself; a folder, all its files
-/// under it. Whether there is one.
-fn rename_entry(files: &mut [Arrived], at: usize, name: &str) -> bool {
+/// under it. Refused where there is none, or another of them has that name (as a name is told on Windows: given, the
+/// two were given out as one, a file of one hiding the other's of its name).
+fn rename_entry(files: &mut [Arrived], at: usize, name: &str) -> Result<(), NotRenamed> {
+    let named = |entry: &Entry| match entry {
+        Entry::File(arrived) => arrived.name.clone(),
+        Entry::Folder { name, .. } => name.to_string(),
+    };
+    let all = entries(files);
+    if at >= all.len() {
+        return Err(NotRenamed::Changed);
+    }
+    if all.iter().enumerate().any(|(other, entry)| other != at && crate::os::names_alike(&named(entry), name)) {
+        return Err(NotRenamed::Taken);
+    }
     let of = entry_files(files, at);
     for &place in &of {
         let arrived = &mut files[place];
@@ -173,7 +194,7 @@ fn rename_entry(files: &mut [Arrived], at: usize, name: &str) -> bool {
             None => name.to_string(),
         };
     }
-    !of.is_empty()
+    Ok(())
 }
 
 /// What a thing on the station is.
@@ -242,13 +263,13 @@ impl What {
 
     /// Given out by `name` from now on, where it is one the station keeps itself (see `renamed_by`): a folder sent, all
     /// its files under it. Whether it is.
-    fn rename(&mut self, name: &str) -> bool {
+    fn rename(&mut self, name: &str) -> Result<(), NotRenamed> {
         match self {
             What::Picture { name: was, .. } | What::Saved { name: was, words: false, .. } => *was = name.to_string(),
             What::Came { files } if entries(files).len() == 1 => return rename_entry(files, 0, name),
-            What::Files { .. } | What::Came { .. } | What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => return false,
+            What::Files { .. } | What::Came { .. } | What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. } => return Err(NotRenamed::Changed),
         }
-        true
+        Ok(())
     }
 
     /// How many it holds together, each of them its own where it is unfolded (see `part_out`): of files put on it, or
@@ -314,11 +335,11 @@ impl What {
         }
     }
 
-    /// Part `at` of what was sent together given out by `name` from now on (see `part_renamed_by`). Whether it is.
-    fn rename_part(&mut self, at: usize, name: &str) -> bool {
+    /// Part `at` of what was sent together given out by `name` from now on (see `part_renamed_by`).
+    fn rename_part(&mut self, at: usize, name: &str) -> Result<(), NotRenamed> {
         match self {
             What::Came { files } if entries(files).len() > 1 => rename_entry(files, at, name),
-            _ => false,
+            _ => Err(NotRenamed::Changed),
         }
     }
 
@@ -327,13 +348,26 @@ impl What {
         let What::Files { paths, .. } = self else { return false };
         let mut changed = false;
         for path in paths.iter_mut() {
-            if let Ok(under) = path.strip_prefix(from) {
+            if let Some(under) = under(path, from) {
                 *path = if under.as_os_str().is_empty() { to.to_path_buf() } else { to.join(under) };
                 changed = true;
             }
         }
         changed
     }
+}
+
+/// Where `path` is under `from` (empty where it is it), as the file system names places: each name of the way alike
+/// case aside (see `os::names_alike`). None where it is not under it.
+fn under(path: &Path, from: &Path) -> Option<PathBuf> {
+    let mut path = path.components();
+    for step in from.components() {
+        let on = path.next()?;
+        if !crate::os::names_alike(&on.as_os_str().to_string_lossy(), &step.as_os_str().to_string_lossy()) {
+            return None;
+        }
+    }
+    Some(path.as_path().to_path_buf())
 }
 
 /// How a thing on the station is renamed (see `What::renamed_by`).
@@ -662,14 +696,14 @@ impl Shelf {
         Some(other)
     }
 
-    /// `id`, one it keeps itself, given out by `name` from now on (see `What::renamed_by`). Whether it is.
-    pub fn rename(&mut self, id: u64, name: &str) -> bool {
-        self.items.iter_mut().find(|item| item.id == id).is_some_and(|item| item.what.rename(name))
-    }
-
-    /// Part `at` of `id`, sent with others, given out by `name` from now on (see `What::part_renamed_by`). Whether it is.
-    pub fn rename_part(&mut self, id: u64, at: usize, name: &str) -> bool {
-        self.items.iter_mut().find(|item| item.id == id).is_some_and(|item| item.what.rename_part(at, name))
+    /// `id`, one it keeps itself, given out by `name` from now on (see `What::renamed_by`), or part `at` of it, sent
+    /// with others (see `What::part_renamed_by`). Why not, where it is not.
+    pub fn rename(&mut self, id: u64, part: Option<usize>, name: &str) -> Result<(), NotRenamed> {
+        let item = self.items.iter_mut().find(|item| item.id == id).ok_or(NotRenamed::Gone)?;
+        match part {
+            None => item.what.rename(name),
+            Some(at) => item.what.rename_part(at, name),
+        }
     }
 
     /// Part `at` of `id` (see `What::parts`) taken out of it, a thing of its own (with `own_bytes` of what `id` keeps of
@@ -810,8 +844,11 @@ mod tests {
         assert_eq!((0..3).map(|at| named(&shelf, put, at)).collect::<Vec<_>>(), [Some(r"D:\a.jpg".into()), Some(r"D:\b.jpg".into()), Some(r"D:\c.jpg".into())]);
         assert_eq!((0..4).map(|at| named(&shelf, sent, at)).collect::<Vec<_>>(), [Some("x.jpg".into()), Some("资料/".into()), Some("y.jpg".into()), None]);
         assert_eq!(named(&shelf, lone, 0), None);
-        assert!(shelf.rename_part(sent, 1, "旧资料") && shelf.rename_part(sent, 2, "海.jpg"));
-        assert!(!shelf.rename_part(put, 0, "b") && !shelf.rename(sent, "b"));
+        assert_eq!((shelf.rename(sent, Some(1), "旧资料"), shelf.rename(sent, Some(2), "海.jpg")), (Ok(()), Ok(())));
+        assert_eq!((shelf.rename(put, Some(0), "b"), shelf.rename(sent, None, "b"), shelf.rename(sent, Some(3), "b"), shelf.rename(99, None, "b")), (Err(NotRenamed::Changed), Err(NotRenamed::Changed), Err(NotRenamed::Changed), Err(NotRenamed::Gone)));
+        // (A name another of them has, case aside, refused: given, a folder's files would hide the other's.)
+        assert_eq!((shelf.rename(sent, Some(1), "X.JPG"), shelf.rename(sent, Some(0), "旧资料")), (Err(NotRenamed::Taken), Err(NotRenamed::Taken)));
+        assert_eq!(shelf.rename(sent, Some(1), "旧资料"), Ok(()), "its own name taken again");
         let names = |shelf: &Shelf, id: u64| match &shelf.get(id).unwrap().what {
             What::Came { files } => files.iter().map(|one| one.name.clone()).collect::<Vec<_>>(),
             What::Files { paths, kept } => paths.iter().map(|path| path.display().to_string()).chain(kept.iter().map(|name| format!("kept {name}"))).collect(),
@@ -839,6 +876,25 @@ mod tests {
         assert_eq!(shelf.take_part(sent, 2, 0), None);
     }
 
+    /// A folder renamed where it is carries what is in it on the station, the folder's path written there in another
+    /// case than the file's (both put on it, one from Explorer, one from a program writing it lower): the file was left
+    /// at a path that is no more.
+    #[test]
+    fn a_folder_renamed_carries_what_is_in_it_written_in_another_case() {
+        let mut shelf = Shelf::default();
+        let folder = shelf.put(What::Files { paths: vec![r"C:\Docs".into()], kept: Vec::new() }, 0, false, false, 0);
+        let file = shelf.put(What::Files { paths: vec![r"c:\docs\Ärger\report.txt".into()], kept: Vec::new() }, 0, false, false, 0);
+        let other = shelf.put(What::Files { paths: vec![r"C:\Docs2\a.txt".into()], kept: Vec::new() }, 0, false, false, 0);
+        assert!(shelf.moved(Path::new(r"C:\Docs"), Path::new(r"C:\Archive")));
+        let paths = |shelf: &Shelf, id: u64| match &shelf.get(id).unwrap().what {
+            What::Files { paths, .. } => paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        assert_eq!((paths(&shelf, folder), paths(&shelf, file), paths(&shelf, other)), (vec![r"C:\Archive".to_string()], vec![r"C:\Archive\Ärger\report.txt".to_string()], vec![r"C:\Docs2\a.txt".to_string()]));
+        assert!(shelf.moved(Path::new(r"C:\ARCHIVE\ärger"), Path::new(r"C:\Archive\Ruhe")));
+        assert_eq!(paths(&shelf, file), [r"C:\Archive\Ruhe\report.txt"], "a name's case aside beyond ASCII too");
+    }
+
     #[test]
     fn what_has_a_name_is_renamed() {
         let arrived = |name: &str| Arrived { file: format!("n1-{name}"), name: name.into() };
@@ -864,7 +920,7 @@ mod tests {
         let named: Vec<_> = (0..ids.len()).map(|at| by(&shelf, at)).collect();
         assert_eq!(named, [Some(r"D:\a.jpg".into()), Some(String::new()), Some("bill.pdf".into()), Some("x.jpg".into()), Some("资料/".into()), None, None, None, None, None]);
         for (at, name) in [(1, "白板.png"), (2, "账单.pdf"), (3, "海.jpg"), (4, "旧资料")] {
-            assert!(shelf.rename(ids[at], name));
+            assert_eq!(shelf.rename(ids[at], None, name), Ok(()));
             assert_eq!(by(&shelf, at).unwrap().trim_end_matches('/'), name);
         }
         let What::Came { files: sent } = &shelf.get(ids[4]).unwrap().what else { unreachable!() };
@@ -872,7 +928,7 @@ mod tests {
         // (Kept by the names they were kept by.)
         assert_eq!(sent[0].file, "n1-资料/x.pdf");
         for at in [0, 5, 7, 8, 9] {
-            assert!(!shelf.rename(ids[at], "b"));
+            assert_eq!(shelf.rename(ids[at], None, "b"), Err(NotRenamed::Changed));
         }
         // Renamed where they are.
         let put = shelf.put(files(&[r"D:\照片\c.jpg", r"D:\照片2\d.jpg"]), 0, false, false, 0);

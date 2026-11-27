@@ -21,6 +21,11 @@ pub fn accent(_dark: bool) -> Option<u32> {
     None
 }
 
+/// Whether two names are one to the file system (as names are told apart there: by each character).
+pub fn names_alike(a: &str, b: &str) -> bool {
+    a == b
+}
+
 /// The file at `from` given the name `to`, where nothing has it (one that does: `AlreadyExists`).
 pub fn move_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)?;
