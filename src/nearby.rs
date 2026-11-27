@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -63,6 +63,57 @@ pub struct Device {
     /// It said it is Glance's (a PC's or a phone's), not only LocalSend's.
     #[serde(default)]
     pub glance: bool,
+}
+
+/// Where other devices reach this PC (see `Told::Me`): the port it receives on, and each network's address, its IPv6
+/// one first.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Me {
+    pub port: u16,
+    pub addresses: Vec<MyAddress>,
+}
+
+/// One of this PC's addresses: on which network (as Windows names it), and the address.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct MyAddress {
+    pub network: String,
+    pub address: IpAddr,
+}
+
+impl Me {
+    /// `address` as another device is to be given it: the port after it where it is neither Glance's own nor
+    /// LocalSend's (both are looked for on an address given without one).
+    pub fn given(&self, address: IpAddr) -> String {
+        said_at(SocketAddr::new(address, self.port))
+    }
+}
+
+/// An address as it is shown and given: the port after it (an IPv6 address in brackets then) where it is neither
+/// Glance's own nor LocalSend's.
+pub fn said_at(at: SocketAddr) -> String {
+    match (at.ip(), at.port()) {
+        (ip, OWN_PORT | LOCALSEND_PORT) => ip.to_string(),
+        (_, _) => at.to_string(),
+    }
+}
+
+/// The ports a device given by its address alone is looked for on (see the helper's `run::PORTS_TRIED`).
+const OWN_PORT: u16 = 53320;
+const LOCALSEND_PORT: u16 = 53317;
+
+/// How adding a device by its address went, as the helper told (see `add`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Adding {
+    /// Added, as the device of `fingerprint`: `known` where it was already (found nearby, or added before).
+    Added { fingerprint: String, known: bool },
+    NotAnAddress,
+    /// Nothing answered there (or the helper was not there to ask).
+    Unreachable,
+    /// Something answered, but not as a LocalSend device does.
+    NotLocalSend,
+    /// It is this PC.
+    Itself,
 }
 
 /// How a sending of this PC's goes.
@@ -141,7 +192,16 @@ enum Told {
     Progress { session: String, done: u64, of: u64 },
     /// A receiving over (its receipt written: see `receipts`), and why it ended short, where it did.
     Came { session: String, short: Option<String> },
-    Devices { devices: Vec<Device> },
+    /// The devices seen lately, and those added by their addresses (found or not).
+    Devices {
+        devices: Vec<Device>,
+        #[serde(default)]
+        added: Vec<crate::phone::Added>,
+    },
+    /// Where other devices reach this PC.
+    Me { port: u16, addresses: Vec<MyAddress> },
+    /// How adding a device by its address (`job`, see `add`) went.
+    Added { job: u64, outcome: Adding },
     Sending { job: u64, state: Sending },
     /// A device found, trusted (what the helper keeps says so now), or why not.
     Trusted { fingerprint: String, why_not: Option<String> },
@@ -166,13 +226,19 @@ pub struct Receiving {
 }
 
 /// What nearby transfer shows: whether the helper is there to tell, what the user is asked, what comes, the devices
-/// seen, and this PC's sendings.
+/// seen and those added by their addresses, where other devices reach this PC, the devices being added, and this PC's
+/// sendings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shown {
     pub there: bool,
     pub asks: Vec<Asking>,
     pub receiving: Option<Receiving>,
     pub devices: Vec<Device>,
+    pub added: Vec<crate::phone::Added>,
+    /// Where other devices reach this PC, once the helper told.
+    pub me: Option<Me>,
+    /// The devices being added by their addresses (see `add`), by job: none till the helper tells how it went.
+    pub adding: HashMap<u64, Option<Adding>>,
     pub sendings: HashMap<u64, Sending>,
     /// What each sending sends, to whom.
     pub outgoing: HashMap<u64, Outgoing>,
@@ -203,6 +269,13 @@ pub fn shown() -> Shown {
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend_devices(devices: Vec<Device>) {
     change(|shown| shown.devices = devices);
+}
+
+/// For pictures: where other devices reach this PC, and the devices added by their addresses, as if the helper had
+/// told these.
+#[cfg(all(test, feature = "studio"))]
+pub fn pretend_addresses(me: Option<Me>, added: Vec<crate::phone::Added>) {
+    change(|shown| (shown.me, shown.added) = (me, added));
 }
 
 /// For pictures: this PC's sendings as if the helper had told these.
@@ -236,10 +309,32 @@ pub fn answer(id: u64, take: bool, trust: bool) {
     command(&json!({ "kind": "answer", "id": id, "take": take, "trust": trust }));
 }
 
+/// The device at `address` (an IP address as typed, with a port or not) added, as adding `job` (see `job`): reached
+/// there, it is kept by the helper and listed among the devices this PC may send to (see `targets`), told how it went
+/// in what is shown (`Shown::adding`). The helper not there to be asked, nothing answered.
+pub fn add(job: u64, address: &str) {
+    change(|shown| {
+        shown.adding.insert(job, None);
+    });
+    if !command(&json!({ "kind": "add", "job": job, "address": address })) {
+        change(|shown| {
+            shown.adding.insert(job, Some(Adding::Unreachable));
+        });
+    }
+}
+
+/// How adding `job` went no longer shown.
+pub fn forget_adding(job: u64) {
+    change(|shown| {
+        shown.adding.remove(&job);
+    });
+}
+
 /// A device this PC may send to: its fingerprint, what it calls itself (a paired phone not found, what it was paired
 /// as; nothing said, empty), its kind and model (as LocalSend says them), whether it is a phone paired with this PC,
-/// whether it is Glance's, and whether it is found nearby now (one not found is not reached: a paired phone not
-/// receiving).
+/// whether it is Glance's, whether it is found nearby now (one not found is not reached: a paired phone not
+/// receiving, a device added by its address not answering), and where it was added by its address, the address it
+/// last answered at.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
     pub fingerprint: String,
@@ -249,12 +344,15 @@ pub struct Target {
     pub paired: bool,
     pub glance: bool,
     pub found: bool,
+    pub added: Option<SocketAddr>,
 }
 
 /// The devices this PC may send to, as `devices` are found nearby: the phones paired (`phones`, those a browser is
 /// paired as left out: a page receives nothing), each by the certificate it told (`trusted`), found or not; then the
-/// others found, Glance's first, by name.
-pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[crate::phone::Trusted]) -> Vec<Target> {
+/// others found, Glance's first, by name; then the devices added by their addresses (`added`) not found, as they were
+/// added. A device added that is found is listed where it is found, its address said.
+pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[crate::phone::Trusted], added: &[crate::phone::Added]) -> Vec<Target> {
+    let added_at = |fingerprint: &str| added.iter().find(|added| added.fingerprint.eq_ignore_ascii_case(fingerprint)).and_then(|added| added.addresses.first().copied());
     let found_of = |fingerprint: &str| devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(fingerprint));
     let model = |device: Option<&Device>| device.and_then(|device| device.model.clone()).filter(|model| !model.trim().is_empty());
     let mut targets: Vec<Target> = Vec::new();
@@ -262,18 +360,26 @@ pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[cr
         let Some(fingerprint) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone.id.as_str())).map(|trusted| trusted.fingerprint.clone()) else { continue };
         let found = found_of(&fingerprint);
         let name = found.map(|device| device.alias.clone()).filter(|alias| !alias.is_empty()).unwrap_or_else(|| phone.name.clone());
-        targets.push(Target { fingerprint, name, kind: Some("mobile".into()), model: model(found), paired: true, glance: true, found: found.is_some() });
+        let added = added_at(&fingerprint);
+        targets.push(Target { fingerprint, name, kind: Some("mobile".into()), model: model(found), paired: true, glance: true, found: found.is_some(), added });
     }
     let mut others: Vec<&Device> = devices.iter().filter(|device| !targets.iter().any(|target| target.fingerprint.eq_ignore_ascii_case(&device.fingerprint))).collect();
     others.sort_by_key(|device| (!device.glance, device.alias.to_lowercase()));
-    targets.extend(others.into_iter().map(|device| Target { fingerprint: device.fingerprint.clone(), name: device.alias.clone(), kind: device.kind.clone(), model: model(Some(device)), paired: false, glance: device.glance, found: true }));
+    targets.extend(others.into_iter().map(|device| Target { fingerprint: device.fingerprint.clone(), name: device.alias.clone(), kind: device.kind.clone(), model: model(Some(device)), paired: false, glance: device.glance, found: true, added: added_at(&device.fingerprint) }));
+    let away: Vec<Target> = added
+        .iter()
+        .filter(|added| !targets.iter().any(|target| target.fingerprint.eq_ignore_ascii_case(&added.fingerprint)))
+        .map(|added| Target { fingerprint: added.fingerprint.clone(), name: added.alias.clone(), kind: added.kind.clone(), model: added.model.clone().filter(|model| !model.trim().is_empty()), paired: false, glance: added.glance, found: false, added: added.addresses.first().copied() })
+        .collect();
+    targets.extend(away);
     targets
 }
 
 /// The devices this PC may send to now (see `targets`): the phones paired and the certificates trusted as the helper
 /// keeps them, the devices as they are found.
 pub fn targets_now() -> Vec<Target> {
-    targets(&shown().devices, &crate::phone::phones(), &crate::phone::trusted_kept())
+    let shown = shown();
+    targets(&shown.devices, &crate::phone::phones(), &crate::phone::trusted_kept(), &shown.added)
 }
 
 /// The devices a sending of this PC's goes to now, by their fingerprints (as `shown` says).
@@ -507,7 +613,14 @@ fn heard(told: Told) {
             });
             crate::station::run::ask(crate::station::run::Ask::Arrivals(Some(session)));
         }
-        Told::Devices { devices } => change(|shown| shown.devices = devices),
+        Told::Devices { devices, added } => change(|shown| (shown.devices, shown.added) = (devices, added)),
+        Told::Me { port, addresses } => change(|shown| shown.me = Some(Me { port, addresses })),
+        Told::Added { job, outcome } => change(|shown| {
+            // (Given up meanwhile: not shown.)
+            if let Some(adding) = shown.adding.get_mut(&job) {
+                *adding = Some(outcome);
+            }
+        }),
         Told::Sending { job, state } => sending(job, state),
         // (Trusted, it is gone from those being trusted: the settings read what the helper keeps again as it changes.)
         Told::Trusted { fingerprint, why_not } => change(|shown| match why_not {
@@ -782,6 +895,48 @@ pub fn receipts(folder: &Path) -> Vec<(PathBuf, Receipt)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the helper tells of the devices added by their addresses, where other devices reach this PC, and how an
+    /// adding went, is read as it writes it (see its `Event`).
+    #[test]
+    fn what_the_helper_tells_of_addresses_is_read() {
+        let devices: Told = serde_json::from_str(r#"{"kind":"devices","devices":[{"fingerprint":"AB","alias":"实验室电脑","model":"Windows","kind":"desktop","address":"10.21.140.12","port":53320,"https":true,"glance":true}],"added":[{"fingerprint":"AB","alias":"实验室电脑","model":"Windows","kind":"desktop","glance":true,"https":true,"addresses":["[2001:da8::1c]:53320","10.21.140.12:53320"],"since":5}]}"#).unwrap();
+        let Told::Devices { devices, added } = devices else { panic!("not devices") };
+        assert_eq!((devices.len(), added[0].addresses[0]), (1, "[2001:da8::1c]:53320".parse().unwrap()));
+        // (An older helper tells no devices added.)
+        assert!(matches!(serde_json::from_str::<Told>(r#"{"kind":"devices","devices":[]}"#).unwrap(), Told::Devices { added, .. } if added.is_empty()));
+        let me: Told = serde_json::from_str(r#"{"kind":"me","port":53320,"addresses":[{"network":"以太网","address":"2001:da8:215:3c01::5a2"},{"network":"以太网","address":"10.21.134.57"}]}"#).unwrap();
+        assert!(matches!(me, Told::Me { port: 53320, addresses } if addresses.len() == 2 && addresses[0].network == "以太网"));
+        let added: Told = serde_json::from_str(r#"{"kind":"added","job":4,"outcome":{"outcome":"added","fingerprint":"AB","known":false}}"#).unwrap();
+        assert!(matches!(added, Told::Added { job: 4, outcome: Adding::Added { known: false, .. } }));
+        let failed: Told = serde_json::from_str(r#"{"kind":"added","job":5,"outcome":{"outcome":"not_local_send"}}"#).unwrap();
+        assert!(matches!(failed, Told::Added { job: 5, outcome: Adding::NotLocalSend }));
+    }
+
+    /// An address is given without its port where the port is one looked for on an address given alone (Glance's own,
+    /// LocalSend's), with it otherwise (an IPv6 address in brackets then).
+    #[test]
+    fn an_address_is_given_with_its_port_only_where_it_is_another() {
+        let said = |at: &str| said_at(at.parse().unwrap());
+        assert_eq!(said("10.21.140.12:53320"), "10.21.140.12");
+        assert_eq!(said("10.21.140.12:53317"), "10.21.140.12");
+        assert_eq!(said("10.21.140.12:53318"), "10.21.140.12:53318");
+        assert_eq!(said("[2001:da8::1c]:53320"), "2001:da8::1c");
+        assert_eq!(said("[2001:da8::1c]:53318"), "[2001:da8::1c]:53318");
+    }
+
+    /// A device added by its address is listed where it is found (its address said), else after the devices found, as
+    /// it was added, not found; a paired phone added stays a paired phone.
+    #[test]
+    fn a_device_added_is_listed_found_or_not() {
+        let device = |fingerprint: &str, alias: &str| Device { fingerprint: fingerprint.into(), alias: alias.into(), model: Some("Windows".into()), kind: Some("desktop".into()), glance: true };
+        let added = |fingerprint: &str, alias: &str, at: &str| crate::phone::Added { fingerprint: fingerprint.into(), alias: alias.into(), glance: true, addresses: vec![at.parse().unwrap()], ..Default::default() };
+        let found = [device("AB", "实验室电脑"), device("CD", "Desk")];
+        let kept = [added("ab", "实验室电脑", "10.21.140.12:53320"), added("EF", "图书馆电脑", "[2001:da8::9]:53320")];
+        let targets = targets(&found, &[], &[], &kept);
+        let listed: Vec<(&str, bool, Option<SocketAddr>)> = targets.iter().map(|target| (target.name.as_str(), target.found, target.added)).collect();
+        assert_eq!(listed, [("Desk", true, None), ("实验室电脑", true, Some("10.21.140.12:53320".parse().unwrap())), ("图书馆电脑", false, Some("[2001:da8::9]:53320".parse().unwrap()))]);
+    }
 
     /// What the helper is told to send, as it reads it (see its `link::Command::Send`): each file where it is, and
     /// the name the device is told, and words as they are.

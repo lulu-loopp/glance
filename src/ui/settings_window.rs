@@ -171,7 +171,7 @@ const HIDDEN_LOOKED_AT: Duration = Duration::from_millis(250);
 /// beyond one interval, as the panel's does.
 const PEN_LAG_MS: f64 = 100.0;
 
-/// How long the diagnostics' button says they were copied.
+/// How long a button that copies says it copied (the diagnostics', an address's).
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
 /// The window, while it is open.
@@ -1018,6 +1018,8 @@ struct Palette {
     switch_on: Color,
     /// The ring of a slider's thumb.
     switch_knob_ring: Color,
+    /// What says something went wrong (Windows' own critical colour for the theme).
+    caution: Color,
 }
 
 impl Palette {
@@ -1047,6 +1049,7 @@ impl Palette {
                 selection: off,
                 switch_on: on,
                 switch_knob_ring: Color::hex(0x454545, 1.0),
+                caution: Color::hex(0xFF99A4, 1.0),
             }
         } else {
             Palette {
@@ -1070,6 +1073,7 @@ impl Palette {
                 selection: on,
                 switch_on: on,
                 switch_knob_ring: white(1.0),
+                caution: Color::hex(0xC42B1C, 1.0),
             }
         }
     }
@@ -1504,6 +1508,8 @@ enum CodeFor {
 enum Known {
     Phone(String),
     Trusted(String),
+    /// A device added by its address, by its fingerprint.
+    Added(String),
 }
 
 /// What a row that leads to the devices' page counts: the phones paired, or every device whose files are taken
@@ -1536,6 +1542,8 @@ enum Named {
     Key(String, usize),
     /// Words to send to devices nearby (see `send`): on lines of their own, kept till added or left.
     Words,
+    /// The address of a device to add (see `send::Adder`): on one line, kept till added or left.
+    Address,
 }
 
 /// Something being named in its row (see `Named`): the words written, since when its caret blinks, whether the input
@@ -1549,6 +1557,14 @@ struct Renaming {
     field: Option<Rect>,
     along: f32,
     caret: Option<(f32, f32, f32)>,
+}
+
+/// How tall each line of the address card is (DIPs: an address and what copies it).
+const ADDRESS_LINE: f32 = 40.0;
+
+/// What the address card says under its name.
+fn addresses_words(lang: Lang) -> &'static str {
+    pick(lang, "其他设备在附近列表中找不到本机时，可输入以下地址添加。跨网段连接时，优先使用 IPv6 地址", "If other devices can't find this PC nearby, they can add it by one of these addresses. Across networks, use the IPv6 address first")
 }
 
 /// A key's characters written unseen: each a dot, so far apart (DIPs).
@@ -1682,6 +1698,10 @@ enum Target {
     PcName,
     /// Trusts the device of that certificate's fingerprint no longer (its files asked about again).
     Untrust(String),
+    /// A device added by its address no longer kept (by its fingerprint).
+    DropAdded(String),
+    /// One of this PC's addresses copied (as it is given: see `nearby::Me::given`).
+    CopyAddress(String),
     /// Opens where what comes from devices nearby goes: the folder chosen for it, else the station's.
     OpenStation,
     /// Opens the menu of where what comes from devices nearby goes: the station, or a folder chosen.
@@ -1697,6 +1717,11 @@ enum Target {
     SendRefresh,
     SendWordsAdd,
     SendWordsCancel,
+    /// The box a device's address is written in to add it, opened or closed; what adds the device, and what leaves it.
+    SendAddress,
+    SendAddressField,
+    SendAddressAdd,
+    SendAddressCancel,
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
@@ -1781,6 +1806,8 @@ enum Row {
     Quit,
     /// What this PC is called, to phones and devices nearby alike.
     PcName,
+    /// Nearby transfer's: where other devices reach this PC, each network's address with what copies it.
+    Addresses,
     /// A device this PC knows; in a phone's card opened (see `phone_card`), its switches, each by what it lets the
     /// phone do, and its unpairing.
     Device(Known),
@@ -2152,6 +2179,8 @@ struct Ui {
     /// and when its configuration was last written, as last looked (and when that was).
     nearby_on: bool,
     nearby: Option<crate::phone::Nearby>,
+    /// This PC's address copied last, and when (said copied a while).
+    address_copied: Option<(String, Instant)>,
     nearby_link: Option<NearbyLink>,
     nearby_waiting: usize,
     nearby_written: Option<std::time::SystemTime>,
@@ -2520,6 +2549,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             remote: switches_read.1,
             nearby_on: switches_read.2,
             nearby: None,
+            address_copied: None,
             nearby_link: None,
             nearby_waiting: 0,
             nearby_written: None,
@@ -3024,7 +3054,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| {
                 ui.record(None);
-                if !ui.writing_words() {
+                if !ui.naming_held() {
                     ui.end_rename(true);
                 }
             });
@@ -3455,19 +3485,20 @@ impl Ui {
         }
     }
 
-    /// Nearby transfer's rows: on or off; what of devices not trusted, the edge's notice and where what comes is kept
-    /// (dimmed while it is off); and how many devices are trusted, with the way to the devices' page.
+    /// Nearby transfer's rows: on or off; where other devices reach this PC, what of devices not trusted, the edge's
+    /// notice and where what comes is kept (dimmed while it is off); and how many devices are trusted, with the way to
+    /// the devices' page.
     fn nearby_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Switch(Switch::Nearby));
         if !self.remote_there {
             return;
         }
-        rows.extend([Row::Choice(Field::NearbyOthers), Row::Switch(Switch::NearbyNotice), Row::NearbyFolder, Row::Manage(Managed::Trusted)]);
+        rows.extend([Row::Addresses, Row::Choice(Field::NearbyOthers), Row::Switch(Switch::NearbyNotice), Row::NearbyFolder, Row::Manage(Managed::Trusted)]);
     }
 
     /// The devices' page's rows: this PC's name; the phones paired (one opened, its switches and its unpairing in its
-    /// card); the devices trusted that are no paired phone's, where there are any; the devices found nearby that this
-    /// PC does not know. (A phone is added on the page's stage: see `paint_adding`.) With no helper beside this
+    /// card); the devices trusted that are no paired phone's, and those added by their addresses, where there are any;
+    /// the devices found nearby that this PC does not know. (A phone is added on the page's stage: see `paint_adding`.) With no helper beside this
     /// Glance, only why.
     fn device_rows(&self, rows: &mut Vec<Row>) {
         let lang = self.lang;
@@ -3497,6 +3528,11 @@ impl Ui {
             rows.push(Row::Group(pick(lang, "已信任的设备", "Trusted devices")));
             rows.extend(trusted);
         }
+        let added: Vec<Row> = self.nearby.iter().flat_map(|nearby| nearby.added.iter()).map(|added| Row::Device(Known::Added(added.fingerprint.clone()))).collect();
+        if !added.is_empty() {
+            rows.push(Row::Group(pick(lang, "按地址添加的设备", "Devices added by address")));
+            rows.extend(added);
+        }
         rows.push(Row::Group(pick(lang, "附近发现的设备", "Nearby devices")));
         if self.found.is_empty() {
             rows.push(Row::Note(pick(lang, "附近没有发现其他设备", "No other devices found nearby")));
@@ -3522,7 +3558,7 @@ impl Ui {
         let lang = self.lang;
         match may {
             crate::phone::May::Control => (
-                pick(lang, "控制这台电脑", "Control this PC"),
+                pick(lang, "控制本机", "Control this PC"),
                 pick(lang, "屏幕、灯光、音量、亮度与电源模式。关闭后，手机仅能查看状态", "Screens, lights, volume, brightness and power mode. When off, the phone can only view status"),
             ),
             crate::phone::May::Files => (pick(lang, "直接接收文件", "Accept files automatically"), pick(lang, "关闭后，该手机发来的文件每次询问", "When off, you are asked each time this phone sends files")),
@@ -3534,6 +3570,7 @@ impl Ui {
         match known {
             Known::Phone(_) => Icon::Smartphone,
             Known::Trusted(fingerprint) => Icon::of_device(self.trusted(fingerprint).and_then(|trusted| trusted.kind.as_deref())),
+            Known::Added(fingerprint) => Icon::of_device(self.added(fingerprint).and_then(|added| added.kind.as_deref())),
         }
     }
 
@@ -3591,6 +3628,7 @@ impl Ui {
     fn turn_to(&mut self, page: Page) {
         if page != self.page {
             self.put_words_by();
+            self.close_adder();
             self.page = page;
             AI_PAGE.store(matches!(page, Page::Ai | Page::Layout), Ordering::Relaxed);
             crate::ai::look_now();
@@ -3685,6 +3723,11 @@ impl Ui {
                     (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE * lines)
                 }
                 Row::Group(_) => (20.0, GROUP),
+                // Its name and its words, then a line for each address (or for why there is none).
+                Row::Addresses => {
+                    let lines = self.my_addresses().map_or(1, |addresses| addresses.len().max(1));
+                    (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW) + lines as f32 * ADDRESS_LINE)
+                }
                 // (Inside the card of the phone above them, right under its row, as a module's items are.)
                 Row::PhoneMay(..) | Row::Unpair(_) | Row::AddFolder | Row::Folder(_) => (0.0, self.words_height(&row).max(ROW)),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
@@ -3755,7 +3798,7 @@ impl Ui {
             std::thread::spawn(move || {
                 for words in asked {
                     let said = crate::phone::nearby(&words.iter().map(String::as_str).collect::<Vec<_>>());
-                    if words.first().is_some_and(|word| word == "name") {
+                    if words.first().is_some_and(|word| word == "name" || word == "drop") {
                         crate::nearby::announce();
                     }
                     if answer.send(said).is_err() {
@@ -3890,7 +3933,27 @@ impl Ui {
 
     /// Whether `row` is one of nearby transfer's that does nothing while it is off: shown dimmed, not to be pressed.
     fn dimmed(&self, row: &Row) -> bool {
-        !self.nearby_on && matches!(row, Row::NearbyFolder | Row::Choice(Field::NearbyOthers) | Row::Switch(Switch::NearbyNotice))
+        !self.nearby_on && matches!(row, Row::Addresses | Row::NearbyFolder | Row::Choice(Field::NearbyOthers) | Row::Switch(Switch::NearbyNotice))
+    }
+
+    /// The device added by its address of that fingerprint, as nearby transfer was last said.
+    fn added(&self, fingerprint: &str) -> Option<&crate::phone::Added> {
+        self.nearby.as_ref()?.added.iter().find(|added| added.fingerprint == fingerprint)
+    }
+
+    /// This PC's addresses as the address card lists them: each network's (its name and the address's kind), and the
+    /// address as it is given; none yet where the helper has not told them.
+    fn my_addresses(&self) -> Option<Vec<(String, String)>> {
+        let me = crate::nearby::shown().me?;
+        Some(
+            me.addresses
+                .iter()
+                .map(|address| {
+                    let kind = if address.address.is_ipv6() { "IPv6" } else { "IPv4" };
+                    (format!("{} · {kind}", address.network), me.given(address.address))
+                })
+                .collect(),
+        )
     }
 
     /// The device trusted of that fingerprint, as nearby transfer was last said.
@@ -4056,6 +4119,7 @@ impl Ui {
                 None => return 0.0,
             },
             Row::PcName => (Cow::Borrowed(pick(self.lang, "在手机和附近设备上显示", "Shown on phones and nearby devices")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
+            Row::Addresses => (Cow::Borrowed(addresses_words(self.lang)), width - 2.0 * ROW_SIDE),
             // (Across the row under its name and its box: see `paint_list`.)
             Row::AiKey(id, field) => match self.ai_key_words(id, *field) {
                 Some((_, words)) => (Cow::Owned(words), width - ROW_SIDE - CHEVRON_ROOM - ITEM_INSET),
@@ -4350,7 +4414,7 @@ impl Ui {
                 let phone = self.phone_of(id)?;
                 let name = if phone.name.is_empty() { p("未命名的手机", "Unnamed phone") } else { phone.name.clone() };
                 let mut said = vec![if phone.web { pick(lang, "网页", "Web page") } else { pick(lang, "Glance 手机", "Glance phone") }];
-                said.push(if phone.control { pick(lang, "可控制这台电脑", "Can control this PC") } else { pick(lang, "仅查看状态", "View status only") });
+                said.push(if phone.control { pick(lang, "可控制本机", "Can control this PC") } else { pick(lang, "仅查看状态", "View status only") });
                 if phone.files && !phone.web {
                     said.push(pick(lang, "直接接收文件", "Accepts files automatically"));
                 }
@@ -4366,6 +4430,14 @@ impl Ui {
                     (since, Lang::En) => format!("{said} · since {}", day_said(lang, since)),
                 };
                 (name, detail, vec![(p("移除", "Remove"), Target::Untrust(fingerprint.clone()), Button::Plain)])
+            }
+            // A device added by its address: whose it is and where it was last reached.
+            Row::Device(Known::Added(fingerprint)) => {
+                let added = self.added(fingerprint)?;
+                let name = if added.alias.is_empty() { p("未命名的设备", "Unnamed device") } else { added.alias.clone() };
+                let maker = maker(lang, added.glance, added.kind.as_deref());
+                let detail = added.addresses.first().map_or_else(|| maker.to_string(), |at| format!("{maker} · {}", crate::nearby::said_at(*at)));
+                (name, detail, vec![(p("移除", "Remove"), Target::DropAdded(fingerprint.clone()), Button::Plain)])
             }
             Row::Unpair(id) => (
                 p("解除配对", "Unpair"),
@@ -4694,8 +4766,8 @@ impl Ui {
         typing.put(&called.encode_utf16().collect::<Vec<u16>>());
         typing.go(0, false);
         typing.go(typing.text.len(), true);
-        // (A key is written as it is, no input method putting words together.)
-        let words = !matches!(of, Named::Key(..));
+        // (A key and an address are written as they are, no input method putting words together.)
+        let words = !matches!(of, Named::Key(..) | Named::Address);
         self.renaming = Some(Renaming { of, typing, blink_from: Instant::now(), composing: false, field: None, along: 0.0, caret: None });
         unsafe {
             let mut typed = MSG::default();
@@ -4745,6 +4817,10 @@ impl Ui {
                 self.send.add_words(written);
                 return;
             }
+            Named::Address => {
+                self.send_add(written);
+                return;
+            }
             Named::Sensor(_, name) => name,
         };
         let Some((group, sensor)) = sensor_of(&name) else { return };
@@ -4765,7 +4841,10 @@ impl Ui {
     fn rename_key(&mut self, key: VIRTUAL_KEY, shift: bool) -> bool {
         match key {
             VK_RETURN => self.end_rename(true),
+            VK_ESCAPE if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address) => self.close_adder(),
             VK_ESCAPE => self.end_rename(false),
+            // (An address is added only as asked: Tab leaves it written.)
+            VK_TAB if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address) => {}
             VK_TAB => {
                 self.end_rename(true);
                 return false;
@@ -5156,7 +5235,7 @@ impl Ui {
             ),
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。发送过诊断信息时，一并获取其回复。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count users, and asked for replies to diagnostics you sent. Nothing that identifies this PC"))), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。发送过诊断信息时，一并获取其回复。不包含可识别本机的信息", "Once a day. Glance's site is told this version, to count users, and asked for replies to diagnostics you sent. Nothing that identifies this PC"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)
@@ -6028,7 +6107,7 @@ You can disconnect here at any time, and the original status line command will b
                 self.next_frame = Instant::now();
                 return;
             }
-            if !self.writing_words() {
+            if !self.naming_held() {
                 self.end_rename(true);
             }
         }
@@ -6308,7 +6387,7 @@ You can disconnect here at any time, and the original status line command will b
                     title: &title,
                     intro: pick(
                         lang,
-                        "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，请再次添加手机。",
+                        "解除后，该手机不能再控制本机，发来的文件也需要重新确认。如需重新使用，请再次添加手机。",
                         "After unpairing, this phone can no longer control this PC, and files it sends need approval again. To use it again, add it again.",
                     ),
                     own: None,
@@ -6364,6 +6443,20 @@ You can disconnect here at any time, and the original status line command will b
                 }
                 self.ask_nearby(vec!["forget".into(), fingerprint]);
             }
+            Target::DropAdded(fingerprint) => {
+                if let Some(nearby) = self.nearby.as_mut() {
+                    nearby.added.retain(|added| added.fingerprint != fingerprint);
+                }
+                self.ask_nearby(vec!["drop".into(), fingerprint]);
+            }
+            Target::CopyAddress(given) => {
+                let mut text: Vec<u16> = given.encode_utf16().collect();
+                text.push(0);
+                let bytes = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+                if crate::clipboard::put(self.hwnd, &[(crate::clipboard::TEXT, bytes)]) {
+                    self.address_copied = Some((given, Instant::now()));
+                }
+            }
             Target::SendKind(_)
             | Target::SendClear
             | Target::SendRemove(_)
@@ -6371,7 +6464,11 @@ You can disconnect here at any time, and the original status line command will b
             | Target::SendCancel(_)
             | Target::SendRefresh
             | Target::SendWordsAdd
-            | Target::SendWordsCancel => self.send_press(target),
+            | Target::SendWordsCancel
+            | Target::SendAddress
+            | Target::SendAddressField
+            | Target::SendAddressAdd
+            | Target::SendAddressCancel => self.send_press(target),
             Target::KeptIn => self.open_kept_menu(),
             Target::ChoiceMenu(field) => self.open_choice_menu(field),
             Target::OpenStation => {
@@ -6463,6 +6560,9 @@ You can disconnect here at any time, and the original status line command will b
                 Row::PcName => vec![Target::PcName],
                 Row::Device(Known::Phone(id)) => vec![Target::OpenPhone(id)],
                 Row::Device(Known::Trusted(fingerprint)) => vec![Target::Untrust(fingerprint)],
+                Row::Device(Known::Added(fingerprint)) => vec![Target::DropAdded(fingerprint)],
+                Row::Addresses if self.nearby_on => self.my_addresses().unwrap_or_default().into_iter().map(|(_, given)| Target::CopyAddress(given)).collect(),
+                Row::Addresses => vec![],
                 // (Only while its card is open, as a module's items.)
                 Row::PhoneMay(id, may) if self.expanded.contains(&phone_card(&id)) => vec![Target::PhoneMay(id, may)],
                 Row::Unpair(id) if self.expanded.contains(&phone_card(&id)) => vec![Target::Unpair(id)],
@@ -6636,7 +6736,8 @@ You can disconnect here at any time, and the original status line command will b
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::ClaudeLimits, Target::ClaudeLimits(_)) => true,
             (Row::AiKey(a, i), Target::AiKey(b, j) | Target::AiKeyRemove(b, j)) => a == b && i == j,
-            (Row::Unpair(a), Target::Unpair(b)) | (Row::Device(Known::Phone(a)), Target::OpenPhone(b)) | (Row::Device(Known::Trusted(a)), Target::Untrust(b)) | (Row::Found(a), Target::TrustFound(b)) => a == b,
+            (Row::Unpair(a), Target::Unpair(b)) | (Row::Device(Known::Phone(a)), Target::OpenPhone(b)) | (Row::Device(Known::Trusted(a)), Target::Untrust(b)) | (Row::Device(Known::Added(a)), Target::DropAdded(b)) | (Row::Found(a), Target::TrustFound(b)) => a == b,
+            (Row::Addresses, Target::CopyAddress(_)) => true,
             (Row::PhoneMay(a, s), Target::PhoneMay(b, t)) => a == b && s == t,
             (Row::PcName, Target::PcName) | (Row::NearbyFolder, Target::OpenStation | Target::KeptIn) => true,
             (Row::MyReports, Target::MyReports) => true,
@@ -7150,8 +7251,9 @@ You can disconnect here at any time, and the original status line command will b
         // opens and now and then while it shows (one that came since says itself, one that went is forgotten).
         if self.page == Page::Devices {
             let shown = crate::nearby::shown();
-            let trusted: Vec<&str> = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter()).map(|trusted| trusted.fingerprint.as_str()).collect();
-            let found: Vec<crate::nearby::Device> = shown.devices.into_iter().filter(|device| !trusted.iter().any(|known| known.eq_ignore_ascii_case(&device.fingerprint))).collect();
+            // (Those trusted, and those added by their addresses, are listed in their own groups.)
+            let known: Vec<&str> = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter().map(|trusted| trusted.fingerprint.as_str()).chain(nearby.added.iter().map(|added| added.fingerprint.as_str()))).collect();
+            let found: Vec<crate::nearby::Device> = shown.devices.into_iter().filter(|device| !known.iter().any(|known| known.eq_ignore_ascii_case(&device.fingerprint))).collect();
             if found != self.found || shown.trusting != self.trusting {
                 self.found = found;
                 self.trusting = shown.trusting;
@@ -7506,7 +7608,7 @@ You can disconnect here at any time, and the original status line command will b
                     let cy = y + row_height / 2.0;
                     let field = Rect { x: left + width - ROW_SIDE - NAME_FIELD, y: cy - 14.0, w: NAME_FIELD, h: 28.0 };
                     let words = pick(lang, "在手机和附近设备上显示", "Shown on phones and nearby devices");
-                    field_label_in(frame, (palette.text, palette.text2), pick(lang, "这台电脑的名称", "This PC's name"), Some(words), label, hint, left + ROW_SIDE, cy, field.x - 16.0 - left - ROW_SIDE);
+                    field_label_in(frame, (palette.text, palette.text2), pick(lang, "本机名称", "This PC's name"), Some(words), label, hint, left + ROW_SIDE, cy, field.x - 16.0 - left - ROW_SIDE);
                     if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::ThisPc) {
                         self.paint_rename(frame, palette, label, field.x + 8.0, cy, field.w - 8.0, now);
                     } else {
@@ -7517,6 +7619,47 @@ You can disconnect here at any time, and the original status line command will b
                         text_centred(frame, &self.pc_called(), label, palette.text, field.x + 8.0, cy, field.w - 16.0, Align::Start);
                         frame.unclip();
                         self.targets.push((field, Target::PcName));
+                    }
+                }
+                // Where other devices reach this PC: its name and words, then each network's address on a line of its own
+                // under a hairline, what it is on at its left, what copies it at its right (said copied a while).
+                Row::Addresses => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let dimmed = self.dimmed(&row);
+                    let colors = if dimmed { (palette.text3, palette.text3) } else { (palette.text, palette.text2) };
+                    let words_tall = self.words_height(&row).max(ROW);
+                    field_label_in(frame, colors, pick(lang, "本机地址", "This PC's addresses"), Some(addresses_words(lang)), label, hint, left + ROW_SIDE, y + words_tall / 2.0, width - 2.0 * ROW_SIDE);
+                    let mut line = y + words_tall;
+                    let small = Font::new(Family::Segoe, 13.0, 400.0);
+                    match self.my_addresses() {
+                        Some(addresses) if !addresses.is_empty() => {
+                            let networks = addresses.iter().map(|(network, _)| frame.gfx.measure(network, small)).fold(0.0f32, f32::max);
+                            for (network, given) in addresses {
+                                fill(frame, palette.rule, left + 1.0, line, width - 2.0, 1.0, 0.0);
+                                let cy = line + ADDRESS_LINE / 2.0;
+                                let copied = self.address_copied.as_ref().is_some_and(|(was, at)| *was == given && now.duration_since(*at) < COPIED_FOR);
+                                let words = if copied { pick(lang, "已复制", "Copied") } else { pick(lang, "复制", "Copy") };
+                                let kind = if dimmed { Button::Quiet } else { Button::Plain };
+                                let button_left = self.button(frame, palette, words, left + width - ROW_SIDE, cy, Target::CopyAddress(given.clone()), kind, &hovered);
+                                text_centred(frame, &network, small, colors.1, left + ROW_SIDE, cy, networks + 1.0, Align::Start);
+                                let at = left + ROW_SIDE + networks + 16.0;
+                                text_centred(frame, &given, label, colors.0, at, cy, button_left - 12.0 - at, Align::Start);
+                                line += ADDRESS_LINE;
+                            }
+                        }
+                        shown => {
+                            fill(frame, palette.rule, left + 1.0, line, width - 2.0, 1.0, 0.0);
+                            let said = if shown.is_some() { pick(lang, "本机未连接到网络", "This PC isn't connected to a network") } else { pick(lang, "正在读取", "Reading") };
+                            text_centred(frame, said, small, colors.1, left + ROW_SIDE, line + ADDRESS_LINE / 2.0, width - 2.0 * ROW_SIDE, Align::Start);
+                        }
+                    }
+                    if let Some((_, at)) = &self.address_copied {
+                        let left_for = COPIED_FOR.saturating_sub(now.duration_since(*at));
+                        if left_for.is_zero() {
+                            self.address_copied = None;
+                        } else {
+                            self.next_frame = self.next_frame.min(now + left_for);
+                        }
                     }
                 }
                 // A device this PC knows: its icon where a module's grip is, its name, and what it is and may do under
@@ -8582,7 +8725,7 @@ You can disconnect here at any time, and the original status line command will b
         let detail = match self.page {
             Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "Screens are arranged as in Windows, over your wallpaper"),
             Page::Phone => pick(lang, "手机上的 Glance", "Glance on the phone"),
-            Page::Devices => pick(lang, "配对后，手机可控制这台电脑，发来的文件也直接接收", "Once paired, the phone can control this PC and its files are accepted automatically"),
+            Page::Devices => pick(lang, "配对后，手机可控制本机，发来的文件也直接接收", "Once paired, the phone can control this PC and its files are accepted automatically"),
             Page::Nearby => "",
             Page::Music => pick(lang, "正在播放的内容", "Now playing"),
             _ => pick(lang, "实时数据", "Live readings"),
@@ -9187,6 +9330,7 @@ mod pictures {
                 trusted("CC", "书房电脑", "desktop", 1_763_078_400, None, true),
             ],
             others_refused: false,
+            added: Vec::new(),
         });
         // The phones paired: one with the app, one by its browser that only sees how this PC is (the first opened).
         let phone = |id: &str, name: &str, control: bool, web: bool| crate::phone::Phone { id: id.into(), name: name.into(), control, files: !web, web };
@@ -9220,6 +9364,83 @@ mod pictures {
             found("DD", "Xiaomi 14", "Xiaomi", "mobile", true),
             found("EE", "iPad", "iPadOS", "mobile", false),
         ]);
+    }
+
+    /// Adding a device by its address, drawn as it goes: the address card (three networks' addresses, the IPv6 one
+    /// first), the box written in, tried, failing and finding the device listed already, a card added opening and
+    /// ringing, a device added not answering; and the devices' page's group of those added. In both themes.
+    #[test]
+    #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
+    fn draws_adding_by_address() {
+        let _pretending = crate::pretending();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let info = crate::metrics::Sampler::new().info.clone();
+        crate::pictured(info, Vec::new());
+        let gfx = gfx::held().unwrap();
+        let hwnd = make(gfx.clone(), None, None).unwrap();
+        let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let scale = with_ui(|ui| ui.scale).unwrap();
+        unsafe {
+            let _ = SetWindowPos(hwnd, None, 0, 0, (SIZE.0 * scale) as i32, (SIZE.1 * scale) as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let me = |network: &str, address: &str| crate::nearby::MyAddress { network: network.into(), address: address.parse().unwrap() };
+        let added = |fingerprint: &str, alias: &str, at: &str| crate::phone::Added { fingerprint: fingerprint.into(), alias: alias.into(), model: Some("Windows".into()), kind: Some("desktop".into()), glance: true, addresses: vec![at.parse().unwrap()], since: 1_764_200_000 };
+        let kept = vec![added("FF", "实验室电脑", "[2001:da8:215:4a07::1c]:53320"), added("GG", "图书馆电脑", "10.21.160.8:53320")];
+        for dark in [false, true] {
+            for (name, page, case) in [
+                ("address-card", Page::Nearby, ""),
+                ("address-writing", Page::Nearby, "writing"),
+                ("address-trying", Page::Nearby, "trying"),
+                ("address-unreachable", Page::Nearby, "unreachable"),
+                ("address-listed", Page::Nearby, "listed"),
+                ("address-added", Page::Nearby, "added"),
+                ("address-devices", Page::Devices, ""),
+            ] {
+                with_ui(|ui| {
+                    ui.turn_to(page);
+                    pretend_nearby(ui, true);
+                    ui.palette = Palette::new(dark);
+                    if let Some(nearby) = ui.nearby.as_mut() {
+                        nearby.added = kept.clone();
+                    }
+                    crate::nearby::pretend_addresses(Some(crate::nearby::Me { port: 53320, addresses: vec![me("以太网", "2001:da8:215:3c01::5a2"), me("以太网", "10.21.134.57"), me("WLAN", "172.20.8.31")] }), kept.clone());
+                    // (The first added found nearby, the second not answering.)
+                    let found = |fingerprint: &str, alias: &str, model: &str, kind: &str, glance: bool| crate::nearby::Device { fingerprint: fingerprint.into(), alias: alias.into(), model: Some(model.into()), kind: Some(kind.into()), glance };
+                    crate::nearby::pretend_devices(vec![found("AA", "Galaxy Z Fold6", "Samsung", "mobile", true), found("DD", "Xiaomi 14", "Xiaomi", "mobile", true), found("FF", "实验室电脑", "Windows", "desktop", true)]);
+                    if !case.is_empty() {
+                        let written = if case == "unreachable" { "10.21.140.12" } else { "2001:da8:215:4a07::1c" };
+                        send::pretend_adding(ui, written, case, "FF");
+                    }
+                });
+                // (Drawn a while: the box opened; a card added part open and ringing.)
+                let frames = if case == "added" { 2 } else { 6 };
+                for _ in 0..frames {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(60));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                let theme = if dark { "dark" } else { "light" };
+                crate::studio::save_png(&out.join(format!("{name}-{theme}.png")), size.0, size.1, &pixels).unwrap();
+                with_ui(|ui| {
+                    ui.close_adder();
+                    ui.send = send::Pane::default();
+                });
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
     }
 
     #[test]

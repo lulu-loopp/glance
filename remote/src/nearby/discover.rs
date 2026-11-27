@@ -43,11 +43,15 @@ fn networks_of(addresses: &[Address]) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-/// An address another device reaches this PC at: on which network (as Windows names it), and the address.
+/// An address another device reaches this PC at: on which network (as Windows names it), the address, and whether
+/// that network leads beyond this PC (it has a gateway: not a virtual machine's network inside it, as WSL's and
+/// Hyper-V's own are, where no other device is).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Address {
     pub network: String,
     pub address: IpAddr,
+    #[serde(skip)]
+    pub routed: bool,
 }
 
 /// An IPv6 address of a network as Windows keeps it: the address, how its prefix and the rest came (Windows'
@@ -79,14 +83,14 @@ pub fn lasting(addresses: &[V6]) -> Option<Ipv6Addr> {
 /// to last (see `lasting`), first, then its IPv4 ones (not those of the link alone, 169.254.x.x). Only addresses in
 /// use are counted (an IPv6 one still being checked as unique, or deprecated, is not).
 pub fn addresses() -> Vec<Address> {
-    use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH};
+    use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH};
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::Networking::WinSock::{IpDadStatePreferred, AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
     let mut size = 16u32 << 10;
     let mut buffer: Vec<u64> = Vec::new();
     for _ in 0..3 {
         buffer = vec![0u64; size as usize / 8 + 1];
-        let result = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, None, Some(buffer.as_mut_ptr().cast()), &mut size) };
+        let result = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, None, Some(buffer.as_mut_ptr().cast()), &mut size) };
         match result {
             0 => break,
             // (Too small: as large as it said, and again.)
@@ -100,6 +104,7 @@ pub fn addresses() -> Vec<Address> {
         let this = unsafe { &*adapter };
         if this.OperStatus == IfOperStatusUp && this.IfType != IF_TYPE_SOFTWARE_LOOPBACK {
             let network = unsafe { this.FriendlyName.to_string() }.unwrap_or_default();
+            let routed = !this.FirstGatewayAddress.is_null();
             let (mut v4s, mut v6s) = (Vec::new(), Vec::new());
             let mut unicast = this.FirstUnicastAddress;
             while !unicast.is_null() {
@@ -117,8 +122,8 @@ pub fn addresses() -> Vec<Address> {
                 }
                 unicast = address.Next;
             }
-            found.extend(lasting(&v6s).map(|v6| Address { network: network.clone(), address: IpAddr::V6(v6) }));
-            found.extend(v4s.into_iter().map(|v4| Address { network: network.clone(), address: IpAddr::V4(v4) }));
+            found.extend(lasting(&v6s).map(|v6| Address { network: network.clone(), address: IpAddr::V6(v6), routed }));
+            found.extend(v4s.into_iter().map(|v4| Address { network: network.clone(), address: IpAddr::V4(v4), routed }));
         }
         adapter = this.Next;
     }
@@ -179,10 +184,10 @@ impl Discovery {
         // Its networks, joined as they come, and this PC announced on each new one.
         let watching = discovery.clone();
         std::thread::spawn(move || loop {
-            // (Every address other devices reach this PC at, kept by the receiver to tell them and Glance; its IPv4
-            // ones the networks announced on.)
+            // (The addresses on networks that lead beyond this PC kept by the receiver, to tell other devices and
+            // Glance; every IPv4 one a network announced on.)
             let addresses = addresses();
-            watching.receiver.addressed(addresses.clone());
+            watching.receiver.addressed(addresses.iter().filter(|address| address.routed).cloned().collect());
             let now = networks_of(&addresses);
             let new: Vec<Ipv4Addr> = {
                 let mut out = watching.out.lock().unwrap();

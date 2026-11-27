@@ -25,7 +25,7 @@ The mockup's defaults were kept, because the owner did not choose otherwise:
 4. **Send.** While an item of the station is dragged, the devices seen nearby rise at the station's foot. Dropped on
    one, the item is sent. The device shows "等待对方接受", then a ring of progress, then a check. The item stays on
    the station.
-5. **Android auto-send.** Glance's Android app has a switch, off by default: "新照片自动发到这台电脑". With it on,
+5. **Android auto-send.** Glance's Android app has a switch, off by default: "新照片自动发到该电脑". With it on,
    each new photo (and screenshot) is sent to the paired PC within seconds, with no app open.
 6. **Settings.** A page "附近传输":
    - receive on/off (off by default)
@@ -184,7 +184,7 @@ LocalSend app does that for now).
     or removed beside "Glance Remote" as each is on, and the task kept while either is (run anew on every change:
     a running helper is stopped and waited for first, so it takes the flags as it starts). Without the sensors'
     process it is turned in Glance's own, as the remote is (the firewall then changed only where that has the rights).
-  - 这台电脑的名称: a box with the name devices see (the computer's name by default). Pressed, it is written in
+  - 本机名称: a box with the name devices see (the computer's name by default). Pressed, it is written in
     place (the sensors' naming box: Enter or a press elsewhere keeps it, Escape leaves it). Named nothing or as the
     computer is, the alias is cleared. Kept by the helper (`nearby alias`), which says it from then on without a
     restart (`Receiver::me` reads it on each answer), and Glance has it announce itself at once.
@@ -206,7 +206,7 @@ LocalSend app does that for now).
 ## Android
 
 In the app's settings, under the name of the PC looked at (the mockup's "Glance 安卓应用 › 这台电脑"):
-"新照片自动发到这台电脑" (off), with "拍照后几秒内发出，无需打开本应用。只在与电脑处于同一网络时发送。", and, while it
+"新照片自动发到该电脑" (off), with "拍照后几秒内发出，无需打开本应用。只在与电脑处于同一网络时发送。", and, while it
 is on, 包括截图 (on), 包括视频 (off), 发送后显示提示 (on). One PC at a time is sent to: turned on for another, it moves
 there (the PC sent to now is named under the switch). Unpairing that PC turns it off. (`AutoSend.kt`, `AutoSendCard.kt`.)
 
@@ -214,7 +214,7 @@ there (the PC sent to now is named under the switch). Unpairing that PC turns it
   - The photos are asked for (and the videos, where they are sent, and the notice): `READ_MEDIA_IMAGES` (Android 13
     on), `READ_EXTERNAL_STORAGE` before. Android 14's partial access is told apart (`READ_MEDIA_VISUAL_USER_SELECTED`
     granted alone): new photos would not be seen, so it is explained and not turned on. Refused: said so.
-  - The PC is asked, signed, `GET /v1/nearby`. Off there: "这台电脑尚未开启附近传输…" and it stays off. Not reached,
+  - The PC is asked, signed, `GET /v1/nearby`. Off there: "该电脑尚未开启附近传输…" and it stays off. Not reached,
     or no longer paired: said so.
   - The phone's certificate is told it, `POST /v1/nearby/trust {fingerprint, alias}`: the PC trusts it while the
     phone is paired. The alias is the name the phone's user gave it (`Settings.Global.DEVICE_NAME`).
@@ -408,7 +408,7 @@ the battery.
 
 - **Paired** (a Glance phone, by the pairing code): it may control this PC, and its files are taken without asking.
   Pairing includes trust. Each paired phone has two switches, both on as it pairs:
-  - 控制这台电脑: screens, lights, volume, brightness and the power mode. Off, the phone only reads how the PC is (the
+  - 控制本机: screens, lights, volume, brightness and the power mode. Off, the phone only reads how the PC is (the
     helper answers its state, and refuses every control with 403).
   - 直接接收文件: off, what it sends is asked about like any device's.
 - **Trusted** (any LocalSend device, another Glance PC among them): only its files are taken without asking. A PC is
@@ -437,20 +437,20 @@ mockup's artboards 设备 and 附近传输): cards as wide as the other pages'
 pills, groups named without counts, no paragraphs of notes under the lists.
 
 - **设备**, its list:
-  - 这台电脑的名称 ("在手机和附近设备上显示"): the box, as nearby's was, now for both.
+  - 本机名称 ("在手机和附近设备上显示"): the box, as nearby's was, now for both.
   - 已配对的手机: paired phones (and phones paired by the web page), "还没有配对的手机" where none are. Each a card as a
     module's: its icon where a module's grip is, its name, and under it what it is and may do in one line ("Glance 手机 ·
-    可控制这台电脑 · 直接接收文件", "网页 · 仅查看状态"). The whole row opens it (the chevron turns over, the card slides
+    可控制本机 · 直接接收文件", "网页 · 仅查看状态"). The whole row opens it (the chevron turns over, the card slides
     open in 240 ms), several may be open. Inside, under hairlines across the card, words where a module's items' are:
-    控制这台电脑 and 直接接收文件 with their switches, and 解除配对 ("解除后，该手机需重新添加才能使用") with its button,
-    which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，
+    控制本机 and 直接接收文件 with their switches, and 解除配对 ("解除后，该手机需重新添加才能使用") with its button,
+    which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制本机，发来的文件也需要重新确认。如需重新使用，
     请再次添加手机。"). The switches and the button stand in the column every row's buttons do (the card's right less
     its inset). A web-paired phone has no files switch (a page cannot send).
   - 已信任的设备 (only where there are any): "LocalSend · 直接接收文件 · M月D日起" / "Glance 电脑 · …", with 移除, without
     asking (it is asked about again when it sends).
   - 附近发现的设备: what discovery found that is neither: "Glance 手机 · Xiaomi。信任后，它发来的文件直接接收", with 信任.
     None: "附近没有发现其他设备".
-- **设备**, its stage: "添加手机", "配对后，手机可控制这台电脑，发来的文件也直接接收", a card with 配对码 | 下载 APP.
+- **设备**, its stage: "添加手机", "配对后，手机可控制本机，发来的文件也直接接收", a card with 配对码 | 下载 APP.
   - 配对码: the code always shown while the page is (no button to show it), "X 分 XX 秒后刷新" and
     "一部手机配对后立即刷新，离开此页后失效", then the two ways ("安卓手机 / 在 Glance APP 中点“添加电脑”扫描",
     "iPhone 或未装 APP 的手机 / 用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕"). Neither helper running: "请先开启
@@ -549,7 +549,7 @@ pills, groups named without counts, no paragraphs of notes under the lists.
 - **后台接收** (off): on, a foreground service (type connectedDevice) keeps receiving, with a quiet notification, and
   the system is asked not to optimise the app for the battery (the question auto-send asks). Off, the app receives
   only while it is open.
-- **Settings.** "已配对的电脑" becomes **设备** (+ 添加电脑): paired PCs ("已配对 · 可控制这台电脑、直接接收文件", 解除配对)
+- **Settings.** "已配对的电脑" becomes **设备** (+ 添加电脑): paired PCs ("已配对 · 可控制该电脑、直接接收文件", 解除配对)
   and trusted devices ("已信任 · 直接接收文件", 移除). A section **附近传输**: 后台接收, 来自未信任设备的文件, 本机名称 (the
   device's name by default), 最近收到 (the last 20, pressed to open, words to copy).
 - **Sending.** The send sheet lists paired PCs ("已配对的电脑") and then "附近的设备" found (looking while it is open),

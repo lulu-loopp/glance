@@ -374,7 +374,7 @@ impl Organizer {
             return;
         }
         centred(frame, lang.pick("没有可以显示的磁盘", "No drives to show"), body(16.0, 600.0), p.text, PAGE_X, top + 28.0, g.page_w);
-        centred(frame, lang.pick("未找到这台电脑上可以读取的本地磁盘。", "No readable local drives found on this PC."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
+        centred(frame, lang.pick("未找到本机可读取的本地磁盘。", "No readable local drives found on this PC."), body(13.0, 400.0), p.text2, PAGE_X, top + 56.0, g.page_w);
     }
 
     /// The page's title, as the settings' pages have theirs, and at its right the use of the drive shown: its words

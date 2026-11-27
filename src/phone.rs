@@ -573,6 +573,23 @@ pub struct Nearby {
     pub name: String,
     pub trusted: Vec<Trusted>,
     pub others_refused: bool,
+    /// The devices added by their addresses (see `nearby::add`).
+    pub added: Vec<Added>,
+}
+
+/// A device added by its address (on another network, say, where it is not found nearby): its certificate's
+/// fingerprint, what it calls itself and what it is, the addresses it is reached at (the one that last answered first),
+/// and since when it is added (seconds since 1970).
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct Added {
+    pub fingerprint: String,
+    pub alias: String,
+    pub model: Option<String>,
+    pub kind: Option<String>,
+    pub glance: bool,
+    pub addresses: Vec<std::net::SocketAddr>,
+    pub since: u64,
 }
 
 /// A device whose files are taken without asking: its certificate's fingerprint, what it calls itself, what it is,
@@ -600,7 +617,7 @@ fn trusted_of(config: Option<&serde_json::Value>) -> Vec<Trusted> {
 }
 
 /// Nearby transfer as the helper keeps it, once it is told `words` (see its `nearby`: `name NAME`, `forget
-/// FINGERPRINT`, `others ask|refuse`), none where it cannot be asked.
+/// FINGERPRINT`, `drop FINGERPRINT`, `others ask|refuse`), none where it cannot be asked.
 pub fn nearby(words: &[&str]) -> Option<Nearby> {
     let said = ask(&std::iter::once("nearby").chain(words.iter().copied()).collect::<Vec<_>>())?;
     serde_json::from_str(&said).ok()

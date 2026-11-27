@@ -466,7 +466,7 @@ pub fn menu_row(stays_here: bool) -> (Item<'static>, Vec<u64>) {
     crate::nearby::announce();
     let (phones, trusted) = (crate::phone::phones(), crate::phone::trusted_kept());
     let shown = crate::nearby::shown();
-    let targets = crate::nearby::targets(&shown.devices, &phones, &trusted);
+    let targets = crate::nearby::targets(&shown.devices, &phones, &trusted, &shown.added);
     let busy = busy_now(&shown);
     let keys;
     (row.more, keys) = device_rows(&targets, &busy, lang);
@@ -480,7 +480,7 @@ pub fn menu_row_again() -> Option<(Vec<Item<'static>>, Vec<u64>)> {
     let mut held = LISTED.lock().unwrap();
     let listed = held.as_mut()?;
     let shown = crate::nearby::shown();
-    let targets = crate::nearby::targets(&shown.devices, &listed.phones, &listed.trusted);
+    let targets = crate::nearby::targets(&shown.devices, &listed.phones, &listed.trusted, &shown.added);
     let busy = busy_now(&shown);
     if targets == listed.targets && busy == listed.busy {
         return None;
@@ -491,7 +491,7 @@ pub fn menu_row_again() -> Option<(Vec<Item<'static>>, Vec<u64>)> {
 
 /// The rows of `targets` in a menu's "发送到", and their keys: each with its kind's mark, its name and, under it, what it
 /// is (a paired phone, Glance's or LocalSend's, its model); one being sent to (`busy`, by lowercase fingerprints), or
-/// not reached, dimmed, saying so. None yet: a dimmed row saying they are looked for.
+/// not reached (a phone not receiving, a device added by its address not answering), dimmed, saying so. None yet: a dimmed row saying they are looked for.
 fn device_rows(targets: &[Target], busy: &[String], lang: Lang) -> (Vec<Item<'static>>, Vec<u64>) {
     if targets.is_empty() {
         let mut looking = Item::new(lang.pick("正在查找附近的设备", "Looking for nearby devices"), Some(Mark::Icon(Icon::Search)), false, false);
@@ -506,6 +506,8 @@ fn device_rows(targets: &[Target], busy: &[String], lang: Lang) -> (Vec<Item<'st
             let maker = if target.glance { "Glance" } else { "LocalSend" };
             let (detail, dimmed) = if busy.contains(&target.fingerprint.to_ascii_lowercase()) {
                 (lang.pick("正在发送", "Sending").to_string(), true)
+            } else if !target.found && target.added.is_some() {
+                (lang.pick("未连接", "Not connected").to_string(), true)
             } else if !target.found {
                 (lang.pick("未开启接收", "Not receiving").to_string(), true)
             } else if target.paired {
@@ -776,7 +778,7 @@ mod tests {
     /// saying so; none yet, a dimmed row saying they are looked for. Each is chosen by its key.
     #[test]
     fn a_menu_lists_the_devices_to_send_to() {
-        let target = |fingerprint: &str, name: &str, paired: bool, glance: bool, found: bool, model: Option<&str>| Target { fingerprint: fingerprint.into(), name: name.into(), kind: Some(if paired { "mobile" } else { "desktop" }.into()), model: model.map(str::to_string), paired, glance, found };
+        let target = |fingerprint: &str, name: &str, paired: bool, glance: bool, found: bool, model: Option<&str>| Target { fingerprint: fingerprint.into(), name: name.into(), kind: Some(if paired { "mobile" } else { "desktop" }.into()), model: model.map(str::to_string), paired, glance, found, added: None };
         let targets = [target("AA", "Fold", true, true, true, None), target("BB", "Pixel", true, true, false, None), target("CC", "Study", false, true, true, Some("Windows")), target("DD", "", false, false, true, None)];
         let (rows, keys) = device_rows(&targets, &["cc".to_string()], Lang::Zh);
         let said: Vec<(String, String, bool)> = rows.iter().map(|row| (row.label.to_string(), row.detail.as_deref().unwrap_or_default().to_string(), row.dimmed)).collect();
@@ -790,6 +792,10 @@ mod tests {
         assert!(!rows[0].dimmed && keys.len() == 1);
         let (rows, keys) = device_rows(&[], &[], Lang::Zh);
         assert!(rows.len() == 1 && rows[0].dimmed && keys.is_empty());
+        // (A device added by its address that does not answer is not connected, not one that does not receive.)
+        let away = Target { added: Some("10.21.140.12:53320".parse().unwrap()), ..target("EE", "实验室电脑", false, true, false, Some("Windows")) };
+        let (rows, _) = device_rows(&[away], &[], Lang::Zh);
+        assert_eq!((rows[0].detail.as_deref(), rows[0].dimmed), (Some("未连接"), true));
     }
 
     /// A device being sent to as the pointer comes on it, with what is dragged off the station, takes nothing; its

@@ -28,6 +28,30 @@ const MORE: f32 = 40.0;
 const WRITER: f32 = 96.0;
 /// The words written to send are written in.
 const WORDS_FONT: Font = Font::new(Family::Segoe, 13.0, 400.0);
+/// The most an address to add is written in (UTF-16 units: an IPv6 address in brackets, with a port).
+const ADDRESS_MOST: usize = 64;
+/// How long a device's card rings once it is added (or asked for again, listed already), and how long the pointer
+/// rests on an icon before what it does is said.
+const RING_FOR: Duration = Duration::from_millis(700);
+const TIP_AFTER: Duration = Duration::from_millis(500);
+
+/// The box a device's address is written in to add it (see `Named::Address`): the address as last written (shown
+/// greyed while it is tried, or while another box is written in), the adding under way, and what was said of the last.
+#[derive(Default)]
+pub(super) struct Adder {
+    written: String,
+    job: Option<u64>,
+    said: Option<AdderSaid>,
+}
+
+/// What is said of an adding gone wrong, or of a device listed already.
+#[derive(Clone, PartialEq, Debug)]
+enum AdderSaid {
+    NotAnAddress,
+    Unreachable(String),
+    Itself,
+    Listed,
+}
 /// How often the window looks at what nearby transfer shows while the pane shows or a sending of its goes on (it is
 /// drawn again only where that changed).
 pub(super) const WATCH_EVERY: Duration = Duration::from_millis(250);
@@ -77,11 +101,17 @@ pub(super) struct Pane {
     /// How far the pane's content is scrolled down, and the most it can be (DIPs: as last drawn).
     pub scroll: f32,
     pub most: f32,
+    /// The box a device's address is written in, while it is open; the device whose card rings (by fingerprint),
+    /// and since when (a card added just now opens as it does: see `adding_heard`); and the icon the pointer rests
+    /// on, since when.
+    pub adder: Option<Adder>,
+    ring: Option<(String, Instant)>,
+    tip: Option<(Target, Instant)>,
 }
 
 impl Default for Pane {
     fn default() -> Self {
-        Pane { chosen: Vec::new(), over: false, jobs: Vec::new(), said: None, choosing: None, draft: String::new(), seen: None, next: 1, sizes: std::sync::mpsc::channel(), area: None, scroll: 0.0, most: 0.0 }
+        Pane { chosen: Vec::new(), over: false, jobs: Vec::new(), said: None, choosing: None, draft: String::new(), seen: None, next: 1, sizes: std::sync::mpsc::channel(), area: None, scroll: 0.0, most: 0.0, adder: None, ring: None, tip: None }
     }
 }
 
@@ -231,11 +261,12 @@ fn folder_size(folder: &std::path::Path) -> u64 {
 
 impl Ui {
     /// The pane's devices: the phones paired (by the certificates they told), as found nearby or not; then the devices
-    /// found that are no paired phone, Glance's first.
+    /// found that are no paired phone, Glance's first; then those added by their addresses not found (a device added
+    /// says where it was reached).
     fn send_devices(&self, shown: &crate::nearby::Shown) -> Vec<SendDevice> {
         let lang = self.lang;
         let trusted = self.nearby.as_ref().map_or(&[][..], |nearby| &nearby.trusted[..]);
-        crate::nearby::targets(&shown.devices, &self.phones, trusted)
+        crate::nearby::targets(&shown.devices, &self.phones, trusted, &shown.added)
             .into_iter()
             .map(|target| {
                 let maker = if target.paired {
@@ -245,9 +276,10 @@ impl Ui {
                 } else {
                     "LocalSend"
                 };
-                let mut said: Vec<&str> = std::iter::once(maker).chain(target.model.as_deref().filter(|_| !target.paired)).collect();
+                let at = target.added.map(crate::nearby::said_at);
+                let mut said: Vec<&str> = std::iter::once(maker).chain(target.model.as_deref().filter(|_| !target.paired)).chain(at.as_deref()).collect();
                 if !target.found {
-                    said.push(pick(lang, "未开启接收", "Not receiving"));
+                    said.push(if target.added.is_some() { pick(lang, "未连接", "Not connected") } else { pick(lang, "未开启接收", "Not receiving") });
                 }
                 let name = if target.name.is_empty() { pick(lang, "未命名的设备", "Unnamed device").to_string() } else { target.name.clone() };
                 SendDevice { icon: Icon::of_device(target.kind.as_deref()), detail: said.join(" · "), fingerprint: target.fingerprint, name, found: target.found }
@@ -287,6 +319,12 @@ impl Ui {
             self.send.said = None;
             changed = true;
         }
+        changed |= self.adding_heard(&shown, now);
+        // (Where other devices reach this PC, asked of the helper while the page shows and it has not told.)
+        if self.page == Page::Nearby && shown.there && shown.me.is_none() && self.announced_at.is_none_or(|at| now.duration_since(at) >= ANNOUNCE_EVERY) {
+            crate::nearby::announce();
+            self.announced_at = Some(now);
+        }
         if self.page == Page::Nearby && self.send.seen.as_ref() != Some(&shown) {
             self.send.seen = Some(shown);
             changed = true;
@@ -301,6 +339,89 @@ impl Ui {
     /// chosen is measured, or a sending of its goes on.
     pub(super) fn send_watching(&self) -> bool {
         self.page == Page::Nearby || self.send.choosing.is_some() || self.send.measuring() || !self.send.jobs.is_empty()
+    }
+
+    /// How the adding under way went, once the helper told (see `nearby::add`): added, the box closed and the device's
+    /// card opening and ringing; listed already, its card ringing, and that said; else what went wrong said, the
+    /// address written on again. Whether that changed what shows.
+    fn adding_heard(&mut self, shown: &crate::nearby::Shown, now: Instant) -> bool {
+        let Some(job) = self.send.adder.as_ref().and_then(|adder| adder.job) else { return false };
+        let Some(Some(outcome)) = shown.adding.get(&job).cloned() else { return false };
+        crate::nearby::forget_adding(job);
+        let Some(adder) = self.send.adder.as_mut() else { return false };
+        adder.job = None;
+        let written = adder.written.clone();
+        adder.said = match outcome {
+            crate::nearby::Adding::Added { fingerprint, known: false } => {
+                self.send.adder = None;
+                self.send.ring = Some((fingerprint.clone(), now));
+                self.animate(format!("send-card:{}", fingerprint.to_ascii_lowercase()), 0.0, SLIDE, now, true);
+                return true;
+            }
+            crate::nearby::Adding::Added { fingerprint, known: true } => {
+                self.send.ring = Some((fingerprint, now));
+                Some(AdderSaid::Listed)
+            }
+            crate::nearby::Adding::NotAnAddress => Some(AdderSaid::NotAnAddress),
+            crate::nearby::Adding::Unreachable | crate::nearby::Adding::NotLocalSend => Some(AdderSaid::Unreachable(written.clone())),
+            crate::nearby::Adding::Itself => Some(AdderSaid::Itself),
+        };
+        // (Written on again, all of it chosen, unless something else is being written meanwhile.)
+        if self.renaming.is_none() {
+            self.begin_naming(Named::Address, &written, ADDRESS_MOST);
+        }
+        true
+    }
+
+    /// Whether what is being written stays as the pointer presses elsewhere and the window goes behind another: words
+    /// to send, an address to add (each kept till added or left).
+    pub(super) fn naming_held(&self) -> bool {
+        self.renaming.as_ref().is_some_and(|renaming| matches!(renaming.of, Named::Words | Named::Address))
+    }
+
+    /// The address being written put by (written on as its box is pressed), where it is.
+    fn hold_address(&mut self) {
+        if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.of == Named::Address) {
+            let written = renaming.typing.string();
+            if let Some(adder) = self.send.adder.as_mut() {
+                adder.written = written;
+            }
+            self.end_rename(false);
+        }
+    }
+
+    /// The box an address is written in written in: as it was left, the words being written put by.
+    fn write_address(&mut self) {
+        let Some(written) = self.send.adder.as_ref().filter(|adder| adder.job.is_none()).map(|adder| adder.written.clone()) else { return };
+        self.put_words_by();
+        self.begin_naming(Named::Address, &written, ADDRESS_MOST);
+    }
+
+    /// The box an address is written in closed, an adding under way no longer heard.
+    pub(super) fn close_adder(&mut self) {
+        if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address) {
+            self.end_rename(false);
+        }
+        if let Some(job) = self.send.adder.take().and_then(|adder| adder.job) {
+            crate::nearby::forget_adding(job);
+        }
+        self.next_frame = Instant::now();
+    }
+
+    /// The device at the address `written` added (see `nearby::add`): tried, the box showing so, unless nothing is
+    /// written (written on then).
+    pub(super) fn send_add(&mut self, written: String) {
+        let written = written.trim().to_string();
+        let Some(adder) = self.send.adder.as_mut() else { return };
+        adder.said = None;
+        adder.written = written.clone();
+        if written.is_empty() {
+            self.begin_naming(Named::Address, "", ADDRESS_MOST);
+            return;
+        }
+        let job = crate::nearby::job();
+        adder.job = Some(job);
+        crate::nearby::add(job, &written);
     }
 
     /// Whether words to send are being written (see `paint_writer`).
@@ -503,12 +624,32 @@ impl Ui {
         let small = Font::new(Family::Segoe, 13.0, 600.0);
         text_centred(frame, pick(lang, "附近的设备", "Nearby devices"), small, palette.text2, left + 4.0, y + GROUP / 2.0, width - 40.0, Align::Start);
         let refresh = Rect { x: right - 28.0, y: y + GROUP / 2.0 - 14.0, w: 28.0, h: 28.0 };
-        if hovered.as_ref() == Some(&Target::SendRefresh) {
-            fill(frame, palette.hover, refresh.x, refresh.y, refresh.w, refresh.h, 6.0);
+        let plus = Rect { x: refresh.x - 4.0 - 28.0, ..refresh };
+        let mut tip = None;
+        for (rect, icon, size, target, said) in [
+            (plus, Icon::Add, 15.0, Target::SendAddress, pick(lang, "按地址添加", "Add by address")),
+            (refresh, Icon::Update, 14.0, Target::SendRefresh, pick(lang, "刷新", "Refresh")),
+        ] {
+            let lit = hovered.as_ref() == Some(&target) || (target == Target::SendAddress && self.send.adder.is_some());
+            if lit {
+                fill(frame, palette.hover, rect.x, rect.y, rect.w, rect.h, 6.0);
+            }
+            frame.icon(icon, Point { x: rect.x + 14.0, y: rect.y + 14.0 }, size, palette.text2);
+            if hovered.as_ref() == Some(&target) {
+                tip = Some((rect, said, target.clone()));
+            }
+            self.targets.push((rect, target));
         }
-        frame.icon(Icon::Update, Point { x: refresh.x + 14.0, y: refresh.y + 14.0 }, 14.0, palette.text2);
-        self.targets.push((refresh, Target::SendRefresh));
         y += GROUP + 8.0;
+        // The box an address is written in, opening under the group's name.
+        let open = self.animate("send-adder".into(), if self.send.adder.is_some() { 1.0 } else { 0.0 }, SLIDE, now, false);
+        if open > 0.0 && self.send.adder.is_some() {
+            let tall = self.adder_height(frame, width);
+            frame.clip(left, y, width, tall * open);
+            self.paint_adder(frame, palette, left, y, width, now, &hovered);
+            frame.unclip();
+            y += (tall + ROW_GAP) * open;
+        }
         let shown = crate::nearby::shown();
         let devices = self.send_devices(&shown);
         if devices.is_empty() {
@@ -516,7 +657,42 @@ impl Ui {
             y += 20.0;
         }
         for device in &devices {
-            y = self.paint_send_device(frame, palette, device, &shown, left, y, width, &hovered) + ROW_GAP;
+            // (A card added just now opening, the rest moving down as it does.)
+            let key = format!("send-card:{}", device.fingerprint.to_ascii_lowercase());
+            let opened = if self.motion.contains_key(&key) { self.animate(key.clone(), 1.0, SLIDE, now, false) } else { 1.0 };
+            if opened < 1.0 {
+                frame.clip(left - 4.0, y - 4.0, width + 8.0, (ROW + 4.0) * opened);
+                self.paint_send_device(frame, palette, device, &shown, left, y, width, &hovered);
+                frame.unclip();
+                y += (ROW + ROW_GAP) * opened;
+            } else {
+                self.motion.remove(&key);
+                y = self.paint_send_device(frame, palette, device, &shown, left, y, width, &hovered) + ROW_GAP;
+            }
+        }
+        // What the icon the pointer rests on does, over it, once it has rested a while.
+        match tip {
+            Some((rect, said, target)) => {
+                let since = match &self.send.tip {
+                    Some((was, at)) if *was == target => *at,
+                    _ => {
+                        self.send.tip = Some((target, now));
+                        now
+                    }
+                };
+                if now.duration_since(since) >= TIP_AFTER {
+                    let small = Font::new(Family::Segoe, 12.0, 400.0);
+                    let w = frame.gfx.measure(said, small) + 16.0;
+                    let plate = Rect { x: (rect.x + rect.w + 4.0 - w).max(left), y: rect.y - 6.0 - 24.0, w, h: 24.0 };
+                    fill(frame, palette.window, plate.x, plate.y, plate.w, plate.h, 4.0);
+                    fill(frame, palette.card, plate.x, plate.y, plate.w, plate.h, 4.0);
+                    stroke_inside(frame, plate, 4.0, palette.rule);
+                    text_centred(frame, said, small, palette.text, plate.x + 8.0, plate.y + plate.h / 2.0, w - 16.0 + 1.0, Align::Start);
+                } else {
+                    self.next_frame = self.next_frame.min(since + TIP_AFTER);
+                }
+            }
+            None => self.send.tip = None,
         }
         frame.unclip();
         // As far as it scrolls (its content taller than where it shows), and what of it is pressed only where it shows.
@@ -529,7 +705,7 @@ impl Ui {
         };
         let scrolled: Vec<(Rect, Target)> = self.targets.drain(targets_from..).filter_map(|(rect, target)| Some((shown_in(rect)?, target))).collect();
         self.targets.extend(scrolled);
-        if let Some(renaming) = self.renaming.as_mut().filter(|renaming| renaming.of == Named::Words) {
+        if let Some(renaming) = self.renaming.as_mut().filter(|renaming| matches!(renaming.of, Named::Words | Named::Address)) {
             renaming.field = renaming.field.and_then(shown_in);
         }
         // (Its bar in the room right of it, where the list's is beside the list.)
@@ -610,10 +786,90 @@ impl Ui {
                 }
             }
         }
+        // (Rung as it is added, or asked for again: fading over its last part.)
+        if let Some((fingerprint, at)) = &self.send.ring {
+            let since = Instant::now().duration_since(*at);
+            if fingerprint.eq_ignore_ascii_case(&device.fingerprint) && since < RING_FOR {
+                let fades = (RING_FOR - since).as_secs_f32() / 0.2;
+                Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection.alpha(0.35 * fades.min(1.0))), left - 2.0, y - 2.0, width + 4.0, ROW + 4.0, CARD_RADIUS + 2.0, 2.0);
+                self.next_frame = Instant::now();
+            }
+        }
         let (ink, ink2) = if device.found { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
         frame.icon(device.icon, Point { x: left + 22.0, y: cy }, 16.0, ink2);
         field_label_in(frame, (ink, ink2), &device.name, Some(&device.detail), label, hint, left + ITEM_INSET, cy, right - left - ITEM_INSET);
         y + ROW
+    }
+
+    /// What the box an address is written in says under its field, and in which ink: where the other device's address
+    /// is shown; that it is tried; or how the last try went.
+    fn adder_said(&self, palette: &Palette) -> Vec<(String, Color, bool)> {
+        let lang = self.lang;
+        let Some(adder) = self.send.adder.as_ref() else { return Vec::new() };
+        let caution = palette.caution;
+        if adder.job.is_some() {
+            return vec![(format!("{}{}", pick(lang, "正在连接 ", "Connecting to "), adder.written), palette.text2, false)];
+        }
+        match &adder.said {
+            None => vec![(pick(lang, "对方的地址显示在其 Glance 设置的“附近传输”页面中", "The other device's address is shown on the Nearby sharing page of its Glance settings").into(), palette.text2, false)],
+            Some(AdderSaid::NotAnAddress) => vec![(pick(lang, "IP 地址格式不正确", "This isn't a valid IP address").into(), caution, false)],
+            Some(AdderSaid::Itself) => vec![(pick(lang, "该地址为本机地址", "This is this PC's address").into(), caution, false)],
+            Some(AdderSaid::Listed) => vec![(pick(lang, "此设备已在列表中", "This device is already listed").into(), palette.text2, false)],
+            Some(AdderSaid::Unreachable(at)) => vec![
+                (match lang {
+                    Lang::Zh => format!("无法连接到 {at}"),
+                    Lang::En => format!("Can't connect to {at}"),
+                }, caution, true),
+                (pick(lang, "请确认对方已开启“接收附近设备的文件”，或改用对方的 IPv6 地址", "Make sure the other device has Receive files from nearby devices turned on, or use its IPv6 address").into(), caution, false),
+            ],
+        }
+    }
+
+    /// How tall the box an address is written in is, `width` wide: its field, what it says under it, and its buttons.
+    fn adder_height(&self, frame: &Frame, width: f32) -> f32 {
+        let said: f32 = self.adder_said(&Palette::new(false)).iter().map(|(words, _, bold)| frame.gfx.wrapped_height(words, adder_font(*bold), width - 32.0)).sum();
+        14.0 + 28.0 + 8.0 + said + 8.0 + 28.0 + 14.0
+    }
+
+    /// The box an address is written in, at `y`: its field (written in, or as it was written: greyed while it is
+    /// tried), what it says under it, and what adds the device and what leaves the box.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_adder(&mut self, frame: &Frame, palette: &Palette, left: f32, y: f32, width: f32, now: Instant, hovered: &Option<Target>) {
+        let lang = self.lang;
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
+        let tall = self.adder_height(frame, width);
+        card(frame, palette, left, y, width, tall, palette.card);
+        let (inner, room) = (left + 16.0, width - 32.0);
+        let cy = y + 14.0 + 14.0;
+        let writing = self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address);
+        let (written, trying) = self.send.adder.as_ref().map_or((String::new(), false), |adder| (adder.written.clone(), adder.job.is_some()));
+        if writing {
+            self.paint_rename(frame, palette, label, inner + 8.0, cy, room - 8.0, now);
+        } else {
+            let field = Rect { x: inner, y: cy - 14.0, w: room, h: 28.0 };
+            fill(frame, palette.control, field.x, field.y, field.w, field.h, 6.0);
+            stroke_inside(frame, field, 6.0, palette.rule);
+            frame.clip(field.x + 8.0, field.y, field.w - 16.0, field.h);
+            text_centred(frame, &written, label, if trying { palette.text3 } else { palette.text }, field.x + 8.0, cy, field.w - 16.0, Align::Start);
+            frame.unclip();
+            if !trying {
+                self.targets.push((field, Target::SendAddressField));
+            }
+        }
+        let empty = if writing { self.renaming.as_ref().is_some_and(|renaming| renaming.typing.text.is_empty()) } else { written.is_empty() };
+        if empty && !trying {
+            text_centred(frame, pick(lang, "输入对方的 IP 地址", "Enter the other device's IP address"), label, palette.text3, inner + 8.0, cy, room - 16.0, Align::Start);
+        }
+        let mut at = cy + 14.0 + 8.0;
+        for (words, ink, bold) in self.adder_said(palette) {
+            let font = adder_font(bold);
+            frame.text_wrapped(&words, font, ink, inner, at, room);
+            at += frame.gfx.wrapped_height(&words, font, room);
+        }
+        let foot = at + 8.0 + 14.0;
+        let add = if trying || empty { Button::Quiet } else { Button::Accent };
+        let add_left = self.button(frame, palette, pick(lang, "添加", "Add"), left + width - 16.0, foot, Target::SendAddressAdd, add, hovered);
+        self.button(frame, palette, pick(lang, "取消", "Cancel"), add_left - 8.0, foot, Target::SendAddressCancel, Button::Plain, hovered);
     }
 
     /// The box words are written in to send, at `y`: wrapped, the caret and what is chosen in them shown, how many
@@ -688,6 +944,7 @@ impl Ui {
                 }));
             }
             Target::SendKind(2) => {
+                self.hold_address();
                 if self.writing_words() {
                     return;
                 }
@@ -715,6 +972,23 @@ impl Ui {
             }
             Target::SendWordsAdd => self.end_rename(true),
             Target::SendWordsCancel => self.end_rename(false),
+            Target::SendAddress if self.send.adder.is_some() => self.close_adder(),
+            Target::SendAddress => {
+                self.send.adder = Some(Adder::default());
+                self.animate("send-adder".into(), 0.0, SLIDE, Instant::now(), true);
+                self.write_address();
+            }
+            Target::SendAddressField => self.write_address(),
+            // (Added as written; nothing while it is tried, or nothing is written.)
+            Target::SendAddressAdd => {
+                if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address && !renaming.typing.text.is_empty()) {
+                    self.end_rename(true);
+                } else if self.send.adder.as_ref().is_some_and(|adder| adder.job.is_none() && !adder.written.trim().is_empty()) {
+                    let written = self.send.adder.as_ref().map(|adder| adder.written.clone()).unwrap_or_default();
+                    self.send_add(written);
+                }
+            }
+            Target::SendAddressCancel => self.close_adder(),
             Target::SendTo(fingerprint) => self.send_to(fingerprint),
             _ => {}
         }
@@ -808,4 +1082,38 @@ pub(super) fn pretend(ui: &mut Ui, paths: Vec<std::path::PathBuf>, words: &str, 
         told.insert(job, state);
     }
     crate::nearby::pretend_sendings(told);
+}
+
+/// The box an address is written in says its words in (what went wrong first, bold).
+fn adder_font(bold: bool) -> Font {
+    Font::new(Family::Segoe, 12.5, if bold { 600.0 } else { 400.0 })
+}
+
+/// For pictures: the box an address is written in, `written` in it, as `case` is: "writing" (written in), "trying"
+/// (tried, not yet told), "unreachable" (nothing answered), "listed" (the device listed already, its card `ring`
+/// ringing); or, "added", closed, the card of `ring` opening and ringing as it was just added.
+#[cfg(all(test, feature = "studio"))]
+pub(super) fn pretend_adding(ui: &mut Ui, written: &str, case: &str, ring: &str) {
+    let now = Instant::now();
+    ui.end_rename(false);
+    ui.send.adder = Some(Adder { written: written.into(), ..Adder::default() });
+    match case {
+        "writing" => {
+            ui.begin_naming(Named::Address, written, ADDRESS_MOST);
+            if let Some(renaming) = ui.renaming.as_mut() {
+                renaming.typing.go(renaming.typing.text.len(), false);
+            }
+        }
+        "trying" => ui.send.adder.as_mut().unwrap().job = Some(u64::MAX),
+        "unreachable" => ui.send.adder.as_mut().unwrap().said = Some(AdderSaid::Unreachable(written.into())),
+        "listed" => {
+            ui.send.adder.as_mut().unwrap().said = Some(AdderSaid::Listed);
+            ui.send.ring = Some((ring.into(), now));
+        }
+        _ => {
+            ui.send.adder = None;
+            ui.send.ring = Some((ring.into(), now));
+            ui.animate(format!("send-card:{}", ring.to_ascii_lowercase()), 0.0, SLIDE, now, true);
+        }
+    }
 }
