@@ -95,6 +95,31 @@ impl Chosen {
         order.iter().copied().filter(|hit| self.hits.contains(hit)).collect()
     }
 
+    /// Part `at` of `id` taken out of it (see `shelf::Shelf::take_part`), `made` the thing it is now (`id` itself where
+    /// `id` held it alone), `id` holding `left` now: chosen (or pressed last), it is so as that thing; those after it as
+    /// they are now, one place sooner; where `id` holds one, it as `id` itself. (Chosen by their places, those chosen
+    /// were others after it: marked or taken off together next, others were.)
+    pub fn part_taken(&mut self, id: u64, at: usize, made: u64, left: usize) {
+        let thing = |number| if self.on.is_some_and(|on| matches!(on.page, Tab::Copies(_))) { Hit::Copied(number) } else { Hit::Shelf(number) };
+        let now = |hit: Hit| match hit {
+            Hit::Part(of, place) if of == id && place == at => thing(made),
+            Hit::Part(of, place) if of == id && place > at && made != id => Hit::Part(id, place - 1),
+            hit => hit,
+        };
+        let alone = |hit: Hit| match hit {
+            Hit::Part(of, 0) if of == id && left == 1 => thing(id),
+            hit => hit,
+        };
+        let mut hits: Vec<Hit> = Vec::with_capacity(self.hits.len());
+        for hit in self.hits.iter().map(|hit| alone(now(*hit))) {
+            if !hits.contains(&hit) {
+                hits.push(hit);
+            }
+        }
+        self.hits = hits;
+        self.anchor = self.anchor.map(|hit| alone(now(hit)));
+    }
+
     /// Nothing chosen, nothing pressed last.
     pub fn clear(&mut self) {
         *self = Chosen::default();
@@ -269,6 +294,11 @@ pub fn change<R>(change: impl FnOnce(&mut Chosen) -> R) -> R {
     given
 }
 
+/// Part `at` of `id` taken out of it, a thing of its own now (see `Chosen::part_taken`).
+pub fn part_taken(id: u64, at: usize, made: u64, left: usize) {
+    change(|chosen| chosen.part_taken(id, at, made, left));
+}
+
 /// What is chosen now.
 pub fn now() -> Chosen {
     CHOSEN.lock().unwrap().clone()
@@ -340,6 +370,25 @@ mod tests {
     const SHIFT: Keys = Keys { ctrl: false, shift: true };
     const BOTH: Keys = Keys { ctrl: true, shift: true };
     const ALONE: Keys = Keys { ctrl: false, shift: false };
+
+    /// Parts chosen, one of them taken out (pinned, tagged, taken out from its menu), are chosen as what they are now:
+    /// it as the thing it is, those after it a place sooner, the last of it left as what held them. Chosen by their
+    /// places as they were, the files after them were chosen in their stead, to be marked or taken off next.
+    #[test]
+    fn parts_chosen_stay_the_files_they_were_as_one_is_taken_out() {
+        let mut chosen = Chosen { on: Some(ON), hits: vec![Hit::Part(5, 0), Hit::Part(5, 2), Hit::Part(6, 1), Hit::Shelf(10)], anchor: Some(Hit::Part(5, 2)) };
+        chosen.part_taken(5, 0, 20, 4);
+        assert_eq!(chosen.hits, [Hit::Shelf(20), Hit::Part(5, 1), Hit::Part(6, 1), Hit::Shelf(10)]);
+        assert_eq!(chosen.anchor, Some(Hit::Part(5, 1)));
+        chosen.part_taken(5, 1, 21, 1);
+        assert_eq!(chosen.hits, [Hit::Shelf(20), Hit::Shelf(21), Hit::Part(6, 1), Hit::Shelf(10)]);
+        // (Its last, chosen, as what held it.)
+        let mut chosen = Chosen { on: Some(On { page: Tab::Copies(Default::default()), ..ON }), hits: vec![Hit::Part(5, 0), Hit::Part(5, 1)], anchor: None };
+        chosen.part_taken(5, 1, 22, 1);
+        assert_eq!(chosen.hits, [Hit::Copied(5), Hit::Copied(22)]);
+        chosen.part_taken(5, 0, 5, 1);
+        assert_eq!(chosen.hits, [Hit::Copied(5), Hit::Copied(22)]);
+    }
 
     /// What is chosen is marked in its own window alone, not in another showing the same things.
     #[test]

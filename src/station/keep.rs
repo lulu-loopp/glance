@@ -435,20 +435,31 @@ impl Keep {
 
     /// Part `at` of `id` taken out of it, a thing of its own listed just after it (see `Shelf::take_part`): its number.
     pub fn take_part(&mut self, id: u64, at: usize) -> Option<u64> {
-        let taken = self.shelf.take_part(id, at, self.part_bytes(id, at));
-        if taken.is_some() {
-            self.save();
-        }
-        taken
+        let taken = self.shelf.take_part(id, at, self.part_bytes(id, at))?;
+        self.save();
+        self.part_taken(id, at, taken);
+        Some(taken)
+    }
+
+    /// Part `at` of `id` taken out of it, `made`: what is chosen chosen as it is now (see `select::part_taken`).
+    fn part_taken(&self, id: u64, at: usize, made: u64) {
+        let left = self.shelf.get(id).map_or(0, |item| item.what.parts());
+        super::select::part_taken(id, at, made, left);
+    }
+
+    /// Part `at` of `id` as a thing of its own: taken out of it (see `take_part`), or `id` itself where it holds it
+    /// alone (the others of it taken out before it). Its number.
+    fn part_alone(&mut self, id: u64, at: usize) -> Option<u64> {
+        self.take_part(id, at).or_else(|| (at == 0 && self.shelf.get(id)?.what.parts() == 1).then_some(id))
     }
 
     /// Parts of what things hold together (`parts`: each by the thing's number and its place among them, as listed now)
-    /// each taken out of it (see `take_part`): their numbers. Those of one thing are taken out the last first, each
-    /// leaving those before it where they were.
+    /// each a thing of its own (see `part_alone`): their numbers. Those of one thing are taken out the last first, each
+    /// leaving those before it where they were, the first of all of it left as what held them.
     pub fn take_parts(&mut self, mut parts: Vec<(u64, usize)>) -> Vec<u64> {
         parts.sort_by(|one, other| other.cmp(one));
         parts.dedup();
-        parts.into_iter().filter_map(|(id, at)| self.take_part(id, at)).collect()
+        parts.into_iter().filter_map(|(id, at)| self.part_alone(id, at)).collect()
     }
 
     /// All `id` holds together each a thing of its own, listed in its order where it was (see `Shelf::take_part`).
@@ -456,16 +467,18 @@ impl Keep {
         let parts = self.shelf.get(id).map_or(0, |item| item.what.parts());
         // (The last first: each taken out listed just after it, before those taken out after it.)
         for at in (1..parts).rev() {
-            self.shelf.take_part(id, at, self.part_bytes(id, at));
+            if let Some(made) = self.shelf.take_part(id, at, self.part_bytes(id, at)) {
+                self.part_taken(id, at, made);
+            }
         }
         if parts > 1 {
             self.save();
         }
     }
 
-    /// Part `at` of `id` taken off it, its own files with it (see `remove`).
+    /// Part `at` of `id` taken off it, its own files with it (see `remove`): all of `id` where it holds it alone.
     pub fn remove_part(&mut self, id: u64, at: usize) {
-        if let Some(part) = self.take_part(id, at) {
+        if let Some(part) = self.part_alone(id, at) {
             self.remove(part);
         }
     }
@@ -574,15 +587,25 @@ mod tests {
         keep.pin(id, true, 20);
         let taken = keep.take_parts(vec![(id, 1), (id, 3), (id, 1)]);
         assert_eq!(taken.len(), 2);
-        let names = |id: u64| match &keep.shelf.get(id).unwrap().what {
+        let names = |keep: &Keep, id: u64| match &keep.shelf.get(id).unwrap().what {
             What::Came { files } => files.iter().map(|one| one.name.as_str()).collect::<Vec<_>>().join(","),
             _ => unreachable!(),
         };
-        let mut taken_names: Vec<String> = taken.iter().map(|id| names(*id)).collect();
+        let mut taken_names: Vec<String> = taken.iter().map(|id| names(&keep, *id)).collect();
         taken_names.sort();
         assert_eq!(taken_names, ["b.jpg", "d.jpg"]);
-        assert_eq!(names(id), "a.jpg,c.jpg");
+        assert_eq!(names(&keep, id), "a.jpg,c.jpg");
         assert!(taken.iter().all(|id| keep.shelf.get(*id).unwrap().pinned));
+        // All of it chosen, the first is what held them, left holding it alone: it too. (It was left out, the rest
+        // pinned or tagged, or taken off, without it.)
+        let all = keep.take_parts(vec![(id, 0), (id, 1)]);
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&id));
+        assert_eq!(names(&keep, id), "a.jpg");
+        let other = *all.iter().find(|one| **one != id).unwrap();
+        assert_eq!(names(&keep, other), "c.jpg");
+        keep.remove_part(other, 0);
+        assert!(keep.shelf.get(other).is_none(), "the last of it taken off");
     }
 
     /// One of what was sent together given by itself (dragged off its preview) is that file alone, given though another
