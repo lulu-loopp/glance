@@ -90,11 +90,11 @@ impl Naming {
         Naming { of: Of::Named(Named::Tag(id)), chosen: units(&shown), shown, most: TAG_MOST, keep: Keeping::Now(Box::new(keep)) }
     }
 
-    /// A tag just asked to be made named `name`, these things of it (see `station::new_tag`): what is written its name,
-    /// or where another tag has that name, they of that one instead.
-    pub fn new_tag(name: String, ids: Vec<u64>, files: Vec<crate::station::recent::Key>) -> Naming {
+    /// A tag just asked to be made named `name`, these files come lately of it (see `station::new_tag`): what is written
+    /// its name, or where another tag has that name, what is of it of that one instead.
+    pub fn new_tag(name: String, files: Vec<crate::station::recent::Key>) -> Naming {
         let was = name.clone();
-        let keep = move |written: &str| crate::station::run::ask(crate::station::run::Ask::RenameNewTag(was, written.to_string(), ids, files));
+        let keep = move |written: &str| crate::station::run::ask(crate::station::run::Ask::RenameNewTag(was, written.to_string(), files));
         Naming { of: Of::NewTag(name.clone()), chosen: units(&name), shown: name, most: TAG_MOST, keep: Keeping::Now(Box::new(keep)) }
     }
 
@@ -624,7 +624,7 @@ mod tests {
     fn a_tag_just_made_is_turned_to_as_it_is_found() {
         let owner = HWND(0xA1A1 as *mut _);
         WRITING.with_borrow_mut(|writing| *writing = None);
-        start(owner, Naming::new_tag("新建标签".into(), Vec::new(), Vec::new()), HWND::default());
+        start(owner, Naming::new_tag("新建标签".into(), Vec::new()), HWND::default());
         typed("工");
         let tag = |id: u32, name: &str| crate::station::shelf::Tag { id, name: name.into() };
         assert_eq!(turn(owner, &[tag(1, "工作")]), None);

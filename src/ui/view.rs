@@ -466,6 +466,7 @@ impl Hit {
         match self {
             Hit::PinThing(Thing::Item(id)) | Hit::TagThing(Thing::Item(id)) => items.iter().find(|item| item.id == id).map(|item| if item.copied { Hit::Copied(id) } else { Hit::Shelf(id) }),
             Hit::PinThing(Thing::Recent(entry)) | Hit::TagThing(Thing::Recent(entry)) => Some(Hit::Recent(entry)),
+            Hit::PinThing(Thing::Part(id, at)) | Hit::TagThing(Thing::Part(id, at)) => Some(Hit::Part(id, at)),
             _ => None,
         }
     }
@@ -5843,11 +5844,12 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
         let said_middle = name_middle + name_font.size / 2.0 + CHIP_LINE_GAP + kind_font.size / 2.0;
         centred(frame, &said, kind_font, seen(if asks { theme.signal } else { theme.text2 }, 0.85 * dim), inner_x, frame.line_top(kind_font, said_middle), inner_w);
     }
-    // (Its places where it stands, risen: the boxes stay put as it rises, the windows catching drops over them with
-    // them.)
+    // (Its places where it stands, risen, and as it rises, all the way it comes up into them: the boxes stay put as it
+    // rises, the windows catching drops over them with them, and a device is caught wherever it is drawn on its way.)
+    let reach = if up < 1.0 { STRIP_RISES } else { 0.0 };
     let mut boxes: Vec<HitBox> = Vec::new();
-    boxes.extend(strip.chips.iter().zip(&chips).filter(|(chip, _)| strip.open || strip.stays_here || cancels(chip)).map(|(chip, &(cx, cy, cw, ch))| (cx, cy, cw, ch, Hit::SendTo(chip.key))));
-    boxes.push((x, y, w, h, Hit::Strip));
+    boxes.extend(strip.chips.iter().zip(&chips).filter(|(chip, _)| strip.open || strip.stays_here || cancels(chip)).map(|(chip, &(cx, cy, cw, ch))| (cx, cy, cw, ch + reach, Hit::SendTo(chip.key))));
+    boxes.push((x, y, w, h + reach, Hit::Strip));
     boxes
 }
 
@@ -6162,14 +6164,13 @@ fn paint_badge(frame: &dyn Canvas, theme: &Theme, text: &str, ground: Color, x: 
     centred(frame, text, font, ink_on(ground), x, middle - font.size * 0.71, wide);
 }
 
-/// The count on what holds things together (see `Grouped::Holds`): the room before its figures, between them and its
-/// chevron, after that, and the chevron's side.
+/// The count on what holds things together drawn on its picture (see `Grouped::Holds`, `count_on_face`): the room before
+/// its figures, between them and its chevron, after that, and the chevron's side.
 const COUNT_PAD: f32 = 7.0;
 const COUNT_GAP: f32 = 2.0;
 const COUNT_END: f32 = 5.0;
 const COUNT_CHEVRON: f32 = 11.0;
-/// How tall it is at the end of a line, and on a picture.
-const COUNT_LINE: f32 = 22.0;
+/// How tall it is on a picture.
 const COUNT_FACE: f32 = BADGE + 2.0;
 /// How far in from what holds them the parts it shows under it are, in a list (see `Grouped::Within`): told apart from
 /// the rest by that alone, as Explorer tells what is in a folder unfolded.
@@ -6843,20 +6844,17 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 // At its end: its buttons (a pinned one's pin, with the pointer not over it), and when it came, which
                 // gives way to them.
                 let mut right = x + width;
-                // The count on what holds things together, always, at its very end (where it stays, the pointer come on
-                // the line or not: its buttons come before it).
-                if let (Grouped::Holds { count, unfolded }, Some(unfold)) = (tile.group, unfold) {
-                    let on = scene.hover == Some(unfold);
-                    let gap = if right < x + width { 4.0 } else { 0.0 };
-                    let wide = count_width(frame, theme, count);
-                    // (Under the pointer: the row's lit ground under it as well, darker.)
+                // What holds things together unfolded by a chevron, always, at its very end (where it stays, the pointer
+                // come on the line or not: its buttons come before it), a button as they are: how many it holds is said
+                // under its name.
+                if let (Grouped::Holds { unfolded, .. }, Some(unfold)) = (tile.group, unfold) {
+                    let (bx, by, on) = (right - ROW_PIN, y + (LIST_ROW - ROW_PIN) / 2.0, scene.hover == Some(unfold));
                     if on {
-                        frame.fill_rounded(theme.track, right - gap - wide, y + (LIST_ROW - COUNT_LINE) / 2.0, wide, COUNT_LINE, COUNT_LINE / 2.0);
+                        frame.fill_rounded(theme.hover, bx, by, ROW_PIN, ROW_PIN, theme.control_radius.min(ROW_PIN / 2.0));
                     }
-                    let ground = theme.track;
-                    let at = paint_count(frame, theme, count, unfolded, (ground, if on { theme.text } else { theme.text2 }), right - gap - wide, y + LIST_ROW / 2.0, COUNT_LINE);
-                    hits.extend(shown_in((at.0, at.1, at.2, at.3, unfold), room));
-                    right = at.0 - 2.0;
+                    frame.icon(if unfolded { Icon::ChevronUp } else { Icon::ChevronDown }, Point { x: bx + ROW_PIN / 2.0, y: y + LIST_ROW / 2.0 }, 13.0, if on { theme.text } else { theme.text2 });
+                    hits.extend(shown_in((bx, by, ROW_PIN, ROW_PIN, unfold), room));
+                    right = bx;
                 }
                 for (button, icon) in buttons.iter().flatten() {
                     let pin = *icon == Icon::Pin;
@@ -12619,6 +12617,8 @@ seven".into()));
             assert_eq!(boxed(&lit, Hit::Unfold(Thing::Item(1))), Some(count), "{hover:?}");
             let pin = boxed(&lit, Hit::PinThing(Thing::Item(1))).expect("its pin");
             assert!(pin.0 + pin.2 <= count.0, "{pin:?} before {count:?}");
+            // (A button as its buttons are: how many it holds is said under its name.)
+            assert!((pin.2 - count.2).abs() < 0.01 && (pin.3 - count.3).abs() < 0.01, "{pin:?} as {count:?}");
         }
         assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::Part(..))));
         assert_eq!(lane_order(tab, true), [Hit::Shelf(1), Hit::Shelf(2)]);
@@ -12638,6 +12638,14 @@ seven".into()));
         assert!(drawing.iter().all(|part| !part.key.as_deref().is_some_and(|key| key.ends_with(".ground"))));
         assert_eq!(lane_order(tab, true), [Hit::Shelf(1), Hit::Part(1, 0), Hit::Part(1, 1), Hit::Part(1, 2), Hit::Shelf(2)]);
         assert!(Hit::Part(1, 1).drags() && Hit::Part(1, 1).looks());
+        // Each with its own buttons on its line as the pointer comes on it, as any thing on the station has (pinned or
+        // tagged, it is taken out of what holds it: see `Thing::Part`).
+        let (lit, _) = drawn(Some(Hit::Part(1, 1)));
+        for button in [Hit::PinThing(Thing::Part(1, 1)), Hit::TagThing(Thing::Part(1, 1))] {
+            let at = boxed(&lit, button).unwrap_or_else(|| panic!("{button:?}"));
+            assert!(at.1 >= parts[1].1 - 0.01 && at.1 + at.3 <= parts[1].1 + parts[1].3 + 0.01, "{button:?} {at:?} on {:?}", parts[1]);
+            assert_eq!(button.button_of(&[]), Some(Hit::Part(1, 1)));
+        }
         // Looked at: each by itself; one of them alone, the file, given by itself.
         let whole = looked_at(Hit::Shelf(1), None, Lang::En).unwrap();
         let crate::ui::look::Shows::Files(together) = &whole.shows else { panic!("{:?}", whole.shows) };

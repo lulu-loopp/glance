@@ -647,16 +647,17 @@ impl Shelf {
         }
     }
 
-    /// The tag named `was`, just made with the things `ids` of it, named `name` from now on (see `rename_tag`); where
-    /// another tag has that name, those things of that one instead and the one just made gone, as a tag asked to be
-    /// made by that name is that one (see `new_tag`): its number then.
-    pub fn rename_new_tag(&mut self, was: &str, name: &str, ids: &[u64], now_ms: u64) -> Option<u32> {
+    /// The tag named `was`, just made, named `name` from now on (see `rename_tag`); where another tag has that name, what
+    /// is of it of that one instead and the one just made gone, as a tag asked to be made by that name is that one (see
+    /// `new_tag`): its number then.
+    pub fn rename_new_tag(&mut self, was: &str, name: &str, now_ms: u64) -> Option<u32> {
         let made = self.tags.iter().find(|tag| tag.name == was)?.id;
         let Some(other) = self.tags.iter().find(|tag| tag.id != made && tag.name == name.trim()).map(|tag| tag.id) else {
             self.rename_tag(made, name);
             return None;
         };
-        self.tag(ids, other, true, now_ms);
+        let ids: Vec<u64> = self.items.iter().filter(|item| item.tags.contains(&made)).map(|item| item.id).collect();
+        self.tag(&ids, other, true, now_ms);
         self.remove_tag(made, now_ms);
         Some(other)
     }
@@ -887,26 +888,28 @@ mod tests {
         assert_eq!(paths(put), [r"D:\旅行\c.jpg", r"D:\照片2\d.jpg"]);
     }
 
-    /// A tag just made, named as it is written in where it shows: renamed so; named as another tag is, its things that
+    /// A tag just made, named as it is written in where it shows: renamed so; named as another tag is, what is of it that
     /// one's instead and it gone (as a tag asked to be made by that name is that one). Named as nothing (spaces), or as
     /// it was, it stays as it is.
     #[test]
     fn a_tag_just_made_named_as_another_joins_it() {
         let mut shelf = Shelf::default();
         let ids = [text("a"), text("b")].map(|what| shelf.put(what, 0, false, false, 0));
+        let other = shelf.put(text("c"), 0, false, false, 0);
         let work = shelf.new_tag("工作").unwrap();
         let made = shelf.new_tag("新建标签").unwrap();
         shelf.tag(&ids, made, true, 0);
-        assert_eq!(shelf.rename_new_tag("新建标签", "  ", &ids, 0), None);
-        assert_eq!(shelf.rename_new_tag("新建标签", "新建标签", &ids, 0), None);
+        assert_eq!(shelf.rename_new_tag("新建标签", "  ", 0), None);
+        assert_eq!(shelf.rename_new_tag("新建标签", "新建标签", 0), None);
         assert_eq!(shelf.tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(), ["工作", "新建标签"]);
-        assert_eq!(shelf.rename_new_tag("新建标签", " 工作 ", &ids, 0), Some(work));
+        assert_eq!(shelf.rename_new_tag("新建标签", " 工作 ", 0), Some(work));
         assert_eq!(shelf.tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(), ["工作"]);
         assert!(ids.iter().all(|id| shelf.get(*id).unwrap().tags == [work]));
+        assert!(shelf.get(other).unwrap().tags.is_empty());
         let made = shelf.new_tag("新建标签").unwrap();
-        assert_eq!(shelf.rename_new_tag("新建标签", "旅行", &[], 0), None);
+        assert_eq!(shelf.rename_new_tag("新建标签", "旅行", 0), None);
         assert_eq!(shelf.tags.iter().find(|tag| tag.id == made).unwrap().name, "旅行");
-        assert_eq!(shelf.rename_new_tag("无此标签", "旅行", &[], 0), None);
+        assert_eq!(shelf.rename_new_tag("无此标签", "旅行", 0), None);
     }
 
     /// With all that was copied, what is pinned is listed first, the three last used, and only there. Folded, none of

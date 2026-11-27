@@ -273,13 +273,35 @@ impl Keep {
     /// The files sent from devices nearby `files` as they are given out (see `shelf::entries`): each sent by itself
     /// under the name it came with, each folder sent as that folder. None where one cannot be.
     pub fn given(&self, files: &[Arrived]) -> Option<Vec<PathBuf>> {
-        super::shelf::entries(files)
-            .into_iter()
-            .map(|entry| match entry {
-                Entry::File(arrived) => self.folder.named(&arrived.file, &arrived.name),
-                Entry::Folder { name, files } => self.folder.sent_folder(name, &files),
-            })
-            .collect()
+        super::shelf::entries(files).into_iter().map(|entry| self.entry_given(entry)).collect()
+    }
+
+    /// What was sent from a device nearby as `entry` (see `shelf::entries`) as it is given out: a file by itself under
+    /// the name it came with, a folder as that folder. None where it cannot be.
+    fn entry_given(&self, entry: Entry) -> Option<PathBuf> {
+        match entry {
+            Entry::File(arrived) => self.folder.named(&arrived.file, &arrived.name),
+            Entry::Folder { name, files } => self.folder.sent_folder(name, &files),
+        }
+    }
+
+    /// A file or folder put on the station at `path` as it is given out: where it is, or where it is gone, its copy kept
+    /// as `kept` (by its name). None where that cannot be.
+    fn file_given(&self, path: &std::path::Path, kept: Option<&String>) -> Option<PathBuf> {
+        match kept.filter(|name| !name.is_empty() && !path.exists()) {
+            Some(name) => self.folder.named(name, &path.file_name().unwrap_or_default().to_string_lossy()),
+            None => Some(path.to_path_buf()),
+        }
+    }
+
+    /// Part `at` of what `item` holds together (see `shelf::What::parts`) as it is given out by itself, the rest of it
+    /// left as it is: a file or folder put on it, one sent. None where it holds no such part, or it cannot be given.
+    pub fn part_of(&self, item: &Item, at: usize) -> Option<PathBuf> {
+        match &item.what {
+            What::Files { paths, kept } => self.file_given(paths.get(at)?, kept.get(at)),
+            What::Came { files } => self.entry_given(super::shelf::entries(files).into_iter().nth(at)?),
+            _ => None,
+        }
     }
 
     /// Each of the files sent from devices nearby `files` where it is given out: by itself, or in its folder (see
@@ -427,6 +449,15 @@ impl Keep {
         taken
     }
 
+    /// Parts of what things hold together (`parts`: each by the thing's number and its place among them, as listed now)
+    /// each taken out of it (see `take_part`): their numbers. Those of one thing are taken out the last first, each
+    /// leaving those before it where they were.
+    pub fn take_parts(&mut self, mut parts: Vec<(u64, usize)>) -> Vec<u64> {
+        parts.sort_by(|one, other| other.cmp(one));
+        parts.dedup();
+        parts.into_iter().filter_map(|(id, at)| self.take_part(id, at)).collect()
+    }
+
     /// All `id` holds together each a thing of its own, listed in its order where it was (see `Shelf::take_part`).
     pub fn split(&mut self, id: u64) {
         let parts = self.shelf.get(id).map_or(0, |item| item.what.parts());
@@ -470,16 +501,7 @@ impl Keep {
         Some(match &item.what {
             What::Text { text } => Content::Text(text.clone()),
             What::Link { url } => Content::Text(url.clone()),
-            What::Files { paths, kept } => Content::Files(
-                paths
-                    .iter()
-                    .enumerate()
-                    .map(|(at, path)| match kept.get(at).filter(|name| !name.is_empty() && !path.exists()) {
-                        Some(name) => self.folder.named(name, &path.file_name().unwrap_or_default().to_string_lossy()),
-                        None => Some(path.clone()),
-                    })
-                    .collect::<Option<Vec<PathBuf>>>()?,
-            ),
+            What::Files { paths, kept } => Content::Files(paths.iter().enumerate().map(|(at, path)| self.file_given(path, kept.get(at))).collect::<Option<Vec<PathBuf>>>()?),
             What::Picture { file, .. } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
             What::Saved { file, words: true, .. } => Content::Text(std::fs::read_to_string(self.folder.path(file)).ok()?),
             What::Saved { file, name, words: false } => Content::Files(vec![self.folder.named(file, name)?]),
@@ -538,6 +560,64 @@ mod tests {
         // (Each its own file given out still.)
         let given: Vec<Option<Content>> = keep.shelf.items.iter().map(|item| keep.content_of(item)).collect();
         assert!(given.iter().all(|one| matches!(one, Some(Content::Files(paths)) if paths.len() == 1 && paths[0].exists())), "{given:?}");
+    }
+
+    /// Parts chosen together, taken out at once (as when pinned or tagged), are the files chosen, each a thing of its own
+    /// marked as what held them was, whatever order they were chosen in; the rest stay together.
+    #[test]
+    fn parts_taken_out_together_are_those_chosen() {
+        let mut keep = keep("take-parts", Rules::default());
+        let made: Vec<(PathBuf, String, u64)> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+            .iter()
+            .map(|name| {
+                let source = crate::settings::local_dir().join(format!("keep-take-parts-{name}"));
+                std::fs::write(&source, [7u8]).unwrap();
+                (source, name.to_string(), 1)
+            })
+            .collect();
+        let device = super::super::shelf::Device { alias: "Fold".into(), fingerprint: "f".into(), kind: None };
+        keep.arrived("s", &made, device, 10).unwrap();
+        let id = keep.shelf.items[0].id;
+        keep.pin(id, true, 20);
+        let taken = keep.take_parts(vec![(id, 1), (id, 3), (id, 1)]);
+        assert_eq!(taken.len(), 2);
+        let names = |id: u64| match &keep.shelf.get(id).unwrap().what {
+            What::Came { files } => files.iter().map(|one| one.name.as_str()).collect::<Vec<_>>().join(","),
+            _ => unreachable!(),
+        };
+        let mut taken_names: Vec<String> = taken.iter().map(|id| names(*id)).collect();
+        taken_names.sort();
+        assert_eq!(taken_names, ["b.jpg", "d.jpg"]);
+        assert_eq!(names(id), "a.jpg,c.jpg");
+        assert!(taken.iter().all(|id| keep.shelf.get(*id).unwrap().pinned));
+    }
+
+    /// One of what was sent together given by itself (dragged off its preview) is that file alone, given though another
+    /// of them can no longer be.
+    #[test]
+    fn a_part_is_given_by_itself() {
+        let mut keep = keep("part-given", Rules::default());
+        let made: Vec<(PathBuf, String, u64)> = ["a.jpg", "b.jpg"]
+            .iter()
+            .map(|name| {
+                let source = crate::settings::local_dir().join(format!("keep-part-given-{name}"));
+                std::fs::write(&source, [7u8]).unwrap();
+                (source, name.to_string(), 1)
+            })
+            .collect();
+        let device = super::super::shelf::Device { alias: "Fold".into(), fingerprint: "f".into(), kind: None };
+        keep.arrived("s", &made, device, 10).unwrap();
+        let item = keep.shelf.items[0].clone();
+        let What::Came { files } = &item.what else { unreachable!() };
+        // (The second gone, its copy and the name it was given out by.)
+        let Some(Content::Files(both)) = keep.content_of(&item) else { panic!("both given") };
+        std::fs::remove_file(&both[1]).unwrap();
+        std::fs::remove_file(keep.folder.path(&files[1].file)).unwrap();
+        assert_eq!(keep.content_of(&item), None);
+        let given = keep.part_of(&item, 0).expect("the first given");
+        assert_eq!(given.file_name().unwrap(), "a.jpg");
+        assert!(given.exists());
+        assert_eq!(keep.part_of(&item, 2), None);
     }
 
     #[test]

@@ -601,20 +601,32 @@ fn within(folder: &Path, named: &str, files: &mut Vec<Part>) {
 
 /// A device on the strip as a place to drop on, by its key (see `key_of`), its mark's middle on the screen at `at`:
 /// what is dragged off the station is let go there to be sent to it (what may not leave this PC, refused, saying why).
-/// It says so on what is dragged (`drag::describe`), as Explorer says where a drop goes.
+/// It says so on what is dragged (`drag::describe`), as Explorer says where a drop goes. Whether it takes it is judged
+/// anew as the pointer moves on it (`said`: what it last said of it), a sending to it over meanwhile.
 #[implement(IDropTarget)]
 pub struct ToDevice {
     key: u64,
     at: POINT,
     takes: Cell<bool>,
+    said: Cell<Option<Judged>>,
     data: RefCell<Option<IDataObject>>,
+}
+
+/// What a device on the strip makes of what is dragged over it (see `ToDevice::judge`): it takes it, it may not leave
+/// this PC, the device is being sent to, or it is none on the strip any more.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Judged {
+    Takes,
+    StaysHere,
+    Busy,
+    Gone,
 }
 
 impl ToDevice {
     /// One over `rect` on the screen.
     pub fn over(key: u64, rect: RECT) -> IDropTarget {
         let at = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
-        ToDevice { key, at, takes: Cell::new(false), data: RefCell::new(None) }.into()
+        ToDevice { key, at, takes: Cell::new(false), said: Cell::new(None), data: RefCell::new(None) }.into()
     }
 }
 
@@ -626,29 +638,16 @@ fn alias_of(key: u64) -> Option<(String, bool)> {
 
 impl IDropTarget_Impl for ToDevice_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let going = super::drag::going();
-        // Off a station (what may leave this PC), or from another program, what the station would take.
-        let own = going.ended.is_none();
-        let foreign = !own && FOREIGN.lock().unwrap().is_some() && data.as_ref().is_some_and(super::drop::takes);
-        let alias = alias_of(self.key);
-        // (Being sent to: given nothing more till it is over.)
-        self.takes.set((own && !going.stays_here || foreign) && alias.as_ref().is_some_and(|(_, busy)| !busy));
+        *self.data.borrow_mut() = data.as_ref().cloned();
+        self.said.set(None);
         over(self.key, true, std::time::Instant::now());
-        if let Some(data) = data.as_ref() {
-            let lang = crate::update::language_in(&crate::app().settings.lock().unwrap().view);
-            match alias {
-                Some((alias, _)) if self.takes.get() => super::drag::describe(data, DROPIMAGE_COPY, lang.pick("发送到 %1", "Send to %1"), &alias),
-                Some(_) if own && going.stays_here => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This can't be sent to other devices"), ""),
-                Some((_, true)) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("正在发送，请稍候", "Sending…"), ""),
-                _ => {}
-            }
-            *self.data.borrow_mut() = Some(data.clone());
-        }
+        self.judge();
         self.answer(effect);
         Ok(())
     }
 
     fn DragOver(&self, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
+        self.judge();
         self.answer(effect);
         Ok(())
     }
@@ -673,7 +672,37 @@ impl IDropTarget_Impl for ToDevice_Impl {
     }
 }
 
-impl ToDevice_Impl {
+impl ToDevice {
+    /// Whether it takes what is dragged now: off a station, what may leave this PC, or from another program, what the
+    /// station would take; the device on the strip and not being sent to (given nothing more till that is over). Said on
+    /// what is dragged where that is not what it said last.
+    fn judge(&self) {
+        let going = super::drag::going();
+        let own = going.ended.is_none();
+        let data = self.data.borrow();
+        let foreign = !own && FOREIGN.lock().unwrap().is_some() && data.as_ref().is_some_and(super::drop::takes);
+        let alias = alias_of(self.key);
+        let judged = match &alias {
+            None => Judged::Gone,
+            Some(_) if own && going.stays_here => Judged::StaysHere,
+            Some((_, true)) => Judged::Busy,
+            Some(_) if own || foreign => Judged::Takes,
+            Some(_) => Judged::Gone,
+        };
+        self.takes.set(judged == Judged::Takes);
+        if self.said.replace(Some(judged)) == Some(judged) {
+            return;
+        }
+        let Some(data) = data.as_ref() else { return };
+        let lang = crate::update::language_in(&crate::app().settings.lock().unwrap().view);
+        match (judged, alias) {
+            (Judged::Takes, Some((alias, _))) => super::drag::describe(data, DROPIMAGE_COPY, lang.pick("发送到 %1", "Send to %1"), &alias),
+            (Judged::StaysHere, _) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This can't be sent to other devices"), ""),
+            (Judged::Busy, _) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("正在发送，请稍候", "Sending…"), ""),
+            _ => super::drag::describe(data, DROPIMAGE_INVALID, "", ""),
+        }
+    }
+
     /// A copy where it takes what is dragged and the station lets it be copied; else nothing.
     fn answer(&self, effect: *mut DROPEFFECT) {
         let offered = unsafe { *effect };
@@ -761,6 +790,36 @@ mod tests {
         assert!(!rows[0].dimmed && keys.len() == 1);
         let (rows, keys) = device_rows(&[], &[], Lang::Zh);
         assert!(rows.len() == 1 && rows[0].dimmed && keys.is_empty());
+    }
+
+    /// A device being sent to as the pointer comes on it, with what is dragged off the station, takes nothing; its
+    /// sending over as the pointer moves on it, it takes it, with no need to come on it again.
+    #[test]
+    fn a_device_takes_what_is_dragged_once_its_sending_is_over() {
+        let _one = super::super::drag::ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let drag = super::super::drag::announce();
+        let device = Device { fingerprint: "AB".into(), alias: "Fold".into(), model: None, kind: None, glance: false };
+        let key = key_of(&device.fingerprint);
+        let mut strip = Strip::new(drag, now);
+        strip.chips.push(Chip { device, job: Some((9, None)) });
+        *STRIP.lock().unwrap() = Some(strip);
+        let target = ToDevice { key, at: POINT::default(), takes: Cell::new(false), said: Cell::new(None), data: RefCell::new(None) };
+        // (As the pointer moves on it: judged, and answered.)
+        let effect = || {
+            let mut effect = DROPEFFECT_COPY;
+            target.judge();
+            target.answer(&mut effect);
+            effect
+        };
+        assert_eq!(effect(), DROPEFFECT_NONE);
+        assert_eq!(target.said.get(), Some(Judged::Busy));
+        STRIP.lock().unwrap().as_mut().unwrap().chips[0].job = None;
+        assert_eq!(effect(), DROPEFFECT_COPY);
+        *STRIP.lock().unwrap() = None;
+        assert_eq!(effect(), DROPEFFECT_NONE);
+        assert_eq!(target.said.get(), Some(Judged::Gone));
+        super::super::drag::ended(super::super::drag::Dragged::Not);
     }
 
     /// The strip rises over its time and goes down over its; a sending to a device is shown waiting till it is told

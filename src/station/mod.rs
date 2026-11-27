@@ -45,11 +45,13 @@ impl Drawn {
     }
 }
 
-/// A thing that may be pinned and tagged, on any of the station's pages: one on it, or copied lately, by its number, or a
-/// file come lately (or files come together, as one: all of them).
+/// A thing that may be pinned and tagged, on any of the station's pages: one on it, or copied lately, by its number, part
+/// of what one holds together (by its number and the part's place: pinned or tagged, it is taken out of it first, a thing
+/// of its own, see `keep::Keep::take_part`), or a file come lately (or files come together, as one: all of them).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Thing {
     Item(u64),
+    Part(u64, usize),
     Recent(recent::Entry),
 }
 
@@ -59,6 +61,7 @@ impl Thing {
         use crate::ui::view::Hit;
         match hit {
             Hit::Shelf(id) | Hit::Copied(id) => Some(Thing::Item(id)),
+            Hit::Part(id, at) => Some(Thing::Part(id, at)),
             Hit::Recent(entry) => Some(Thing::Recent(entry)),
             _ => None,
         }
@@ -66,12 +69,13 @@ impl Thing {
 }
 
 /// Whether all of `things` are pinned, and the tags all of them have, the station holding `items` and the files come
-/// lately being `files` (those gone are not counted, none left: not pinned, of no tag).
+/// lately being `files` (those gone are not counted, none left: not pinned, of no tag). Part of what one holds is marked as
+/// it is, as it is when taken out.
 fn marks_among(things: &[Thing], items: &[shelf::Item], files: &[recent::Came]) -> (bool, Vec<u32>) {
     let mut marks: Vec<(bool, &[u32])> = Vec::new();
     for thing in things {
         match *thing {
-            Thing::Item(id) => marks.extend(items.iter().filter(|item| item.id == id).map(|item| (item.pinned, item.tags.as_slice()))),
+            Thing::Item(id) | Thing::Part(id, _) => marks.extend(items.iter().filter(|item| item.id == id).map(|item| (item.pinned, item.tags.as_slice()))),
             Thing::Recent(entry) => marks.extend(recent::files_of(files, entry).into_iter().map(|came| (came.marks.pinned, came.marks.tags.as_slice()))),
         }
     }
@@ -84,12 +88,14 @@ pub fn marks(things: &[Thing]) -> (bool, Vec<u32>) {
     marks_among(things, &run::shown().items, &recent::shown())
 }
 
-/// `things` taken apart: those on the station or copied lately, by their numbers, and the files come lately, by theirs.
-fn apart(things: &[Thing]) -> (Vec<u64>, Vec<recent::Key>) {
+/// `things` taken apart: those on the station or copied lately, by their numbers, the files come lately, by theirs, and
+/// parts of what they hold together.
+fn apart(things: &[Thing]) -> (Vec<u64>, Vec<recent::Key>, Vec<(u64, usize)>) {
     let files = recent::shown();
     let ids = things.iter().filter_map(|thing| if let Thing::Item(id) = thing { Some(*id) } else { None }).collect();
     let keys = things.iter().flat_map(|thing| if let Thing::Recent(entry) = thing { recent::files_of(&files, *entry) } else { Vec::new() }).map(|came| came.key).collect();
-    (ids, keys)
+    let parts = things.iter().filter_map(|thing| if let Thing::Part(id, at) = thing { Some((*id, *at)) } else { None }).collect();
+    (ids, keys, parts)
 }
 
 /// The files come lately `keys` marked with `mark` (what holds them on the station told as the list is: see `lib`).
@@ -101,19 +107,28 @@ fn mark_files(keys: Vec<recent::Key>, mark: recent::Mark) {
 
 /// `things` pinned, or not any more.
 pub fn pin(things: &[Thing], pinned: bool) {
-    let (ids, keys) = apart(things);
+    let (ids, keys, parts) = apart(things);
     ids.into_iter().for_each(|id| run::ask(run::Ask::Pin(id, pinned)));
+    mark_parts(parts, run::Marked::Pin(pinned));
     mark_files(keys, recent::Mark::Pinned(pinned));
 }
 
 /// `things` of the tag `tag`, or, where all are, not of it any more.
 pub fn turn_tag(things: &[Thing], tag: u32) {
     let on = !marks(things).1.contains(&tag);
-    let (ids, keys) = apart(things);
+    let (ids, keys, parts) = apart(things);
     if !ids.is_empty() {
         run::ask(run::Ask::Tag(ids, tag, on));
     }
+    mark_parts(parts, run::Marked::Tag(tag, on));
     mark_files(keys, recent::Mark::Tag(tag, on));
+}
+
+/// Parts of what things hold together (`parts`) each taken out of it, a thing of its own, and marked so.
+fn mark_parts(parts: Vec<(u64, usize)>, marked: run::Marked) {
+    if !parts.is_empty() {
+        run::ask(run::Ask::Marked(parts, marked));
+    }
 }
 
 /// The tags a page shows to sort it by (`tags`: those there are, in their order): those its own things have (`here`), those
@@ -200,6 +215,8 @@ pub fn unfold(thing: Thing) {
             let on = !shown.unfolds_files(keys.iter());
             run::Ask::Unfold(run::Unfolded::Files(keys), on)
         }
+        // (Holding nothing together.)
+        Thing::Part(..) => return,
     });
 }
 
@@ -280,9 +297,9 @@ pub fn tags_menu(thing: Thing, at: windows::Win32::Foundation::POINT, over_the_p
 /// written in where it shows (see `ui::naming`).
 pub fn new_tag(things: &[Thing]) -> crate::ui::naming::Naming {
     let name = new_tag_name(&run::shown().tags, crate::update::language());
-    let (ids, keys) = apart(things);
-    run::ask(run::Ask::NewTag(name.clone(), ids.clone(), keys.clone()));
-    crate::ui::naming::Naming::new_tag(name, ids, keys)
+    let (ids, keys, parts) = apart(things);
+    run::ask(run::Ask::NewTag(name.clone(), ids, keys.clone(), parts));
+    crate::ui::naming::Naming::new_tag(name, keys)
 }
 
 /// What a new tag is named among `tags`: "新建标签", or where a tag has that name, "新建标签 2", and so on, the first no
@@ -317,6 +334,7 @@ pub fn tag_menu(id: u32, at: windows::Win32::Foundation::POINT, over_the_panel: 
 pub fn renaming(thing: Thing) -> Option<crate::ui::naming::Naming> {
     renamed(match thing {
         Thing::Item(id) => Renaming::Item(id),
+        Thing::Part(id, at) => Renaming::Part(id, at),
         Thing::Recent(entry) => Renaming::Recent(entry),
     })
 }

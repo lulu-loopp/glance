@@ -30,14 +30,18 @@ pub enum Ask {
     /// What was dropped on it (see `drop`).
     Take(Content),
     Pin(u64, bool),
-    /// These things of a tag, or not of it any more. A tag of this name, and these of it (with these files come lately).
-    /// A tag named so. A tag gone.
+    /// These things of a tag, or not of it any more. A tag of this name, and these of it (with these files come lately,
+    /// and these parts of what things hold together, each taken out of it first). A tag named so. A tag gone.
     Tag(Vec<u64>, u32, bool),
-    NewTag(String, Vec<u64>, Vec<super::recent::Key>),
+    NewTag(String, Vec<u64>, Vec<super::recent::Key>, Vec<(u64, usize)>),
     RenameTag(u32, String),
-    /// The tag named the first (one just asked to be made, these of it: its number not known to who asked) named the
-    /// second; where another has that name, these of that one instead (as a tag asked to be made by it would be).
-    RenameNewTag(String, String, Vec<u64>, Vec<super::recent::Key>),
+    /// The tag named the first (one just asked to be made: its number not known to who asked) named the second; where
+    /// another has that name, what is of it of that one instead (as a tag asked to be made by it would be), these files
+    /// come lately with it.
+    RenameNewTag(String, String, Vec<super::recent::Key>),
+    /// Parts of what things hold together (each by the thing's number and its place among them), each taken out of it,
+    /// a thing of its own, and marked as `Marked` says.
+    Marked(Vec<(u64, usize)>, Marked),
     RemoveTag(u32),
     /// The files come lately that stay are others now (see `shelf::Item::held`).
     Held,
@@ -91,6 +95,13 @@ pub enum Ask {
     Split(u64),
     /// What holds things together shown with them under it, or not any more (see `Shown::unfolded`).
     Unfold(Unfolded, bool),
+}
+
+/// How parts taken out are marked (see `Ask::Marked`): pinned or not, of a tag or not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Marked {
+    Pin(bool),
+    Tag(u32, bool),
 }
 
 /// What is done with part of what a thing holds together (see `Ask::Part`): put on the clipboard, opened, shown in
@@ -243,8 +254,9 @@ pub fn as_was<T>(was: Arc<Shown>, draw: impl FnOnce() -> T) -> T {
     drawn
 }
 
-/// Its window's message: asked something (see `ask`).
+/// Its window's messages: asked something (see `ask`), where stations are shown changed (see `shows_at`).
 const ASKED: u32 = WM_APP + 1;
+const SHOWN_AT: u32 = WM_APP + 2;
 /// Its timers: the clipboard read again (held by another program as it changed), what has stayed its days taken off,
 /// what is dragged looked for, what was used listed so (see `Station::used`).
 const AGAIN: usize = 1;
@@ -266,11 +278,21 @@ static SHOWN: Mutex<Option<Arc<Shown>>> = Mutex::new(None);
 static AREAS: Mutex<Vec<(isize, windows::Win32::Foundation::RECT, Lands)>> = Mutex::new(Vec::new());
 
 /// The window `window` shows a station, or quick launch, in `areas` (screen px, each with where what is dropped there
-/// goes; none: none), as it was just drawn.
+/// goes; none: none), as it was just drawn. Where that changed, the catchers follow it at once (see `catch`): a device
+/// nearby rising on a station's strip catches what is dragged as it shows, not on the next look whether something is.
 pub fn shows_at(window: HWND, areas: Vec<(windows::Win32::Foundation::RECT, Lands)>) {
     let mut held = AREAS.lock().unwrap();
+    let was: Vec<_> = held.iter().filter(|(of, ..)| *of == window.0 as isize).map(|(_, area, lands)| (*area, *lands)).collect();
+    if was == areas {
+        return;
+    }
     held.retain(|(of, ..)| *of != window.0 as isize);
     held.extend(areas.into_iter().map(|(area, lands)| (window.0 as isize, area, lands)));
+    drop(held);
+    let station = WINDOW.load(Ordering::Acquire);
+    if station != 0 {
+        let _ = unsafe { PostMessageW(Some(HWND(station as *mut _)), SHOWN_AT, WPARAM(0), LPARAM(0)) };
+    }
 }
 
 /// Where stations and quick launch are shown (screen px), by the windows still shown that show them.
@@ -751,9 +773,10 @@ fn with_station(act: impl FnOnce(&mut Station)) -> bool {
 
 unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        ASKED | WM_CLIPBOARDUPDATE | WM_TIMER => {
+        ASKED | SHOWN_AT | WM_CLIPBOARDUPDATE | WM_TIMER => {
             let done = with_station(|station| match message {
                 ASKED => station.answer(),
+                SHOWN_AT => station.catchers.follow(),
                 WM_CLIPBOARDUPDATE => {
                     station.tries = 0;
                     station.copied();
@@ -800,7 +823,8 @@ impl Station {
                 }
                 Ask::Pin(id, pinned) => self.keep.pin(id, pinned, super::now_ms()),
                 Ask::Tag(ids, tag, on) => self.keep.tags(|shelf| shelf.tag(&ids, tag, on, super::now_ms())),
-                Ask::NewTag(name, ids, files) => {
+                Ask::NewTag(name, mut ids, files, parts) => {
+                    ids.extend(self.keep.take_parts(parts));
                     let mut made = None;
                     self.keep.tags(|shelf| {
                         made = shelf.new_tag(&name);
@@ -815,14 +839,21 @@ impl Station {
                     }
                 }
                 Ask::RenameTag(tag, name) => self.keep.tags(|shelf| shelf.rename_tag(tag, &name)),
-                Ask::RenameNewTag(was, name, ids, files) => {
+                Ask::RenameNewTag(was, name, files) => {
                     let mut joined = None;
-                    self.keep.tags(|shelf| joined = shelf.rename_new_tag(&was, &name, &ids, super::now_ms()));
+                    self.keep.tags(|shelf| joined = shelf.rename_new_tag(&was, &name, super::now_ms()));
                     if let Some(other) = joined {
                         super::recent::tags_are(&self.keep.shelf.tags);
                         if !files.is_empty() {
                             super::recent::mark(files, super::recent::Mark::Tag(other, true));
                         }
+                    }
+                }
+                Ask::Marked(parts, marked) => {
+                    let ids = self.keep.take_parts(parts);
+                    match marked {
+                        Marked::Pin(pinned) => ids.into_iter().for_each(|id| self.keep.pin(id, pinned, super::now_ms())),
+                        Marked::Tag(tag, on) => self.keep.tags(|shelf| shelf.tag(&ids, tag, on, super::now_ms())),
                     }
                 }
                 Ask::RemoveTag(tag) => {
@@ -1043,10 +1074,7 @@ impl Station {
         if item.what.parts() < 2 {
             return None;
         }
-        match self.keep.content_of(item)? {
-            Content::Files(mut paths) if at < paths.len() => Some(paths.swap_remove(at)),
-            _ => None,
-        }
+        self.keep.part_of(item, at)
     }
 
     /// `act` done with part `at` of what `id` holds together (see `Ask::Part`).
@@ -1301,6 +1329,7 @@ mod tests {
     /// own loop passes them on), nothing asked to be dragged off it: it is not said over.
     #[test]
     fn a_drag_under_way_goes_on_through_the_stations_messages() {
+        let _one = crate::station::drag::ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let drag = crate::station::drag::announce();
         super::drag_off();
         let going = crate::station::drag::going();

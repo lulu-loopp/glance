@@ -62,6 +62,10 @@ pub fn announce() -> u64 {
     going.drag
 }
 
+/// Held by a test that makes a drag off the station under way, one at a time (it is one for all of Glance).
+#[cfg(test)]
+pub static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// How the drag off the station asked for last goes.
 pub fn going() -> Going {
     GOING.lock().unwrap().clone()

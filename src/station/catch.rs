@@ -59,7 +59,7 @@ pub fn dragging() -> bool {
 /// Where drops are caught now (and the parts of each): each station and quick launch shown, and where a station's page
 /// is chosen, as much of it as no other window covers, and each edge of each screen that holds the workbench while it
 /// shows a station, as a strip. The devices nearby on a station's strip last (see `send`): made last, they are over
-/// the station they are on.
+/// the station they are on, and over a screen's edge where they reach it.
 fn wanted() -> Vec<Wanted> {
     let mut wanted: Vec<Wanted> = super::run::areas()
         .into_iter()
@@ -68,14 +68,25 @@ fn wanted() -> Vec<Wanted> {
             (!parts.is_empty()).then_some((area, parts, None, lands, Some(window)))
         })
         .collect();
-    wanted.sort_by_key(|(.., lands, _)| matches!(lands, Lands::Device(_)));
     let (places, station) = {
         let settings = crate::app().settings.lock().unwrap();
         (settings.places().clone(), crate::ui::prefs::module_on_in(&settings.view, "workbench", "station"))
     };
-    if !station {
-        return wanted;
+    if station {
+        wanted.extend(edges(&places));
     }
+    devices_last(&mut wanted);
+    wanted
+}
+
+/// What is wanted in the order the catchers are made, the devices nearby last (the rest as they were).
+fn devices_last(wanted: &mut [Wanted]) {
+    wanted.sort_by_key(|(.., lands, _)| matches!(lands, Lands::Device(_)));
+}
+
+/// A strip along each edge of each screen that holds the workbench (as `places` says).
+fn edges(places: &crate::settings::Places) -> Vec<Wanted> {
+    let mut strips = Vec::new();
     for monitor in crate::screens::monitors() {
         let Some(id) = crate::screens::id_of(monitor) else { continue };
         for edge in [Edge::Left, Edge::Right, Edge::Top] {
@@ -87,10 +98,10 @@ fn wanted() -> Vec<Wanted> {
                 Edge::Right => RECT { left: monitor.right - STRIP, ..monitor },
                 Edge::Top => RECT { bottom: monitor.top + STRIP, ..monitor },
             };
-            wanted.push((strip, vec![strip], Some(edge), Lands::Station, None));
+            strips.push((strip, vec![strip], Some(edge), Lands::Station, None));
         }
     }
-    wanted
+    strips
 }
 
 /// What of `area` (screen px) of `window` shows: it less each window over it that the pointer meets (shown, neither
@@ -231,6 +242,7 @@ impl Catchers {
         let wanted = if dragged { wanted() } else { Vec::new() };
         let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands, over), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands && *over == up.over);
         if same {
+            keep_over(&self.up.iter().map(|catcher| (catcher.window, catcher.over)).collect::<Vec<_>>());
             return;
         }
         self.clear();
@@ -250,6 +262,31 @@ impl Catchers {
             }
         }
     }
+}
+
+/// Catchers (each its window, and the one it catches for) kept over those they catch for: where one is not, the window
+/// it catches for raised over it since it was made (as the panel is raised when it is shown again), they are all raised
+/// again in their order, the last on top. (What of the panel other windows cover is left out of them already: see
+/// `uncovered`.)
+fn keep_over(catchers: &[(HWND, Option<HWND>)]) {
+    if catchers.iter().all(|(window, over)| over.is_none_or(|over| above(*window, over))) {
+        return;
+    }
+    for (window, _) in catchers {
+        let _ = unsafe { SetWindowPos(*window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE) };
+    }
+}
+
+/// Whether `window` is over `other` on the screen (of the windows up front, nearer the front).
+fn above(window: HWND, other: HWND) -> bool {
+    let mut at = other;
+    while let Ok(before) = unsafe { GetWindow(at, GW_HWNDPREV) } {
+        if before == window {
+            return true;
+        }
+        at = before;
+    }
+    false
 }
 
 /// A window catching drops over `rect` (screen px; along `edge`, where it is a strip there; for the window `over`), as
@@ -342,6 +379,43 @@ mod tests {
         }
         assert_eq!(drawn(window), []);
         let _ = unsafe { DestroyWindow(window) };
+    }
+
+    /// Catchers over a panel raised over them since (shown again, put in front) are put back over it, in their order,
+    /// the last on top; over it still, they are left where they are.
+    #[test]
+    fn catchers_are_kept_over_the_panel_they_catch_for() {
+        let made = || unsafe { CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("STATIC"), w!(""), WS_POPUP, 0, 0, 10, 10, None, None, None, None) }.expect("a window");
+        let raise = |window: HWND| unsafe { SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE).unwrap() };
+        let (panel, station, device) = (made(), made(), made());
+        for window in [panel, station, device] {
+            raise(window);
+        }
+        assert!(above(station, panel) && above(device, station) && !above(panel, station));
+        let catchers = [(station, Some(panel)), (device, Some(panel))];
+        keep_over(&catchers);
+        assert!(above(station, panel) && above(device, station));
+        raise(panel);
+        assert!(!above(station, panel) && !above(device, panel));
+        keep_over(&catchers);
+        assert!(above(station, panel) && above(device, panel) && above(device, station));
+        for window in [panel, station, device] {
+            let _ = unsafe { DestroyWindow(window) };
+        }
+    }
+
+    /// The devices nearby are made last, over a screen's edge where they reach it as over the station they are on.
+    #[test]
+    fn devices_are_made_after_the_screens_edges() {
+        let strip = rect(0, 0, 6, 100);
+        let mut wanted: Vec<Wanted> = vec![
+            (rect(0, 0, 50, 50), vec![rect(0, 0, 50, 50)], None, Lands::Station, None),
+            (rect(0, 40, 30, 60), vec![rect(0, 40, 30, 60)], None, Lands::Device(7), None),
+            (strip, vec![strip], Some(Edge::Left), Lands::Station, None),
+        ];
+        devices_last(&mut wanted);
+        assert_eq!(wanted.iter().map(|(.., lands, _)| *lands).collect::<Vec<_>>(), [Lands::Station, Lands::Station, Lands::Device(7)]);
+        assert_eq!(wanted[1].2, Some(Edge::Left));
     }
 
     /// A station less the windows over it: what is left of it, no more (none of it twice) and no less.
