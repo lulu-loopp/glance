@@ -332,7 +332,7 @@ impl Picture<'_> {
         self.say([X0 + 44.0 * U, Y0 + 18.0 * U, IN], (-122.0, -104.0), true, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
         self.say([X0 + 61.5 * U, Y0 + 18.0 * U, IN], (74.0, -34.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
         self.say([X0 + 42.5 * U, Y0 + 31.0 * U, IN], (-134.0, 64.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
-        self.say([X0 + 65.0 * U, Y0 + 31.0 * U, IN], (74.0, 66.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("磁盘", "Disk")), ""]);
+        self.say([X0 + 65.0 * U, Y0 + 31.0 * U, IN], (74.0, 66.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
         self.frame.place(self.screen);
     }
 
@@ -417,7 +417,7 @@ impl Picture<'_> {
         let fan = cpu_fan.map(|rpm| lang.pick(&format!("风扇 {rpm} 转"), &format!("Fan {rpm} rpm")).to_string()).unwrap_or_default();
         say([22.0, 36.0, 100.0], (66.0, -100.0), false, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
         say([42.0, 36.0, 68.0], (74.0, -30.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
-        say([40.0, 98.0, 28.0], (74.0, 62.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("磁盘", "Disk")), ""]);
+        say([40.0, 98.0, 28.0], (74.0, 62.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
         say([15.0, 70.0, 116.0], (-122.0, -124.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
         if let Some(rpm) = case_fan {
             say([w / 2.0, d, 38.0], (-134.0, 64.0), true, [&rpm.to_string(), lang.pick("机箱风扇", "Case fans"), lang.pick("转/分", "rpm")]);
@@ -644,6 +644,12 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         let (top, bottom) = ((r.y - scroll).max(HEAD), (r.y + r.h - scroll).min(at.h / k));
         (bottom > top).then(|| Rect { x: at.x + r.x * k, y: at.y + top * k, w: r.w * k, h: (bottom - top) * k })
     };
+    // A row of chips in a card scrolls across in the app, cut at the card's sides inside it: drawn so (see `in_row`),
+    // and pressed only where it shows.
+    let in_row = |r: Rect| {
+        let (left, right) = (r.x.max(side + 16.0), (r.x + r.w).min(side + wide - 16.0));
+        (right > left).then(|| Rect { x: left, w: right - left, ..r }).and_then(shown)
+    };
 
     // The PC drawn, and its four parts under it.
     let top = 68.0;
@@ -663,7 +669,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     } else {
         picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
     }
-    let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("磁盘", "Disk"))];
+    let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
     let each = (wide - 24.0 - 3.0 * 8.0) / 4.0;
     for (place, (part, called)) in named.into_iter().enumerate() {
         let (x, y) = (side + 12.0 + place as f32 * (each + 8.0), top + 8.0 + drawing + 8.0);
@@ -738,6 +744,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
         picture.words(lang.pick("电源模式", "Power plan"), label, DIM, side + 16.0, y + 27.0, false);
         let mut x = side + 16.0;
+        let _row = frame.clipped(side + 16.0, y, wide - 32.0, 92.0);
         for (id, called, chosen) in &modes {
             let called = match id.as_str() {
                 "efficiency" => lang.pick("最佳能效", "Best efficiency"),
@@ -750,7 +757,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             picture.plate(r, 17.0, if *chosen { INK } else { TILE });
             picture.words(called, chip, if *chosen { PAGE } else { INK }, x + 14.0, y + 63.5, false);
             if live && !chosen {
-                parts.extend(shown(r).map(|shown| (shown, Part::Power(id.clone()))));
+                parts.extend(in_row(r).map(|shown| (shown, Part::Power(id.clone()))));
             }
             x += across + 8.0;
         }
@@ -761,7 +768,9 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     if colours_there && lights == Some(true) && !night {
         let light = said.get("light").cloned().unwrap_or(Value::Null);
         let now = text(&light, "color").to_uppercase();
-        let tall = if making.is_some() { 196.0 + RING } else { 196.0 };
+        // (A line under the colours says how one is taken away, as the app says it there.)
+        const SAYS: f32 = 22.0;
+        let tall = SAYS + if making.is_some() { 196.0 + RING } else { 196.0 };
         // The colours kept to choose from (those it starts with, till any were kept), and before them the one in
         // use where it is none of them (while one is made, the one in use before).
         let kept = kept_colours(said);
@@ -777,12 +786,14 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         let at = |place: usize| Vector2 { X: side + 16.0 + 18.0 + (place % across) as f32 * apart, Y: y + 62.0 + (place / across) as f32 * apart };
         picture.plate(Rect { x: side, y, w: wide, h: tall + more }, 20.0, CARD);
         picture.words(lang.pick("灯光效果与颜色", "Lighting effect and color"), label, DIM, side + 16.0, y + 27.0, false);
-        // How one is taken away, said at the card's other end; while they are, what ends that.
-        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色可删除", "Press and hold a color to remove it") };
-        picture.words(word, label, if removing { ACCENT } else { FAINT }, side + wide - 16.0, y + 27.0, true);
-        if live && removing {
-            let across = frame.gfx.measure(word, label);
-            parts.extend(shown(Rect { x: side + wide - 16.0 - across - 8.0, y: y + 8.0, w: across + 16.0, h: 30.0 }).map(|shown| (shown, Part::Done)));
+        // While colours are taken away, what ends that, at the card's other end.
+        if removing {
+            let word = lang.pick("完成", "Done");
+            picture.words(word, label, ACCENT, side + wide - 16.0, y + 27.0, true);
+            if live {
+                let across = frame.gfx.measure(word, label);
+                parts.extend(shown(Rect { x: side + wide - 16.0 - across - 8.0, y: y + 8.0, w: across + 16.0, h: 30.0 }).map(|shown| (shown, Part::Done)));
+            }
         }
         let opens = at(colours.len());
         if let Some(hues) = hues(frame, opens, 26.0) {
@@ -816,24 +827,32 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
                 parts.extend(shown(Rect { x: centre.X - 18.0, y: centre.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, part)));
             }
         }
-        // (What follows is under the colours' last row.)
-        y += more;
+        // How one is taken away, under the colours' last row; while they are, how.
+        let says = if removing { lang.pick("点按带减号的颜色即可将其删除", "Tap a color with a minus to delete it") } else { lang.pick("长按颜色可删除", "Press and hold a color to delete it") };
+        picture.words(says, label, FAINT, side + 16.0, y + more + 97.5, false);
+        // (What follows is under them.)
+        y += more + SAYS;
         let mut x = side + 16.0;
+        let row = frame.clipped(side + 16.0, y + 96.0, wide - 32.0, 34.0);
         for (id, called) in effects {
             let across = frame.gfx.measure(called, chip) + 24.0;
             let r = Rect { x, y: y + 96.0, w: across, h: 34.0 };
             picture.plate(r, 17.0, if id == effect { INK } else { TILE });
             picture.words(called, chip, if id == effect { PAGE } else { INK }, x + 12.0, y + 117.5, false);
             if live && id != effect {
-                parts.extend(shown(r).map(|shown| (shown, Part::Effect(id))));
+                parts.extend(in_row(r).map(|shown| (shown, Part::Effect(id))));
             }
             x += across + 8.0;
         }
+        drop(row);
         // (Every colour in turn has its own brightness: not slid.)
         let bright = light.get("brightness").and_then(Value::as_f64).unwrap_or(100.0) as f32;
         let at = along(&Part::Brightness, (bright - 5.0) / 95.0);
-        picture.words(lang.pick("亮度", "Brightness"), label, DIM, side + 16.0, y + 168.0, false);
-        slider(&picture, &mut parts, side + 64.0, y + 164.0, wide - 64.0 - 16.0 - 44.0, at, Part::Brightness, effect != "rainbow");
+        // (Each slider after its name, the longer of the two names: they start where the other's does.)
+        let (brightness, saturation) = (lang.pick("亮度", "Brightness"), lang.pick("饱和度", "Saturation"));
+        let named = 16.0 + frame.gfx.measure(brightness, label).max(frame.gfx.measure(saturation, label)).ceil() + 12.0;
+        picture.words(brightness, label, DIM, side + 16.0, y + 168.0, false);
+        slider(&picture, &mut parts, side + named, y + 164.0, wide - named - 16.0 - 44.0, at, Part::Brightness, effect != "rainbow");
         picture.words(&format!("{:.0}%", 5.0 + at * 95.0), label, DIM, side + wide - 16.0, y + 168.0, true);
         // The ring: every hue round it, the colour itself in its middle; under it how much colour, then given up or kept.
         if let Some(making) = making {
@@ -862,8 +881,8 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             }
             // How much colour: from none of it to all of it.
             let row = centre.Y + across / 2.0 + 16.0 + 14.0;
-            let (x, width) = (side + 64.0, wide - 64.0 - 16.0 - 44.0);
-            picture.words(lang.pick("饱和度", "Saturation"), label, DIM, side + 16.0, row + 4.0, false);
+            let (x, width) = (side + named, wide - named - 16.0 - 44.0);
+            picture.words(saturation, label, DIM, side + 16.0, row + 4.0, false);
             if let Some(fading) = frame.gradient(Vector2 { X: x, Y: 0.0 }, hued(hue, 0.0), Vector2 { X: x + width, Y: 0.0 }, hued(hue, 1.0)) {
                 unsafe { frame.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, row - 4.0, width, 8.0), radiusX: 4.0, radiusY: 4.0 }, &fading) };
             }
@@ -898,6 +917,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             std::iter::once(lang.pick("关", "Off").to_string()).chain((1..=most).map(|step| step.to_string())).collect()
         };
         let mut x = side + 16.0;
+        let _row = frame.clipped(side + 16.0, y, wide - 32.0, 92.0);
         for (step, called) in names.iter().enumerate() {
             let across = frame.gfx.measure(called, chip) + 28.0;
             let r = Rect { x, y: y + 42.0, w: across, h: 34.0 };
@@ -905,7 +925,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             picture.plate(r, 17.0, if chosen { INK } else { TILE });
             picture.words(called, chip, if chosen { PAGE } else { INK }, x + 14.0, y + 63.5, false);
             if live && !chosen {
-                parts.extend(shown(r).map(|shown| (shown, Part::Keys(step as u8))));
+                parts.extend(in_row(r).map(|shown| (shown, Part::Keys(step as u8))));
             }
             x += across + 8.0;
         }

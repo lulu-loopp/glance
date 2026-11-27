@@ -414,7 +414,7 @@ impl Organizer {
             runs.push((format!("{}{}", lang.pick("，回收站 ", ", Recycle Bin "), size_text(bin, lang)), false));
         }
         if pick > 0 {
-            runs.push((format!("{}{}", lang.pick("，待清理 ", ", queued"), size_text(pick, lang)), false));
+            runs.push((format!("{}{}", lang.pick("，待清理 ", ", queued "), size_text(pick, lang)), false));
         }
         let font = |bold: bool| body(12.0, if bold { 600.0 } else { 400.0 });
         let widths: Vec<f32> = runs.iter().map(|(text, bold)| frame.measure(text, font(*bold))).collect();
@@ -1625,7 +1625,7 @@ impl Organizer {
             notes.push((lang.pick("各项太小，图上画不出，合为一块", "Too small to draw one by one, shown as one block").into(), p.text2));
         }
         if about.cloud > 0 {
-            notes.push((format!("{}{}{}", lang.pick("云端另有 ", "Another"), size_text(about.cloud, lang), lang.pick("，不占用本机空间", " is cloud-only and uses no space here")), p.text2));
+            notes.push((format!("{}{}{}", lang.pick("云端另有 ", "Another "), size_text(about.cloud, lang), lang.pick("，不占用本机空间", " is cloud-only and uses no space here")), p.text2));
         }
         let releasable = about.onedrive && about.bytes > 0 && matches!(about.what, Some(What::File { system: false } | What::Folder(Role::Plain)));
         if releasable {

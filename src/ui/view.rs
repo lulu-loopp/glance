@@ -5769,7 +5769,7 @@ fn sending_said(sending: &crate::nearby::Sending, lang: Lang) -> String {
         Sending::Refused => lang.pick("对方已拒绝", "Declined").into(),
         Sending::Busy => lang.pick("对方正忙", "Busy").into(),
         Sending::Pin { .. } => lang.pick("需要 PIN 码", "PIN required").into(),
-        Sending::Cancelled => lang.pick("已取消", "Cancelled").into(),
+        Sending::Cancelled => lang.pick("已取消", "Canceled").into(),
         Sending::Failed { .. } => lang.pick("发送失败", "Couldn't send").into(),
     }
 }

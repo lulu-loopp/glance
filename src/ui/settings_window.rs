@@ -4380,7 +4380,7 @@ impl Ui {
                 let what = device.model.clone().filter(|model| !model.trim().is_empty()).unwrap_or_else(|| kind_word(lang, device.kind.as_deref()).to_string());
                 let detail = match lang {
                     Lang::Zh => format!("{} · {what}。信任后，它发来的文件直接接收", maker(lang, device.glance, device.kind.as_deref())),
-                    Lang::En => format!("{} · {what}. Trusted, so its files are accepted automatically", maker(lang, device.glance, device.kind.as_deref())),
+                    Lang::En => format!("{} · {what}. Once trusted, its files are accepted automatically", maker(lang, device.glance, device.kind.as_deref())),
                 };
                 let trust = |text: String, kind: Button| vec![(text, Target::TrustFound(fingerprint.clone()), kind)];
                 match self.trusting.get(fingerprint) {

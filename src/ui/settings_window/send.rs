@@ -572,7 +572,7 @@ impl Ui {
                 Sending::Refused => (Cow::Borrowed(pick(lang, "对方已拒绝", "Declined")), false, None, None),
                 Sending::Busy => (Cow::Borrowed(pick(lang, "对方正在接收其他文件", "Busy receiving other files")), false, None, None),
                 Sending::Pin { .. } => (Cow::Borrowed(pick(lang, "需要 PIN 码", "PIN required")), false, Some(*job), None),
-                Sending::Cancelled => (Cow::Borrowed(pick(lang, "已取消", "Cancelled")), false, None, None),
+                Sending::Cancelled => (Cow::Borrowed(pick(lang, "已取消", "Canceled")), false, None, None),
                 Sending::Failed { .. } => (Cow::Borrowed(pick(lang, "发送失败", "Couldn't send")), false, None, None),
             }),
         };

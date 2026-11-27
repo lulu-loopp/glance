@@ -208,7 +208,7 @@ function draw() {
   row.textContent = "";
   row.hidden = !reads;
   if (reads) {
-    for (const [id, name] of [["cpu", "CPU"], ["gpu", t("显卡", "Graphics")], ["ram", t("内存", "Memory")], ["disk", t("磁盘", "Disk")]]) {
+    for (const [id, name] of [["cpu", "CPU"], ["gpu", t("显卡", "Graphics")], ["ram", t("内存", "Memory")], ["disk", t("硬盘", "Disk")]]) {
       const read = reads[id] || {}, box = el("div");
       box.append(el("b", "", read.temp != null ? read.temp + "°" : read.load != null ? read.load + "%" : "—"), el("small", "", read.temp != null && read.load != null ? `${name} ${read.load}%` : name));
       row.append(box);
@@ -383,7 +383,7 @@ function rig(host) {
   say("disk", [40, 98, 28], [74, 62], "start");
   say("ram", [15, 70, 116], [-122, -124], "end");
   say("fan", [W / 2, D, 38], [-134, 64], "end");
-  const NAMES = { cpu: "CPU", gpu: t("显卡", "Graphics"), ram: t("内存", "Memory"), disk: t("磁盘", "Disk") };
+  const NAMES = { cpu: "CPU", gpu: t("显卡", "Graphics"), ram: t("内存", "Memory"), disk: t("硬盘", "Disk") };
   const spin = (blades, rpm, still) => { blades.style.transformOrigin = "0px 0px"; const now = !still && rpm > 0 ? `turn ${(60 / rpm * 16).toFixed(2)}s linear infinite` : "none"; if (blades.dataset.turn !== now) { blades.dataset.turn = now; blades.style.animation = now; } };
   return (pc) => {
     const reads = pc.reads || {}, dark = pc.night, lit = pc.lights === true && !dark && pc.colours_there !== false, light = "#" + ((pc.light || {}).color || "FFFFFF");

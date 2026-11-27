@@ -21,7 +21,7 @@
     <string name="show_rig">机箱图</string>
     <string name="show_rig_what">绘制本电脑的示意图，各部件按温度着色</string>
     <string name="show_reads">温度与占用</string>
-    <string name="show_reads_what">CPU、显卡、内存、磁盘各占一格</string>
+    <string name="show_reads_what">CPU、显卡、内存、硬盘各占一格</string>
     <string name="power">电源模式</string>
     <string name="show_power_what">与电脑设置中的电源模式一致。夜间模式会切换至最佳能效</string>
     <string name="mode_efficiency">最佳能效</string>
@@ -108,7 +108,7 @@
     <string name="cpu">CPU</string>
     <string name="gpu">显卡</string>
     <string name="ram">内存</string>
-    <string name="disk">磁盘</string>
+    <string name="disk">硬盘</string>
     <string name="cpu_fan">风扇 %1$d 转</string>
     <string name="case_fans">机箱风扇</string>
     <string name="rpm">转/分</string>

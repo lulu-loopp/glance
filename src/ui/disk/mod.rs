@@ -1334,7 +1334,7 @@ impl Organizer {
             Acted::Emptied { bytes, done } => {
                 if done {
                     self.went = None;
-                    self.say(format!("{}{}", lang.pick("已清空回收站，释放 ", "Recycle Bin emptied, freed"), size_text(bytes, lang)), crate::ui::icons::Icon::CircleCheck);
+                    self.say(format!("{}{}", lang.pick("已清空回收站，释放 ", "Recycle Bin emptied, freed "), size_text(bytes, lang)), crate::ui::icons::Icon::CircleCheck);
                 } else {
                     self.say(lang.pick("未能清空回收站", "Couldn't empty the Recycle Bin").into(), crate::ui::icons::Icon::Info);
                 }
