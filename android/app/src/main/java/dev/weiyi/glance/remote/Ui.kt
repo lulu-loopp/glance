@@ -92,6 +92,8 @@ object Sign {
     const val TEXT = "M13 4v16M17 4v16M19 4H9.5a4.5 4.5 0 0 0 0 9H13"
     const val MONITOR = "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4"
     const val CHECK = "M20 6L9 17l-5-5"
+    // Lucide's plus: a device added by its address.
+    const val PLUS = "M5 12h14M12 5v14"
     // The kinds of things handed to a PC (Lucide's clipboard, text, folder, layout-grid), and search.
     const val CLIPBOARD = "M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"
     const val LINES = "M21 6H3M15 12H3M17 18H3"

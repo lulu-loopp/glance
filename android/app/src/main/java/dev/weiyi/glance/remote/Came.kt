@@ -53,7 +53,8 @@ object Kept {
     private val told = MutableStateFlow(0)
     val changed: StateFlow<Int> = told
 
-    private fun change() {
+    /** What is kept changed: those that show it told. */
+    fun change() {
         told.value++
     }
 

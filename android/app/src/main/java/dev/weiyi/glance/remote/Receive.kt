@@ -50,6 +50,9 @@ object Receiver {
     private var found: Found? = null
     private val changes = Executors.newSingleThreadExecutor { Thread(it, "nearby-settle").apply { isDaemon = true } }
 
+    /** How often the devices added by their addresses are told of this phone while it receives (ms). */
+    private const val REACH_ADDED_EVERY = 60_000L
+
     private val known = HashMap<String, Found.Device>()
     private val heardNow = MutableStateFlow<List<Found.Device>>(emptyList())
     /**
@@ -102,9 +105,13 @@ object Receiver {
 
     /**
      * What this phone says of itself to devices nearby: its name, its system and kind (as LocalSend's Android app says
-     * them), its certificate, where it receives, and that it is a Glance.
+     * them), its certificate, where it receives (its port, and its addresses: see [Address.mine]), and that it is a
+     * Glance.
      */
-    fun me(context: Context) = Lan.Info(Own.alias(context), "Android", "mobile", Own.fingerprint(), serving?.port ?: Lan.PORT, https = true, glance = true)
+    fun me(context: Context): Lan.Info {
+        val port = serving?.port ?: Lan.PORT
+        return Lan.Info(Own.alias(context), "Android", "mobile", Own.fingerprint(), port, https = true, glance = true, addresses = Address.told(context, port))
+    }
 
     /** Started or stopped, as is wanted now. */
     fun settle() {
@@ -127,6 +134,18 @@ object Receiver {
             null
         }
         receiving.value = true
+        // The devices added by their addresses told of this phone, now and every minute while it receives (they keep
+        // it found as long again as one heard nearby, and it learns whether they are there).
+        thread(name = "nearby-added-every", isDaemon = true) {
+            while (this.serving === serving) {
+                Address.reachAll(app)
+                try {
+                    Thread.sleep(REACH_ADDED_EVERY)
+                } catch (stopped: InterruptedException) {
+                    return@thread
+                }
+            }
+        }
         // The paired PCs asked where they are and by which certificate (what they send is taken by it), and told this
         // phone's (they know it nearby as their paired phone by it).
         thread(name = "nearby-pcs", isDaemon = true) {
@@ -149,7 +168,10 @@ object Receiver {
 
     /** This phone announced to devices nearby (a sheet to send from opened: they answer, and are found). */
     fun announce() {
-        changes.execute { found?.announce() }
+        changes.execute {
+            found?.announce()
+            if (serving != null) Address.reachAll(app)
+        }
     }
 
     /** A device heard of as it says it is, at [address] (by the certificate of [verified], where it proved one). */
@@ -157,6 +179,8 @@ object Receiver {
         val fingerprint = verified ?: info.fingerprint.uppercase()
         if (fingerprint.equals(Own.fingerprint(), ignoreCase = true)) return
         val device = Found.Device(fingerprint, info.alias, info.deviceModel, info.deviceType, info.glance, address, info.port ?: Lan.PORT, info.https, SystemClock.elapsedRealtime())
+        // (A device added by its address that proved itself: kept as reached where it spoke from.)
+        if (verified != null && info.port != null) Address.reached(app, fingerprint, address, info.port, info)
         synchronized(known) {
             // (Where it said nothing of its port and protocol, what it said before stands.)
             val was = known[fingerprint]

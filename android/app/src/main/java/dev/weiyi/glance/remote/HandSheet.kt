@@ -168,6 +168,11 @@ fun SendSheet(pcs: List<Pc>, dismiss: () -> Unit, choosePc: (Pc) -> Unit, choose
     val heard by Receiver.devices.collectAsState()
     val paired = remember(pcs) { Pcs.fingerprints(context).filterKeys { key -> pcs.any { it.key == key } }.values.map { it.uppercase() }.toSet() }
     val nearby = heard.filter { it.fingerprint.uppercase() !in paired }
+    val changed by Kept.changed.collectAsState()
+    val added = remember(changed) { Address.all(context) }
+    // (Those added not found: listed after those found, as not connected.)
+    val away = added.filter { one -> one.fingerprint.uppercase() !in paired && nearby.none { it.fingerprint.equals(one.fingerprint, ignoreCase = true) } }
+    var adding by remember { mutableStateOf(false) }
     val job by Hand.now.collectAsState()
     // The sending begun here to a device: once all there, the sheet goes a moment later.
     var begun by remember { mutableStateOf<Int?>(null) }
@@ -195,22 +200,32 @@ fun SendSheet(pcs: List<Pc>, dismiss: () -> Unit, choosePc: (Pc) -> Unit, choose
             Choice(Sign.MONITOR, pc.name, detail, enabled = stands == Standing.Ready) { choosePc(pc) }
         }
         SheetPart(stringResource(R.string.send_nearby), looking = true)
-        if (nearby.isEmpty()) Text(stringResource(if (looked) R.string.send_none else R.string.send_looking), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 8.dp))
+        if (nearby.isEmpty() && away.isEmpty()) Text(stringResource(if (looked) R.string.send_none else R.string.send_looking), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 8.dp))
         nearby.forEachIndexed { at, device ->
             if (at > 0) Rule()
             val mine = job?.takeIf { it.to.key == device.fingerprint && it.number == begun }
             // (One at a time: while a sending goes, the others wait, and the one it goes to says how it goes.)
             val going = job?.over == false
-            Choice(signOf(device.type), device.alias, deviceTags(device.glance, device.model, device.type), enabled = !going || mine != null, right = { mine?.let { DeviceStanding(it) } }) {
+            val at = added.firstOrNull { it.fingerprint.equals(device.fingerprint, ignoreCase = true) }?.addresses?.firstOrNull()?.let(Address::shown)
+            val tags = listOfNotNull(deviceTags(device.glance, device.model, device.type), at).joinToString(" · ")
+            Choice(signOf(device.type), device.alias, tags, enabled = !going || mine != null, right = { mine?.let { DeviceStanding(it) } }) {
                 if (!going) {
                     chooseDevice(device)
                     begun = Hand.now.value?.takeIf { it.to.key == device.fingerprint && !it.over }?.number
                 }
             }
         }
+        away.forEachIndexed { at, one ->
+            if (nearby.isNotEmpty() || at > 0) Rule()
+            val tags = listOfNotNull(deviceTags(one.glance, one.model, one.type), one.addresses.firstOrNull()?.let(Address::shown), stringResource(R.string.address_away)).joinToString(" · ")
+            Choice(signOf(one.type), one.alias, tags, enabled = false) {}
+        }
+        if (nearby.isNotEmpty() || away.isNotEmpty()) Rule()
+        Choice(Sign.PLUS, stringResource(R.string.address_add), "") { adding = true }
         SheetWords { Words(stringResource(R.string.cancel), Dim, Modifier.padding(horizontal = 8.dp), press = dismiss) }
     }
     job?.takeIf { it.number == begun }?.let { PinAsk(it) }
+    if (adding) AddByAddress { adding = false }
 }
 
 /** How a sending to a device found nearby stands, said beside it. */

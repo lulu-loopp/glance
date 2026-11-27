@@ -326,4 +326,22 @@
     <string name="pin_title">%1$s requires a PIN</string>
     <string name="pin_hint">PIN</string>
     <string name="pin_wrong">Incorrect PIN</string>
+    <string name="net_wlan">Wi-Fi</string>
+    <string name="net_ethernet">Ethernet</string>
+    <string name="near_addresses">This phone\'s addresses</string>
+    <string name="near_addresses_what">If other devices can\'t find this phone nearby, they can add it by one of these addresses. Across networks, use the IPv6 address first</string>
+    <string name="near_addresses_none">This phone isn\'t connected to Wi-Fi or Ethernet</string>
+    <string name="copy">Copy</string>
+    <string name="address_add">Add by address</string>
+    <string name="address_add_button">Add</string>
+    <string name="address_placeholder">IPv4 or IPv6 address</string>
+    <string name="address_where">The other device\'s address is shown on the Nearby sharing page of its Glance settings</string>
+    <string name="address_trying">Connecting</string>
+    <string name="address_bad">This isn\'t a valid IP address</string>
+    <string name="address_itself">This is this phone\'s address</string>
+    <string name="address_listed">This device is already listed</string>
+    <string name="address_unreachable">Can\'t connect to %1$s</string>
+    <string name="address_unreachable_what">Make sure the other device has Receive files from nearby devices turned on, or use its IPv6 address</string>
+    <string name="address_away">Not connected</string>
+    <string name="device_added">Added by address</string>
 </resources>

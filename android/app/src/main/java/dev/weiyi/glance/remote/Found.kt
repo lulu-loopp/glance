@@ -41,6 +41,36 @@ class Found(private val context: Context, private val me: () -> Lan.Info, privat
         fun networks(): List<Pair<NetworkInterface, Inet4Address>> = runCatching { NetworkInterface.getNetworkInterfaces().toList() }.getOrDefault(emptyList())
             .filter { runCatching { it.isUp && !it.isLoopback && it.supportsMulticast() }.getOrDefault(false) }
             .flatMap { network -> network.inetAddresses.toList().filterIsInstance<Inet4Address>().filter { !it.isLinkLocalAddress && !it.isLoopbackAddress }.map { network to it } }
+
+        /**
+         * The device at [host]:[port] told of this phone ([me], `register`), over HTTPS pinned to [fingerprint] and
+         * presenting this phone's certificate (else over plain HTTP): what it says back, none where it did not answer.
+         */
+        fun registerWith(host: String, port: Int, https: Boolean, fingerprint: String, me: Lan.Info): Lan.Info? = try {
+            val bracketed = if (host.contains(':')) "[$host]" else host
+            val connection = (URL("${if (https) "https" else "http"}://$bracketed:$port${Lan.API}/register").openConnection() as HttpURLConnection).apply {
+                if (this is HttpsURLConnection) {
+                    sslSocketFactory = SSLContext.getInstance("TLS").apply { init(arrayOf(Own.Presenting()), arrayOf(Pinned(fingerprint)), null) }.socketFactory
+                    setHostnameVerifier { _, _ -> true }
+                }
+                connectTimeout = 3000
+                readTimeout = 10_000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Connection", "close")
+            }
+            try {
+                connection.outputStream.use { it.write(me.copy(announce = false).toJson().toString().toByteArray()) }
+                if (connection.responseCode != 200) throw IOException("register answered ${connection.responseCode}")
+                val text = connection.inputStream.use { input -> String(input.readUpTo(Lan.MOST_INFO)) }
+                Lan.Info.of(text) ?: throw IOException("not a device's info")
+            } finally {
+                connection.disconnect()
+            }
+        } catch (failed: IOException) {
+            null
+        }
     }
 
     private val group = InetAddress.getByName(Lan.GROUP)
@@ -147,32 +177,7 @@ class Found(private val context: Context, private val me: () -> Lan.Info, privat
      * Where it cannot be reached so, this phone answers in the group instead.
      */
     private fun register(address: String, info: Lan.Info) {
-        val port = info.port ?: Lan.PORT
-        val host = if (address.contains(':')) "[$address]" else address
-        val answered = try {
-            val connection = (URL("${if (info.https) "https" else "http"}://$host:$port${Lan.API}/register").openConnection() as HttpURLConnection).apply {
-                if (this is HttpsURLConnection) {
-                    sslSocketFactory = SSLContext.getInstance("TLS").apply { init(arrayOf(Own.Presenting()), arrayOf(Pinned(info.fingerprint)), null) }.socketFactory
-                    setHostnameVerifier { _, _ -> true }
-                }
-                connectTimeout = 3000
-                readTimeout = 10_000
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Connection", "close")
-            }
-            try {
-                connection.outputStream.use { it.write(me().copy(announce = false).toJson().toString().toByteArray()) }
-                if (connection.responseCode != 200) throw IOException("register answered ${connection.responseCode}")
-                val text = connection.inputStream.use { input -> String(input.readUpTo(Lan.MOST_INFO)) }
-                Lan.Info.of(text) ?: throw IOException("not a device's info")
-            } finally {
-                connection.disconnect()
-            }
-        } catch (failed: IOException) {
-            null
-        }
+        val answered = registerWith(address, info.port ?: Lan.PORT, info.https, info.fingerprint, me())
         if (answered == null) {
             if (running) toAll(me().copy(announce = false).toJson().toString().toByteArray())
             return

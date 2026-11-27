@@ -99,13 +99,14 @@ fun deviceTags(glance: Boolean, model: String?, type: String?): String {
 
 /**
  * The devices this phone knows: the PCs paired (each with what it lets this phone do, and 解除配对), then the devices
- * trusted here (移除), with 添加电脑 at the top.
+ * trusted here and those added by their addresses (each 移除), with 添加电脑 at the top.
  */
 @Composable
 fun DevicesCard(pcs: List<Pc>, chosen: Int, add: () -> Unit, unpair: (Int) -> Unit) {
     val context = LocalContext.current
     val changed by Kept.changed.collectAsState()
     val trusted = remember(changed) { Kept.trusted(context) }
+    val added = remember(changed) { Address.all(context) }
     CardTitle(stringResource(R.string.devices)) { Words(stringResource(R.string.add_pc), Accent, Modifier.padding(end = 8.dp), size = 13f, press = add) }
     Panel {
         Column {
@@ -122,7 +123,14 @@ fun DevicesCard(pcs: List<Pc>, chosen: Int, add: () -> Unit, unpair: (Int) -> Un
                     Words(stringResource(R.string.remove), Accent) { Kept.forget(context, device.fingerprint) }
                 }
             }
-            if (pcs.isEmpty() && trusted.isEmpty()) Text(stringResource(R.string.hand_none_title), color = Dim, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+            added.forEachIndexed { at, device ->
+                if (pcs.isNotEmpty() || trusted.isNotEmpty() || at > 0) Rule()
+                val detail = listOfNotNull(stringResource(R.string.device_added), device.addresses.firstOrNull()?.let(Address::shown)).joinToString(" · ")
+                Line(device.alias, detail, lead = { DeviceSign(signOf(device.type)) }) {
+                    Words(stringResource(R.string.remove), Accent) { Address.remove(context, device.fingerprint) }
+                }
+            }
+            if (pcs.isEmpty() && trusted.isEmpty() && added.isEmpty()) Text(stringResource(R.string.hand_none_title), color = Dim, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
         }
     }
 }
@@ -200,6 +208,8 @@ fun NearbyCard() {
                     }
                 }
             }
+            Rule()
+            MyAddresses()
             Rule()
             Line(stringResource(R.string.near_others), null) {
                 Words(stringResource(if (others == Lan.Others.Refuse) R.string.near_others_refuse else R.string.near_others_ask), Dim) { choosing = true }

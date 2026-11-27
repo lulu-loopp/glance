@@ -1,6 +1,7 @@
 package dev.weiyi.glance.remote
 
 import org.json.JSONException
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -47,6 +48,8 @@ object Lan {
         val announce: Boolean = false,
         /** Whether it is a Glance (a PC or this app), as every Glance says of itself: other LocalSend apps do not. */
         val glance: Boolean = false,
+        /** Where else it is reached, as Glance's devices say ("host:port" each: see [Address]). */
+        val addresses: List<String> = emptyList(),
     ) {
         /** As this phone tells of itself: with where it receives, and as an announcement where [announce]. */
         fun toJson(): JSONObject = JSONObject()
@@ -54,6 +57,7 @@ object Lan {
             .put("fingerprint", fingerprint).put("port", port ?: JSONObject.NULL).put("protocol", if (https) "https" else "http").put("download", false)
             .apply { if (announce) put("announce", true).put("announcement", true) }
             .apply { if (glance) put("glance", true) }
+            .apply { if (addresses.isNotEmpty()) put("addresses", JSONArray(addresses)) }
 
         companion object {
             /** What [json] says of a device: none where it names none (no fingerprint). */
@@ -68,6 +72,7 @@ object Lan {
                     https = json.text("protocol") != "http",
                     announce = json.optBoolean("announce") || json.optBoolean("announcement"),
                     glance = json.optBoolean("glance"),
+                    addresses = json.optJSONArray("addresses")?.let { list -> (0 until minOf(list.length(), 16)).mapNotNull { list.optString(it).takeIf { at -> at.length <= 64 && Address.split(at) != null } } }.orEmpty(),
                 )
             }
 

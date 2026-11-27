@@ -316,4 +316,22 @@
     <string name="pin_title">%1$s 需要 PIN 码</string>
     <string name="pin_hint">PIN 码</string>
     <string name="pin_wrong">PIN 码不正确</string>
+    <string name="net_wlan">WLAN</string>
+    <string name="net_ethernet">以太网</string>
+    <string name="near_addresses">本机地址</string>
+    <string name="near_addresses_what">其他设备在附近列表中找不到本机时，可输入以下地址添加。跨网段连接时，优先使用 IPv6 地址</string>
+    <string name="near_addresses_none">本机未连接到 WLAN 或以太网</string>
+    <string name="copy">复制</string>
+    <string name="address_add">按地址添加</string>
+    <string name="address_add_button">添加</string>
+    <string name="address_placeholder">IPv4 或 IPv6 地址</string>
+    <string name="address_where">对方的地址显示在其 Glance 设置的“附近传输”页面中</string>
+    <string name="address_trying">正在连接</string>
+    <string name="address_bad">IP 地址格式不正确</string>
+    <string name="address_itself">该地址为本机地址</string>
+    <string name="address_listed">此设备已在列表中</string>
+    <string name="address_unreachable">无法连接到 %1$s</string>
+    <string name="address_unreachable_what">请确认对方已开启“接收附近设备的文件”，或改用对方的 IPv6 地址</string>
+    <string name="address_away">未连接</string>
+    <string name="device_added">按地址添加</string>
 </resources>
