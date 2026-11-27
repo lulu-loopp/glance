@@ -101,7 +101,7 @@ fn uncovered(window: HWND, area: RECT) -> Vec<RECT> {
     let mut above = unsafe { GetWindow(window, GW_HWNDPREV) }.ok();
     while let Some(over) = above.filter(|_| !parts.is_empty()) {
         if meets_the_pointer(over) {
-            if let Some(drawn) = drawn(over) {
+            for drawn in drawn(over) {
                 parts = without(&parts, drawn);
             }
         }
@@ -132,12 +132,45 @@ fn meets_the_pointer(window: HWND) -> bool {
     }
 }
 
-/// Where `window` is drawn on the screen (its frame as drawn, not the borders it is sized by beyond it).
-fn drawn(window: HWND) -> Option<RECT> {
+/// Where `window` is drawn on the screen (its frame as drawn, not the borders it is sized by beyond it), in parts:
+/// where it has a region of its own, what of its region lies within that alone (the pointer meets it nowhere else, and
+/// the system draws it nowhere else: a look over a whole screen takes presses only where its sheet is).
+fn drawn(window: HWND) -> Vec<RECT> {
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
-    let mut rect = RECT::default();
-    let framed = unsafe { DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &mut rect as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32) }.is_ok();
-    (framed || unsafe { GetWindowRect(window, &mut rect) }.is_ok()).then_some(rect)
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetRegionData, GetWindowRgn, RGNDATA, RGNDATAHEADER, RGN_ERROR};
+    let mut whole = RECT::default();
+    if unsafe { GetWindowRect(window, &mut whole) }.is_err() {
+        return Vec::new();
+    }
+    let mut frame = whole;
+    if unsafe { DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &mut frame as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32) }.is_err() {
+        frame = whole;
+    }
+    let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    if region.is_invalid() {
+        return vec![frame];
+    }
+    // (None of its own: the whole of it. Its region is told from its window's corner, its borders and all.)
+    let parts = if unsafe { GetWindowRgn(window, region) } == RGN_ERROR {
+        vec![frame]
+    } else {
+        let size = unsafe { GetRegionData(region, 0, None) } as usize;
+        let mut data = vec![0u64; size.div_ceil(8)];
+        let read = size > 0 && unsafe { GetRegionData(region, size as u32, Some(data.as_mut_ptr().cast::<RGNDATA>())) } as usize == size;
+        if read {
+            let header = unsafe { &*data.as_ptr().cast::<RGNDATAHEADER>() };
+            let rects = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>().add(header.dwSize as usize).cast::<RECT>(), header.nCount as usize) };
+            rects
+                .iter()
+                .map(|part| RECT { left: (part.left + whole.left).max(frame.left), top: (part.top + whole.top).max(frame.top), right: (part.right + whole.left).min(frame.right), bottom: (part.bottom + whole.top).min(frame.bottom) })
+                .filter(|part| part.left < part.right && part.top < part.bottom)
+                .collect()
+        } else {
+            vec![frame]
+        }
+    };
+    let _ = unsafe { DeleteObject(region.into()) };
+    parts
 }
 
 /// `parts` less `cut`: each part met by it as what of it is above, below, left and right of it.
@@ -278,6 +311,37 @@ mod tests {
 
     fn area(parts: &[RECT]) -> i32 {
         parts.iter().map(|part| (part.right - part.left) * (part.bottom - part.top)).sum()
+    }
+
+    /// A window with a region of its own covers what of its region is on the screen, no more: the look is a window as
+    /// large as its screen taking presses only where its sheet is, and taken as all of it, it covered a station's
+    /// devices beside it, which then caught nothing dragged off the look. One with none covers all of it.
+    #[test]
+    fn a_window_drawn_in_part_covers_that_part_alone() {
+        use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, SetWindowRgn, RGN_OR};
+        let window = unsafe { CreateWindowExW(WS_EX_TOOLWINDOW, w!("STATIC"), w!(""), WS_POPUP, 100, 200, 800, 600, None, None, None, None) }.expect("a window");
+        let sorted = |mut parts: Vec<RECT>| {
+            parts.sort_by_key(|part| (part.top, part.left));
+            parts
+        };
+        assert_eq!(sorted(drawn(window)), [rect(100, 200, 900, 800)]);
+        unsafe {
+            let _ = SetWindowRgn(window, Some(CreateRectRgn(10, 20, 110, 70)), false);
+        }
+        assert_eq!(sorted(drawn(window)), [rect(110, 220, 210, 270)]);
+        // (In two pieces, apart: each, and nothing between them.)
+        unsafe {
+            let two = CreateRectRgn(0, 0, 50, 50);
+            let _ = CombineRgn(Some(two), Some(two), Some(CreateRectRgn(300, 400, 350, 450)), RGN_OR);
+            let _ = SetWindowRgn(window, Some(two), false);
+        }
+        assert_eq!(sorted(drawn(window)), [rect(100, 200, 150, 250), rect(400, 600, 450, 650)]);
+        // (One drawn nowhere: nothing.)
+        unsafe {
+            let _ = SetWindowRgn(window, Some(CreateRectRgn(0, 0, 0, 0)), false);
+        }
+        assert_eq!(drawn(window), []);
+        let _ = unsafe { DestroyWindow(window) };
     }
 
     /// A station less the windows over it: what is left of it, no more (none of it twice) and no less.
