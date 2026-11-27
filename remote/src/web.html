@@ -67,9 +67,10 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .go.main { background: var(--accent); color: #1a0d07; } .go:disabled { opacity: .4; }
 textarea { font: inherit; color: var(--ink); background: var(--card2); border: 0; border-radius: 12px; padding: 12px; min-height: 88px; resize: vertical; width: 100%; }
 textarea::placeholder { color: var(--faint); }
-.ends { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap; } .ends .note { margin-right: auto; }
+.ends { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap; } .ends:not(:has(:not([hidden]))) { display: none; }
+.card > .note:empty { display: none; }
 .bar { height: 4px; border-radius: 99px; background: var(--card2); overflow: hidden; } .bar i { display: block; height: 100%; width: var(--done, 0%); background: var(--accent); transition: width .2s; }
-.thing { display: grid; gap: 8px; } .thing img { max-width: 100%; max-height: 320px; border-radius: 12px; justify-self: start; }
+.thing { display: grid; gap: 8px; } .shown { display: block; max-width: 100%; max-height: 360px; border-radius: 12px; }
 .thing p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; } .thing a.link { color: var(--accent); overflow-wrap: anywhere; }
 </style>
 </head>
@@ -78,8 +79,8 @@ textarea::placeholder { color: var(--faint); }
 <div class="card" id="unpaired" hidden><b id="unpaired-title"></b><span class="note" id="unpaired-how"></span></div>
 <div class="card rig" id="rig" hidden><div id="rig-drawing"></div><div class="reads" id="rig-reads"></div></div>
 <main id="main" hidden></main>
-<section class="card" id="came" hidden><h2 id="came-title"></h2><div class="rows" id="came-list"></div><div class="bar" id="came-bar" hidden><i></i></div><div class="ends"><span class="note" id="came-said"></span><button class="text" type="button" id="came-refuse"></button><button class="go main" type="button" id="came-take"></button><button class="go" type="button" id="came-close"></button></div></section>
-<section class="card" id="send" hidden><h2 id="send-title"></h2><textarea id="words"></textarea><div class="bar" id="send-bar" hidden><i></i></div><div class="ends"><span class="note" id="send-said"></span><button class="text" type="button" id="send-cancel"></button><button class="go" type="button" id="send-pick"></button><button class="go main" type="button" id="send-words"></button></div><input type="file" id="send-files" multiple hidden></section>
+<div id="came"></div>
+<section class="card" id="send" hidden><h2 id="send-title"></h2><textarea id="words"></textarea><div class="bar" id="send-bar" hidden><i></i></div><span class="note" id="send-said"></span><div class="ends"><button class="text" type="button" id="send-cancel"></button><button class="go" type="button" id="send-pick"></button><button class="go main" type="button" id="send-words"></button></div><input type="file" id="send-files" multiple hidden></section>
 <a class="card app" id="app" href="https://glancepc.com/app" hidden><b id="app-title"></b><span class="note" id="app-how"></span></a>
 <script>
 "use strict";
@@ -117,7 +118,30 @@ function hmac(key, message) {
 }
 const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 const unhex = text => new Uint8Array(text.match(/../g).map(pair => parseInt(pair, 16)));
-const random = n => { const bytes = new Uint8Array(n); (self.crypto || self.msCrypto).getRandomValues(bytes); return hex(bytes); };
+const randomBytes = n => { const bytes = new Uint8Array(n); (self.crypto || self.msCrypto).getRandomValues(bytes); return bytes; };
+const random = n => hex(randomBytes(n));
+// ---- ChaCha20 (RFC 8439), its counter from 0: what is sent to the PC and fetched from it is enciphered on the way (see `seal` in the helper)
+function chacha20(key, nonce, bytes) {
+  const k = new DataView(key.buffer, key.byteOffset, 32), n = new DataView(nonce.buffer, nonce.byteOffset, 12);
+  const s = new Uint32Array([0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, 0, 0, 0, 0, 0, 0, 0, 0, 0, n.getUint32(0, true), n.getUint32(4, true), n.getUint32(8, true)]);
+  for (let i = 0; i < 8; i++) s[4 + i] = k.getUint32(i * 4, true);
+  const x = new Uint32Array(16), block = new Uint8Array(64), view = new DataView(block.buffer), out = new Uint8Array(bytes.length);
+  const q = (a, b, c, d) => {
+    x[a] += x[b]; x[d] ^= x[a]; x[d] = (x[d] << 16) | (x[d] >>> 16);
+    x[c] += x[d]; x[b] ^= x[c]; x[b] = (x[b] << 12) | (x[b] >>> 20);
+    x[a] += x[b]; x[d] ^= x[a]; x[d] = (x[d] << 8) | (x[d] >>> 24);
+    x[c] += x[d]; x[b] ^= x[c]; x[b] = (x[b] << 7) | (x[b] >>> 25);
+  };
+  for (let o = 0; o < bytes.length; o += 64) {
+    x.set(s);
+    for (let i = 0; i < 10; i++) { q(0, 4, 8, 12); q(1, 5, 9, 13); q(2, 6, 10, 14); q(3, 7, 11, 15); q(0, 5, 10, 15); q(1, 6, 11, 12); q(2, 7, 8, 13); q(3, 4, 9, 14); }
+    for (let i = 0; i < 16; i++) view.setUint32(i * 4, (x[i] + s[i]) >>> 0, true);
+    const end = Math.min(64, bytes.length - o);
+    for (let i = 0; i < end; i++) out[o + i] = bytes[o + i] ^ block[i];
+    s[12]++;
+  }
+  return out;
+}
 
 // ---- what this browser keeps: the key the PC offered it (from the link it was opened by: after the #, which is never sent), and a number of its own
 const kept = { get: name => { try { return localStorage.getItem(name); } catch (e) { return null; } }, set: (name, value) => { try { localStorage.setItem(name, value); } catch (e) {} } };
@@ -133,11 +157,19 @@ const called = /iPhone|iPad/.test(navigator.userAgent) ? (/iPad/.test(navigator.
 const told = { session: "", ahead: 0 };
 const encoder = new TextEncoder();
 const signed = (parts, body) => hex(hmac(unhex(key), joined(encoder.encode(parts.map(part => part + "\n").join("")), body)));
-// What is asked is JSON, or bytes as they are (a piece of a file sent: see `send`). The answer is JSON, or where `bytes` is asked, bytes (a piece of a file the PC sends: see `take`).
+// Files and words, sealed: a number used once, then what they encipher to, under a key made from the one paired by (never that key itself). Whether what is opened is what was sealed is the signature's to say.
+let sealing = null;
+const sealKey = () => sealing || (sealing = hmac(unhex(key), encoder.encode("glance transfer")));
+const seal = plain => { const nonce = randomBytes(12); return joined(nonce, chacha20(sealKey(), nonce, plain)); };
+const unseal = sealed => chacha20(sealKey(), sealed.subarray(0, 12), sealed.subarray(12));
+// What is asked is JSON, or bytes as they are (sealed: an offer or a piece of a file sent, see `send`). The answer is JSON, or where `bytes` is asked, bytes (a piece the PC sends, see `take`). A piece sent is signed over its digest, which the PC checks against it: its head proves it this browser's before its body has come.
 async function ask(path, body, again = true, bytes = false) {
   const method = body ? "POST" : "GET", sent = body instanceof Uint8Array ? body : encoder.encode(body ? JSON.stringify(body) : ""), time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
-  const sign = signed([method, path, time, nonce, phone, name, told.session], sent);
-  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name, "X-Glance-Browser": "1" } });
+  const digest = path.startsWith("/v1/send/piece?") ? hex(sha256(sent)) : null;
+  const sign = signed([method, path, time, nonce, phone, name, told.session], digest ? encoder.encode(digest) : sent);
+  const headers = { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name, "X-Glance-Browser": "1" };
+  if (digest) headers["X-Glance-Body"] = digest;
+  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers });
   const got = new Uint8Array(await answer.arrayBuffer());
   const own = signed(["answer", nonce, String(answer.status)], got) === answer.headers.get("X-Glance-Sign");
   let json = {};
@@ -445,7 +477,7 @@ function rig(host) {
 }
 const drawn = rig(document.getElementById("rig-drawing"));
 
-// ---- files and words, to the PC and from it (see `nearby::page` in the helper): each sent or fetched a piece at a time, every piece signed
+// ---- files and words, to the PC and from it (see `nearby::page` in the helper): each sent or fetched a piece at a time, every piece sealed and signed
 const PIECE = 512 * 1024;
 const $ = id => document.getElementById(id);
 const plural = (n, one, many) => n === 1 ? one : many;
@@ -455,7 +487,7 @@ function sized(bytes) {
   while (size >= 1024 && at < units.length - 1) { size /= 1024; at++; }
   return (at ? size.toFixed(size < 10 ? 1 : 0) : size) + " " + units[at];
 }
-const bar = (id, done, of) => { const line = $(id); line.hidden = of == null; if (of != null) line.style.setProperty("--done", (of ? Math.min(100, done / of * 100) : 100) + "%"); };
+const bar = (line, done, of) => { line.hidden = of == null; if (of != null) line.style.setProperty("--done", (of ? Math.min(100, done / of * 100) : 100) + "%"); };
 // Why the PC did not take what was sent, as it says (see `Receiver::offered_by_page`).
 function why(error) {
   const said = error.message || "";
@@ -476,7 +508,7 @@ function sendDrawn() {
   $("send").hidden = !near;
   $("send-pick").disabled = $("send-words").disabled = !on || sending.going;
   $("words").disabled = !on;
-  $("send-cancel").hidden = !sending.going;
+  $("send-cancel").hidden = !sending.going || sending.stop;
   $("send-said").textContent = on || sending.going ? sending.said : t("电脑未开启附近传输", "Nearby sharing is off on the PC");
 }
 async function send(files, words) {
@@ -488,7 +520,10 @@ async function send(files, words) {
   sendDrawn();
   sendSaid(state.files === false ? t("等待电脑确认", "Waiting for the PC to accept") : t("正在发送", "Sending"));
   try {
-    const begun = await ask("/v1/send/offer", words != null ? { words } : { files: files.map(file => ({ name: file.name, size: file.size, type: file.type })) });
+    // (Known by an id of its own: sent again where the network lost the answer, it is answered as it was.)
+    const offer = words != null ? { id: random(8), words } : { id: random(8), files: files.map(file => ({ name: file.name, size: file.size, type: file.type })) };
+    const begun = await askAgain("/v1/send/offer", seal(encoder.encode(JSON.stringify(offer))));
+    if (sending.stop) { sending.session = begun.session || ""; throw new Error("cancelled"); }
     if (words != null) {
       $("words").value = "";
       sendSaid(t("文字已发送", "Text sent"));
@@ -496,16 +531,16 @@ async function send(files, words) {
     }
     sending.session = begun.session;
     let done = 0;
-    bar("send-bar", 0, total);
+    bar($("send-bar"), 0, total);
     for (let at = 0; at < files.length; at++) {
       const file = files[at];
       // (An empty file is sent as one empty piece.)
       for (let from = 0; from === 0 || from < file.size; ) {
         if (sending.stop) throw new Error("cancelled");
         const piece = new Uint8Array(await file.slice(from, from + PIECE).arrayBuffer());
-        await askAgain(`/v1/send/piece?s=${sending.session}&f=${begun.files[at]}&at=${from}`, piece);
+        await askAgain(`/v1/send/piece?s=${sending.session}&f=${begun.files[at]}&at=${from}`, seal(piece));
         from += piece.length; done += piece.length;
-        bar("send-bar", done, total);
+        bar($("send-bar"), done, total);
         sendSaid(t(`正在发送 ${Math.floor(done / (total || 1) * 100)}%`, `Sending ${Math.floor(done / (total || 1) * 100)}%`));
         if (!file.size) break;
       }
@@ -513,16 +548,19 @@ async function send(files, words) {
     sendSaid(t(`已发送 ${files.length} 个文件`, plural(files.length, "Sent 1 file", `Sent ${files.length} files`)));
   } catch (error) {
     if (sending.session) ask("/v1/send/cancel", { session: sending.session }).catch(() => {});
-    sendSaid(error.message === "cancelled" ? t("已取消发送", "Sending canceled") : why(error));
+    sendSaid(sending.stop ? t("已取消发送", "Sending canceled") : why(error));
   } finally {
     sending.going = false;
-    bar("send-bar", 0, null);
+    bar($("send-bar"), 0, null);
     sendDrawn();
   }
 }
 
-// What the PC sends here: shown as it is offered, fetched once it is taken, each file then to be saved (a picture shown too). Words come whole with the offer.
-const came = { job: null, files: [], urls: {}, taking: false, over: false, closed: false };
+// What the PC sends here, a card for each sending: shown as it is offered, fetched once it is taken (words alone at once), each file then to be saved (a picture shown too), and the PC told once all of it is here.
+// A sending is the PC's to say of while it offers it ("offered", "taking"): one it stops offering before it is taken has stopped. What was taken, or stopped, stays till its card is closed.
+const sendings = [];
+// The sendings turned down or closed here while the PC still offers them (not to be shown again meanwhile).
+const putAway = new Set();
 function copy(text, button) {
   const copied = () => { button.textContent = t("已复制", "Copied"); };
   if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(copied, () => {}); return; }
@@ -533,73 +571,95 @@ function copy(text, button) {
   if (document.execCommand("copy")) copied();
   area.remove();
 }
-function cameDrawn() {
-  const offer = state && state.incoming;
-  if (offer && offer.job !== came.job) {
-    Object.values(came.urls).forEach(url => URL.revokeObjectURL(url));
-    Object.assign(came, { job: offer.job, files: offer.files || [], urls: {}, taking: false, over: false, closed: false });
-    $("came-said").textContent = "";
-    cameListed();
+// What the PC offers, as it said with how it is (sealed), or nothing.
+function offeredNow(incoming) {
+  const offer = incoming ? JSON.parse(new TextDecoder().decode(unseal(unhex(incoming)))) : null;
+  for (const job of putAway) if (!offer || offer.job !== job) putAway.delete(job);
+  for (const sending of sendings) {
+    if (sending.state === "offered" && (!offer || offer.job !== sending.job)) { sending.state = "over"; sending.said = t("电脑已停止发送", "The PC stopped sending"); cardDrawn(sending); }
   }
-  const files = came.files.filter(file => file.words == null), taken = files.every(file => came.urls[file.id]);
-  $("came").hidden = came.job == null || came.closed;
-  $("came-take").hidden = $("came-refuse").hidden = !files.length || taken || came.over;
-  $("came-take").disabled = $("came-refuse").disabled = came.taking;
-  $("came-close").hidden = !(taken || came.over) || came.taking;
+  if (!offer || putAway.has(offer.job) || sendings.some(sending => sending.job === offer.job && (sending.state === "offered" || sending.state === "taking"))) return;
+  const sending = { job: offer.job, files: offer.files || [], urls: {}, words: {}, state: "offered", said: "" };
+  sendings.push(sending);
+  cardMade(sending);
+  if (sending.files.every(file => file.words)) take(sending);
 }
-function cameListed() {
-  const list = $("came-list");
+function cardMade(sending) {
+  const card = el("section", "card"), line = el("div", "bar"), ends = el("div", "ends");
+  line.append(el("i"));
+  Object.assign(sending, { card, line, title: el("h2"), list: el("div", "rows"), note: el("span", "note"), refuse: el("button", "text", t("拒绝", "Decline")), accept: el("button", "go main", t("接收", "Receive")), close: el("button", "go", t("关闭", "Close")) });
+  sending.refuse.onclick = () => { putAway.add(sending.job); cardGone(sending); ask("/v1/take/refuse", { job: sending.job }).catch(() => {}); };
+  sending.accept.onclick = () => take(sending);
+  sending.close.onclick = () => { if (sending.state === "offered") putAway.add(sending.job); cardGone(sending); };
+  ends.append(sending.refuse, sending.accept, sending.close);
+  card.append(sending.title, sending.list, line, sending.note, ends);
+  $("came").append(card);
+  cardListed(sending);
+  cardDrawn(sending);
+}
+function cardGone(sending) {
+  Object.values(sending.urls).forEach(url => URL.revokeObjectURL(url));
+  sending.card.remove();
+  sendings.splice(sendings.indexOf(sending), 1);
+}
+function cardDrawn(sending) {
+  const files = sending.files.filter(file => !file.words);
+  sending.refuse.hidden = sending.accept.hidden = sending.state !== "offered" || !files.length;
+  sending.close.hidden = sending.state === "taking" || (sending.state === "offered" && files.length > 0);
+  sending.note.textContent = sending.said;
+  bar(sending.line, sending.done || 0, sending.state === "taking" ? sending.of : null);
+}
+function cardListed(sending) {
+  const list = sending.list;
   list.textContent = "";
-  const words = came.files.filter(file => file.words != null), files = came.files.filter(file => file.words == null);
-  $("came-title").textContent = files.length ? t(`电脑发来 ${files.length} 个文件`, plural(files.length, "1 file from the PC", `${files.length} files from the PC`)) : t("电脑发来的文字", "Text from the PC");
+  const words = sending.files.filter(file => file.words), files = sending.files.filter(file => !file.words);
+  sending.title.textContent = files.length ? t(`电脑发来 ${files.length} 个文件`, plural(files.length, "1 file from the PC", `${files.length} files from the PC`)) : t("电脑发来的文字", "Text from the PC");
   for (const file of words) {
+    const text = sending.words[file.id];
+    if (text == null) continue;
     const row = el("div", "row"), thing = el("div", "thing"), button = el("button", "text", t("复制", "Copy"));
-    thing.append(/^https?:\/\/\S+$/.test(file.words.trim()) ? Object.assign(el("a", "link", file.words.trim()), { href: file.words.trim(), target: "_blank", rel: "noopener" }) : el("p", "", file.words));
-    button.onclick = () => copy(file.words, button);
+    thing.append(/^https?:\/\/\S+$/.test(text.trim()) ? Object.assign(el("a", "link", text.trim()), { href: text.trim(), target: "_blank", rel: "noopener" }) : el("p", "", text));
+    button.onclick = () => copy(text, button);
     row.append(thing, button); list.append(row);
   }
   for (const file of files) {
-    const row = el("div", "row"), thing = el("div", "thing"), url = came.urls[file.id];
-    const text = el("div");
+    // Its name and size, 保存 beside them once it came, and a picture under them, as wide as the card.
+    const row = el("div", "row"), text = el("div"), url = sending.urls[file.id];
     text.append(el("b", "", file.name.split("/").pop()), el("small", "", sized(file.size)));
-    thing.append(text);
-    if (url && /^image\//.test(file.type)) thing.append(Object.assign(el("img"), { src: url, alt: file.name }));
-    row.append(thing);
+    row.append(text);
     if (url) row.append(Object.assign(el("a", "go", t("保存", "Save")), { href: url, download: file.name.split("/").pop() }));
     list.append(row);
+    if (url && /^image\//.test(file.type)) list.append(Object.assign(el("img", "shown"), { src: url, alt: file.name }));
   }
-  if (files.some(file => came.urls[file.id] && /^image\//.test(file.type)) && /iPhone|iPad/.test(navigator.userAgent)) list.append(el("span", "note small", t("长按图片可存储到照片。", "Touch and hold a picture to save it to Photos.")));
+  if (files.some(file => sending.urls[file.id] && /^image\//.test(file.type)) && /iPhone|iPad/.test(navigator.userAgent)) list.append(el("span", "note small", t("长按图片可存储到照片。", "Touch and hold a picture to save it to Photos.")));
 }
-async function take() {
-  came.taking = true;
-  cameDrawn();
-  const job = came.job, files = came.files.filter(file => file.words == null), total = files.reduce((sum, file) => sum + file.size, 0);
-  let done = 0;
-  bar("came-bar", 0, total);
+async function take(sending) {
+  const files = sending.files.filter(file => !file.words);
+  Object.assign(sending, { state: "taking", done: 0, of: sending.files.reduce((sum, file) => sum + file.size, 0) });
+  cardDrawn(sending);
   try {
-    for (const file of files) {
+    for (const file of sending.files) {
       const parts = [];
       for (let at = 0; at < file.size; ) {
-        const piece = await askAgain("/v1/take/piece", { job, file: file.id, at }, true);
+        const piece = unseal(await askAgain("/v1/take/piece", { job: sending.job, file: file.id, at }, true));
         if (!piece.length) throw Object.assign(new Error("short"), { status: 500 });
-        parts.push(piece); at += piece.length; done += piece.length;
-        bar("came-bar", done, total);
-        $("came-said").textContent = t(`正在接收 ${Math.floor(done / (total || 1) * 100)}%`, `Receiving ${Math.floor(done / (total || 1) * 100)}%`);
+        parts.push(piece); at += piece.length; sending.done += piece.length;
+        if (files.length) sending.said = t(`正在接收 ${Math.floor(sending.done / (sending.of || 1) * 100)}%`, `Receiving ${Math.floor(sending.done / (sending.of || 1) * 100)}%`);
+        cardDrawn(sending);
       }
-      came.urls[file.id] = URL.createObjectURL(new Blob(parts, { type: file.type || "application/octet-stream" }));
+      if (file.words) sending.words[file.id] = new TextDecoder().decode(new Uint8Array(await new Blob(parts).arrayBuffer()));
+      else sending.urls[file.id] = URL.createObjectURL(new Blob(parts, { type: file.type || "application/octet-stream" }));
     }
-    $("came-said").textContent = "";
+    await askAgain("/v1/take/done", { job: sending.job });
+    Object.assign(sending, { state: "taken", said: "" });
   } catch (error) {
-    came.over = true;
-    $("came-said").textContent = error.status === 404 || error.status === 410 ? t("电脑已取消发送", "The PC canceled sending") : error.status ? t("接收失败", "Couldn't receive") : t("无法连接", "Can't connect");
+    Object.assign(sending, { state: "over", said: error.status === 404 || error.status === 410 ? t("电脑已停止发送", "The PC stopped sending") : error.status ? t("接收失败", "Couldn't receive") : t("无法连接", "Can't connect") });
   }
-  came.taking = false;
-  bar("came-bar", 0, null);
-  cameListed();
-  cameDrawn();
+  cardListed(sending);
+  cardDrawn(sending);
 }
 
-function transferDrawn() { sendDrawn(); cameDrawn(); }
+function transferDrawn() { sendDrawn(); }
 $("send-title").textContent = t("发送到电脑", "Send to PC");
 $("words").placeholder = t("输入要发送的文字", "Text to send");
 $("send-pick").textContent = t("选择照片或文件", "Choose photos or files");
@@ -608,18 +668,22 @@ $("send-cancel").textContent = t("取消", "Cancel");
 $("send-pick").onclick = () => $("send-files").click();
 $("send-files").onchange = () => { const files = Array.from($("send-files").files || []); $("send-files").value = ""; if (files.length) send(files, null); };
 $("send-words").onclick = () => { const words = $("words").value; if (words.trim()) send([], words); };
-$("send-cancel").onclick = () => { sending.stop = true; };
-$("came-take").textContent = t("接收", "Receive");
-$("came-refuse").textContent = t("拒绝", "Decline");
-$("came-close").textContent = t("关闭", "Close");
-$("came-take").onclick = take;
-$("came-refuse").onclick = () => { came.over = true; came.closed = true; cameDrawn(); ask("/v1/take/refuse", { job: came.job }).catch(() => {}); };
-$("came-close").onclick = () => { came.closed = true; cameDrawn(); };
+// (Cancelled while the PC's user is asked about it, the offer is taken back from them.)
+$("send-cancel").onclick = () => { sending.stop = true; sendDrawn(); if (!sending.session) ask("/v1/send/cancel", { session: "" }).catch(() => {}); };
 
 // ---- how the PC is, asked while the page is looked at
+// (An answer older than one already taken, asked before it, is not taken: what the PC offered is as the latest says.)
+const polls = { asked: 0, taken: 0 };
 async function look() {
   if (busy || document.hidden) return;
-  try { const answer = await ask("/v1/state"); if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); } }
+  const asked = ++polls.asked;
+  try {
+    const answer = await ask("/v1/state");
+    if (asked < polls.taken) return;
+    polls.taken = asked;
+    offeredNow(answer.incoming);
+    if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); }
+  }
   catch (error) { if (!busy) failed(error); }
 }
 // The app, offered to an Android phone (it has what a page cannot: sharing from other apps, finding the PC where its address changed).

@@ -38,6 +38,7 @@ mod media;
 mod nearby;
 mod power;
 mod reads;
+mod seal;
 mod sign;
 mod touch;
 
@@ -315,6 +316,7 @@ impl Helper {
     /// Whether there is room to answer one more request from `from`:
     /// then it is counted, till what is returned is let go.
     fn room(self: &Arc<Self>, from: std::net::IpAddr) -> Option<Caller> {
+        let from = nearby::counted_as(from);
         let mut callers = self.callers.lock().unwrap();
         if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&from).is_some_and(|count| *count >= AT_ONCE_EACH) {
             return None;
@@ -498,19 +500,21 @@ impl Helper {
         })
     }
 
-    /// A page's state told what this PC sends it (see `nearby::page`), where `key` is a page's: it is open, from `from`.
+    /// A page's state told what this PC sends it (see `nearby::page`), sealed (see `seal`), where `key` is a page's: it
+    /// is open, from `from`.
     fn page_told(&self, answer: &mut Value, key: &str, from: std::net::IpAddr) {
         let Some(phone) = Config::load().phones.into_iter().find(|phone| !key.is_empty() && phone.key == key && phone.web) else { return };
-        answer["incoming"] = nearby::run::page_asked(&phone.id, &phone.name, from).unwrap_or(Value::Null);
+        answer["incoming"] = nearby::run::page_asked(&phone.id, &phone.name, from).zip(sealing(key).ok()).map_or(Value::Null, |(offer, sealing)| Value::String(sign::hex(&seal::seal(&sealing, offer.to_string().as_bytes()))));
         answer["files"] = json!(phone.files);
     }
 
-    /// A piece of what this PC sends the page asking (see `nearby::page::piece_of`): `{ "job", "file", "at" }`.
+    /// A piece of what this PC sends the page asking (see `nearby::page::piece_of`): `{ "job", "file", "at" }`. Sealed.
     fn take_piece(&self, body: &[u8], key: &str) -> Result<Vec<u8>, (u16, String)> {
         let phone = paired(key)?;
         let asked: Value = serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))?;
         let number = |name: &str| asked.get(name).and_then(Value::as_u64).ok_or((400, format!("\"{name}\" is missing")));
-        nearby::run::piece_for_page(&phone.id, number("job")?, number("file")? as usize, number("at")?).map_err(|(status, why)| (status, why.to_string()))
+        let piece = nearby::run::piece_for_page(&phone.id, number("job")?, number("file")? as usize, number("at")?).map_err(|(status, why)| (status, why.to_string()))?;
+        Ok(seal::seal(&sealing(key)?, &piece))
     }
 
     /// Does what a request asks: its answer, or why not (with the status).
@@ -528,13 +532,34 @@ impl Helper {
         if reads_only && !(method == "GET" && path == "/v1/state") && !path.starts_with("/v1/nearby") && path != "/v1/unpair" && !transfer {
             return Err((403, "this phone may not control this PC".into()));
         }
-        // A piece of what a page sends: its bytes, the body itself (see `nearby::page`).
+        // A piece of what a page sends: its bytes, the body itself, sealed (see `nearby::page`, `seal`).
         if let ("POST", Some(query)) = (method, path.strip_prefix("/v1/send/piece?")) {
             let phone = paired(key)?;
             let field = |name: &str| query.split('&').find_map(|pair| pair.strip_prefix(name).and_then(|rest| rest.strip_prefix('='))).unwrap_or_default();
             let at = field("at").parse::<u64>().map_err(|_| (400, "no place in the file".to_string()))?;
-            nearby::run::piece_from_page(field("s"), field("f"), &nearby::page::fingerprint(&phone.id), at, body).map_err(|(status, why)| (status, why.to_string()))?;
+            let bytes = seal::open(&sealing(key)?, body).ok_or((400, "not sealed".to_string()))?;
+            nearby::run::piece_from_page(field("s"), field("f"), &nearby::page::fingerprint(&phone.id), at, &bytes).map_err(|(status, why)| (status, why.to_string()))?;
             return Ok(json!({}));
+        }
+        // What a page sends (see `nearby::page`), sealed: its own id for the offer, and its files' names, sizes and
+        // types, or words. Taken as its phone's files are (see `Phone::files`): the receiving's id and its files', or
+        // nothing (words, taken whole).
+        if (method, path) == ("POST", "/v1/send/offer") {
+            let phone = paired(key)?;
+            let asked: Value = seal::open(&sealing(key)?, body).and_then(|opened| serde_json::from_slice(&opened).ok()).ok_or((400, "not a sealed offer".to_string()))?;
+            let id = asked.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or((400, "\"id\" is missing".to_string()))?;
+            let files: Vec<(String, u64, String)> = asked
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|files| files.iter().map(|file| (file.get("name").and_then(Value::as_str).unwrap_or_default().to_string(), file.get("size").and_then(Value::as_u64).unwrap_or(0), file.get("type").and_then(Value::as_str).filter(|kind| !kind.is_empty()).unwrap_or("application/octet-stream").to_string())).collect())
+                .unwrap_or_default();
+            let words = asked.get("words").and_then(Value::as_str).filter(|words| !words.trim().is_empty()).map(str::to_string);
+            let sender = nearby::Sender { alias: phone.name.clone(), model: None, kind: Some("mobile".into()), fingerprint: nearby::page::fingerprint(&phone.id), verified: false, address: from, glance: true };
+            return match nearby::run::from_page(id, sender, &files, words, phone.files) {
+                Ok(Some((session, files))) => Ok(json!({ "session": session, "files": files })),
+                Ok(None) => Ok(json!({})),
+                Err((status, why)) => Err((status, why.into())),
+            };
         }
         let asked: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))? };
         let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
@@ -546,23 +571,7 @@ impl Helper {
                 return Ok(answer);
             }
             ("GET", "/v1/state") => {}
-            // What a page sends (see `nearby::page`): its files' names, sizes and types, or words. Taken as its phone's
-            // files are (see `Phone::files`): the receiving's id and its files', or nothing (words, taken whole).
-            ("POST", "/v1/send/offer") => {
-                let phone = paired(key)?;
-                let files: Vec<(String, u64, String)> = asked
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .map(|files| files.iter().map(|file| (file.get("name").and_then(Value::as_str).unwrap_or_default().to_string(), file.get("size").and_then(Value::as_u64).unwrap_or(0), file.get("type").and_then(Value::as_str).filter(|kind| !kind.is_empty()).unwrap_or("application/octet-stream").to_string())).collect())
-                    .unwrap_or_default();
-                let words = asked.get("words").and_then(Value::as_str).filter(|words| !words.trim().is_empty()).map(str::to_string);
-                let sender = nearby::Sender { alias: phone.name.clone(), model: None, kind: Some("mobile".into()), fingerprint: nearby::page::fingerprint(&phone.id), verified: false, address: from, glance: true };
-                return match nearby::run::from_page(sender, &files, words, phone.files) {
-                    Ok(Some((session, files))) => Ok(json!({ "session": session, "files": files })),
-                    Ok(None) => Ok(json!({})),
-                    Err((status, why)) => Err((status, why.into())),
-                };
-            }
+            // What a page sends, given up there: the receiving named, or the offer while the user is asked about it.
             ("POST", "/v1/send/cancel") => {
                 let phone = paired(key)?;
                 nearby::run::page_cancelled(asked.get("session").and_then(Value::as_str).unwrap_or_default(), &nearby::page::fingerprint(&phone.id));
@@ -572,6 +581,12 @@ impl Helper {
             ("POST", "/v1/take/refuse") => {
                 let phone = paired(key)?;
                 nearby::run::page_refused(&phone.id, asked.get("job").and_then(Value::as_u64).unwrap_or(0));
+                return Ok(json!({}));
+            }
+            // What this PC sends a page, all of it there: sent.
+            ("POST", "/v1/take/done") => {
+                let phone = paired(key)?;
+                nearby::run::page_done(&phone.id, asked.get("job").and_then(Value::as_u64).unwrap_or(0)).map_err(|(status, why)| (status, why.to_string()))?;
                 return Ok(json!({}));
             }
             // Where and as whom this PC receives nearby (its certificate's fingerprint, for the phone to pin).
@@ -722,12 +737,24 @@ impl Helper {
         let (method, path) = (request.next().unwrap_or_default(), request.next().unwrap_or_default());
         let header = |name: &str| lines.clone().filter_map(|line| line.split_once(':')).find(|(key, _)| key.eq_ignore_ascii_case(name)).map_or("", |(_, value)| value.trim());
         let length: usize = header("content-length").parse().unwrap_or(0);
-        // (A piece of a file a page sends may be larger, and given longer to come over a slow network.)
         let piece = path.starts_with("/v1/send/piece?");
-        if length > if piece { nearby::page::PIECE } else if path == "/v1/send/offer" { MOST_OFFER } else { MOST } {
+        if length > if piece { nearby::page::PIECE + seal::NONCE } else if path == "/v1/send/offer" { MOST_OFFER } else { MOST } {
             return Ok(());
         }
-        if piece {
+        let nonce = header("x-glance-nonce");
+        let here = peer(&stream).is_some_and(|from| from.is_loopback());
+        let browser = header("x-glance-browser") == "1";
+        macro_rules! request {
+            ($body:expr) => {
+                sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: $body }
+            };
+        }
+        // A piece of a file a page sends is larger, and given longer to come over a slow network: once its head proves
+        // it the page's, signed over the digest of the body to come (which is then to be that body's). Till then it is
+        // given as long as any request, so that no one unpaired may hold this helper's room for longer.
+        let digest = header("x-glance-body");
+        let first = piece.then(|| self.admit(&request!(digest.as_bytes()), here, browser));
+        if first.as_ref().is_some_and(Result::is_ok) {
             by.set(std::time::Instant::now() + PIECE_ARRIVING);
         }
         while body.len() < length {
@@ -772,10 +799,14 @@ impl Helper {
             let page = include_str!("web.html");
             return write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
         }
-        let nonce = header("x-glance-nonce");
-        let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
-        let here = peer(&stream).is_some_and(|from| from.is_loopback());
-        let (status, answer, secret) = match self.admit(&request, here, header("x-glance-browser") == "1") {
+        let admitted = match first {
+            Some(admitted) => admitted.and_then(|admitted| {
+                use sha2::Digest;
+                if sign::hex(&sha2::Sha256::digest(&body)) == digest { Ok(admitted) } else { Err((sign::Refused::Forged, Some(admitted.secret))) }
+            }),
+            None => self.admit(&request!(&body), here, browser),
+        };
+        let (status, answer, secret) = match admitted {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
             Err((refused, secret)) => {
                 // (Not of now is how every phone's first asking of a run is refused: nothing to note.)
@@ -860,6 +891,11 @@ fn unescaped(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The key what the page paired by `key` sends and fetches is sealed with (see `seal`).
+fn sealing(key: &str) -> Result<[u8; 32], (u16, String)> {
+    sign::key(key).map(|key| seal::key(&key)).ok_or((403, "not a paired phone".to_string()))
 }
 
 /// The phone paired by `key`, as kept.
@@ -1467,6 +1503,26 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 403 Error\r\n"), "{head:?}");
         assert!(!head.replace("\r\n", "").contains('\n'), "{head:?}");
         assert_eq!(body, r#"{"error":"the remote is off"}"#);
+    }
+
+    /// A piece of a file whose head proves it no paired page's is given no longer to come than any request: answered
+    /// as refused once that time is up, not after the minute a page's piece is given.
+    #[test]
+    fn an_unpaired_piece_holds_no_room_for_long() {
+        use std::io::{Read, Write};
+        let helper = helper(super::Config::default());
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut asking = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (served, _) = listener.accept().unwrap();
+        let began = std::time::Instant::now();
+        let serving = std::thread::spawn(move || helper.serve(served));
+        asking.write_all(b"POST /v1/send/piece?s=x&f=0&at=0 HTTP/1.1\r\nX-Glance-Body: 00\r\nContent-Length: 524288\r\n\r\nslow").unwrap();
+        let ended = serving.join().unwrap();
+        assert!(began.elapsed() < super::ARRIVING + std::time::Duration::from_secs(2), "{:?}", began.elapsed());
+        assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        let mut answer = Vec::new();
+        let _ = asking.read_to_end(&mut answer);
+        assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
     }
 
     /// OpenRGB run by the sensors starts with this helper: that it has its lights dark, or none yet, is not how they

@@ -333,6 +333,15 @@ fn random(bytes: usize) -> String {
     drawn.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Who a caller is counted as, of those answered at once (see `AT_ONCE_EACH`): its address, or over IPv6 its network's
+/// (the first 64 bits), for a device is given all the addresses of one.
+pub fn counted_as(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1))),
+        other => other,
+    }
+}
+
 /// A name a sending gave a file, as it may be shown: its last part (no folder of the sender's), without what cannot
 /// stand in a name, at most 200 characters; nothing left, "file".
 pub fn shown_name(given: &str) -> String {
@@ -421,8 +430,8 @@ pub struct Receiver {
     keep: Keeping,
     /// The receiving going on, and whether a device is being asked about (another meanwhile is turned away).
     session: Mutex<Option<Session>>,
-    /// The device whose sending the user is being asked about (one at a time), by its address.
-    asking: Mutex<Option<IpAddr>>,
+    /// The device whose sending the user is being asked about (one at a time), by its address and its fingerprint.
+    asking: Mutex<Option<(IpAddr, String)>>,
     /// The devices heard lately (see `discover`).
     pub devices: Mutex<HashMap<String, Device>>,
     /// Where other devices reach this PC, network by network (see `discover::addresses`), as last looked at.
@@ -460,12 +469,13 @@ impl Receiver {
             // (Who calls, as its address is: one over IPv4 reaches a listener of both kinds as an IPv6 address that maps
             // it, and is the same device as one heard over IPv4.)
             let Ok(from) = stream.peer_addr().map(|peer| peer.ip().to_canonical()) else { continue };
+            let counted = counted_as(from);
             {
                 let mut callers = self.callers.lock().unwrap();
-                if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&from).copied().unwrap_or(0) >= AT_ONCE_EACH {
+                if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&counted).copied().unwrap_or(0) >= AT_ONCE_EACH {
                     continue;
                 }
-                *callers.entry(from).or_default() += 1;
+                *callers.entry(counted).or_default() += 1;
             }
             let receiver = self.clone();
             std::thread::spawn(move || {
@@ -475,10 +485,10 @@ impl Receiver {
                     }
                 }
                 let mut callers = receiver.callers.lock().unwrap();
-                if let Some(count) = callers.get_mut(&from) {
+                if let Some(count) = callers.get_mut(&counted) {
                     *count -= 1;
                     if *count == 0 {
-                        callers.remove(&from);
+                        callers.remove(&counted);
                     }
                 }
             });
@@ -613,15 +623,17 @@ impl Receiver {
             }
             ("POST", "/prepare-upload") => self.prepare(body, from, verified).map(Some),
             // A sending cancelled by its device: the one going on (named, or the device's, unnamed: LocalSend's
-            // earlier way), or, before any is, the asking about it.
+            // earlier way), or, before any is, the asking about it. (Never a page's, which is known by no address: it
+            // cancels its own, signed, see `Receiver::cancelled_by`.)
             ("POST", "/cancel") => {
                 let id = head.query("sessionId");
+                let ours = |address: IpAddr, fingerprint: &str| address == from && page::phone_of(fingerprint).is_none();
                 let mut session = self.session.lock().unwrap();
-                if session.as_ref().is_some_and(|session| id.is_none_or(|id| session.id == id) && session.from.address == from) {
+                if session.as_ref().is_some_and(|session| id.is_none_or(|id| session.id == id) && ours(session.from.address, &session.from.fingerprint)) {
                     let ended = session.take().unwrap();
                     drop(session);
                     self.end(ended, Some("cancelled by the sender".into()));
-                } else if id.is_none() && *self.asking.lock().unwrap() == Some(from) {
+                } else if id.is_none() && self.asking.lock().unwrap().as_ref().is_some_and(|(address, fingerprint)| ours(*address, fingerprint)) {
                     drop(session);
                     self.told.withdraw();
                 }
@@ -807,7 +819,7 @@ impl Receiver {
             if asking.is_some() {
                 return Err((409, "another device is being asked about"));
             }
-            *asking = Some(sender.address);
+            *asking = Some((sender.address, sender.fingerprint.clone()));
         }
         let answer = self.told.ask(&Asked { from: sender.clone(), files: files.to_vec() });
         *self.asking.lock().unwrap() = None;

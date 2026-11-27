@@ -37,6 +37,9 @@ pub fn phone_of(fingerprint: &str) -> Option<&str> {
 /// A receiving a page began: its id, and each file's id. None for words, or nothing.
 pub type Begun = Option<(String, Vec<String>)>;
 
+/// An offer a page made: its id for it, how it was answered, when.
+type Answered = (String, Result<Begun, Refused>, Instant);
+
 /// A page open: its phone's name, where it asks from, when it last asked.
 struct Open {
     name: String,
@@ -44,11 +47,15 @@ struct Open {
     seen: Instant,
 }
 
-/// The pages open, and what this PC offers each (see `Offer`), by their phones' ids.
+/// The pages open, and what this PC offers each (see `Offer`), by their phones' ids. And, by the pages' fingerprints,
+/// what each last offered and how it was answered, and the receiving each last sent whole: a request of a page sent
+/// again where its answer was lost on the way is answered as it was, and nothing is done twice.
 #[derive(Default)]
 pub struct Pages {
     open: Mutex<HashMap<String, Open>>,
     offered: Mutex<HashMap<String, Offer>>,
+    answered: Mutex<HashMap<String, Answered>>,
+    finished: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl Pages {
@@ -84,7 +91,18 @@ impl Receiver {
     /// where `direct` (the phone's files are, see `Phone::files`), else as the user answers (never trusted by that: a
     /// page has no certificate to trust). The receiving's id and each file's id (its place among `files`); none for
     /// words, or nothing.
-    pub fn offered_by_page(&self, sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
+    /// The offer is known by `id`, the page's own for it: the same offer sent again is answered as it was.
+    pub fn offered_by_page(&self, id: &str, sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
+        let fingerprint = sender.fingerprint.clone();
+        if let Some((_, answer, _)) = self.pages.answered.lock().unwrap().get(&fingerprint).filter(|(offer, _, _)| offer == id) {
+            return answer.clone();
+        }
+        let answer = self.offered_once(sender, files, words, direct);
+        self.pages.answered.lock().unwrap().insert(fingerprint, (id.to_string(), answer.clone(), Instant::now()));
+        answer
+    }
+
+    fn offered_once(&self, sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
         let kept = (self.kept)();
         if !kept.on {
             return Err((403, "not receiving"));
@@ -123,16 +141,23 @@ impl Receiver {
     }
 
     /// A piece of file `file` of the receiving `session`, from the page of `from` (its fingerprint) that sends it: its
-    /// bytes from `at`, the one after the last (one sent again that came already, its answer lost, is taken as come).
-    /// The file kept as its last piece comes, and the receiving ended as all its files have.
+    /// bytes from `at`, the one after the last (one sent again that came already, its answer lost, is taken as come:
+    /// the last of a receiving ended whole too). Only an empty file's is empty. The file kept as its last piece comes,
+    /// and the receiving ended as all its files have.
     pub fn piece(&self, session: &str, file: &str, from: &str, at: u64, bytes: &[u8]) -> Result<(), Refused> {
         let mut going = self.session.lock().unwrap();
-        let receiving = going.as_mut().filter(|going| going.id == session).ok_or((403, "no such receiving"))?;
+        let Some(receiving) = going.as_mut().filter(|going| going.id == session) else {
+            let finished = self.pages.finished.lock().unwrap().get(from).is_some_and(|(whole, _)| whole == session);
+            return if finished { Ok(()) } else { Err((403, "no such receiving")) };
+        };
         if receiving.from.fingerprint != from {
             return Err((403, "not from where the sending was offered"));
         }
         let incoming = receiving.files.get_mut(file).ok_or((403, "no such file"))?;
         let size = incoming.offered.size;
+        if bytes.is_empty() && size != 0 {
+            return Err((400, "an empty piece"));
+        }
         if incoming.came.is_some() || (at < incoming.done && at + bytes.len() as u64 == incoming.done) {
             return Ok(());
         }
@@ -168,13 +193,21 @@ impl Receiver {
         if whole {
             let ended = going.take().expect("the receiving going on");
             drop(going);
+            self.pages.finished.lock().unwrap().insert(from.to_string(), (session.to_string(), Instant::now()));
             self.end(ended, None);
         }
         Ok(())
     }
 
-    /// The receiving `session` given up by the page of `from` (its fingerprint) that sends it.
+    /// The receiving `session` given up by the page of `from` (its fingerprint) that sends it. None named, its offer
+    /// while the user is asked about it.
     pub fn cancelled_by(&self, session: &str, from: &str) {
+        if session.is_empty() {
+            if self.asking.lock().unwrap().as_ref().is_some_and(|(_, asked)| asked == from) {
+                self.told.withdraw();
+            }
+            return;
+        }
         let mut going = self.session.lock().unwrap();
         if going.as_ref().is_some_and(|going| going.id == session && going.from.fingerprint == from) {
             let ended = going.take().expect("the receiving going on");
@@ -184,7 +217,8 @@ impl Receiver {
     }
 }
 
-/// A file or words this PC sends a page: where the file is, or the words; the name it is told; how large; its type.
+/// A file or words this PC sends a page: where the file is, or the words (fetched as a file's bytes are), the name it is
+/// told, how large, its type.
 struct Sent {
     path: Option<PathBuf>,
     words: Option<String>,
@@ -193,9 +227,9 @@ struct Sent {
     kind: &'static str,
 }
 
-/// What this PC sends a page, waiting for the page to fetch it: the sending's number, what it sends, how much of each
-/// the page has fetched, the sending as Glance may cancel it, whom to tell how it goes, when the page last fetched
-/// any of it (or it was offered), and when it was last told how far it is.
+/// What this PC sends a page, waiting for the page to fetch it and say it has it all: the sending's number, what it
+/// sends, how much of each the page has fetched, the sending as Glance may cancel it, whom to tell how it goes, when
+/// the page last fetched any of it (or it was offered), and when it was last told how far it is.
 struct Offer {
     job: u64,
     sent: Vec<Sent>,
@@ -211,19 +245,19 @@ impl Offer {
         self.told.tell(Event::Sending { job: self.job, state });
     }
 
-    /// All the files fetched (the words go with the offer itself).
     fn fetched_all(&self) -> bool {
-        self.sent.iter().zip(&self.fetched).all(|(sent, fetched)| sent.path.is_none() || *fetched >= sent.size)
+        self.sent.iter().zip(&self.fetched).all(|(sent, fetched)| *fetched >= sent.size)
     }
 
     fn of(&self) -> u64 {
-        self.sent.iter().filter(|sent| sent.path.is_some()).map(|sent| sent.size).sum()
+        self.sent.iter().map(|sent| sent.size).sum()
     }
 }
 
 impl Pages {
     /// `files` offered to the page of `phone` as sending `job` (told so: `Waiting`; `Sending` as the page fetches them;
-    /// `Sent` once it has all). The page not open, or offered another meanwhile, it fails or is busy at once.
+    /// `Sent` once it says it has all, see `done`). The page not open, or offered another meanwhile, it fails or is busy
+    /// at once.
     pub fn offer(&self, phone: &str, job: u64, files: &[Outgoing], going: Arc<Job>, told: Arc<dyn Told>) {
         let tell = |state: State| told.tell(Event::Sending { job, state });
         if self.open.lock().unwrap().get(phone).is_none_or(|page| page.seen.elapsed() >= OPEN_FOR) {
@@ -255,23 +289,35 @@ impl Pages {
     }
 
     /// What the page of `phone` is offered, as it is told with how this PC is: the sending's number and each thing's id,
-    /// name, size and type, words given whole. None where nothing is. Words alone are sent once the page is told them.
+    /// name, size and type, and whether it is words (fetched as a file is, and shown). None where nothing is (one
+    /// cancelled is given up here and then).
     pub fn offered_to(&self, phone: &str) -> Option<Value> {
         let mut offered = self.offered.lock().unwrap();
         let offer = offered.get(phone)?;
-        let told = json!({
-            "job": offer.job,
-            "files": offer.sent.iter().enumerate().map(|(at, sent)| json!({ "id": at, "name": sent.name, "size": sent.size, "type": sent.kind, "words": sent.words })).collect::<Vec<_>>(),
-        });
-        if offer.fetched_all() {
-            let offer = offered.remove(phone).expect("offered");
-            offer.tell(State::Sent);
+        if offer.going.cancelled() {
+            offered.remove(phone).expect("offered").tell(State::Cancelled);
+            return None;
         }
-        Some(told)
+        Some(json!({
+            "job": offer.job,
+            "files": offer.sent.iter().enumerate().map(|(at, sent)| json!({ "id": at, "name": sent.name, "size": sent.size, "type": sent.kind, "words": sent.words.is_some() })).collect::<Vec<_>>(),
+        }))
     }
 
-    /// A piece of thing `at` of sending `job` offered to the page of `phone`: its bytes from `from`, `PIECE` at most. All
-    /// of the files fetched, the sending is sent.
+    /// The page of `phone` has all of sending `job`: it is sent. (Told again, its answer lost, it is answered alike.)
+    pub fn done(&self, phone: &str, job: u64) -> Result<(), Refused> {
+        let mut offered = self.offered.lock().unwrap();
+        match offered.get(phone) {
+            Some(offer) if offer.job == job && offer.fetched_all() => {
+                offered.remove(phone).expect("offered").tell(State::Sent);
+                Ok(())
+            }
+            Some(offer) if offer.job == job => Err((409, "not all of it fetched")),
+            _ => Ok(()),
+        }
+    }
+
+    /// A piece of thing `at` of sending `job` offered to the page of `phone`: its bytes from `from`, `PIECE` at most.
     pub fn piece_of(&self, phone: &str, job: u64, at: usize, from: u64) -> Result<Vec<u8>, Refused> {
         use std::io::{Read, Seek, SeekFrom};
         let mut offered = self.offered.lock().unwrap();
@@ -280,21 +326,24 @@ impl Pages {
             return Err((410, "the sending was cancelled"));
         }
         let sent = offer.sent.get(at).ok_or((404, "no such file"))?;
-        let path = sent.path.clone().ok_or((404, "no such file"))?;
         if from > sent.size {
             return Err((416, "beyond the file"));
         }
         let wanted = (sent.size - from).min(PIECE as u64) as usize;
-        let mut bytes = vec![0u8; wanted];
-        let mut file = std::fs::File::open(&path).map_err(|_| (500, "the file cannot be read"))?;
-        file.seek(SeekFrom::Start(from)).and_then(|_| file.read_exact(&mut bytes)).map_err(|_| (500, "the file cannot be read"))?;
+        let bytes = match (&sent.path, &sent.words) {
+            (Some(path), _) => {
+                let mut bytes = vec![0u8; wanted];
+                let mut file = std::fs::File::open(path).map_err(|_| (500, "the file cannot be read"))?;
+                file.seek(SeekFrom::Start(from)).and_then(|_| file.read_exact(&mut bytes)).map_err(|_| (500, "the file cannot be read"))?;
+                bytes
+            }
+            (None, Some(words)) => words.as_bytes()[from as usize..from as usize + wanted].to_vec(),
+            (None, None) => unreachable!("a file or words"),
+        };
         let end = from + wanted as u64;
         offer.fetched[at] = offer.fetched[at].max(end);
         offer.moved = Instant::now();
-        if offer.fetched_all() {
-            let offer = offered.remove(phone).expect("offered");
-            offer.tell(State::Sent);
-        } else if offer.progress.elapsed() >= PROGRESS_EVERY {
+        if offer.progress.elapsed() >= PROGRESS_EVERY {
             offer.progress = Instant::now();
             offer.tell(State::Sending { done: offer.fetched.iter().sum(), of: offer.of() });
         }
@@ -310,8 +359,10 @@ impl Pages {
     }
 
     /// The sendings to pages given up: cancelled (told so), or not fetched from for `WAITS` (failed: the page was
-    /// closed, or its user did not take them).
+    /// closed, or its user did not take them). And what pages' requests sent again are answered by, after as long.
     pub fn expire(&self) {
+        self.answered.lock().unwrap().retain(|_, (_, _, at)| at.elapsed() < WAITS);
+        self.finished.lock().unwrap().retain(|_, (_, at)| at.elapsed() < WAITS);
         let mut offered = self.offered.lock().unwrap();
         let over: Vec<String> = offered.iter().filter(|(_, offer)| offer.going.cancelled() || offer.moved.elapsed() > WAITS).map(|(phone, _)| phone.clone()).collect();
         for phone in over {

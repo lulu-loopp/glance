@@ -336,6 +336,11 @@ pub fn piece_for_page(phone: &str, job: u64, at: usize, from: u64) -> Result<Vec
     RUNNING.get().ok_or((404, "no such sending"))?.receiver.pages.piece_of(phone, job, at, from)
 }
 
+/// What this PC sends the page of `phone`, all of it there (see `page::Pages::done`).
+pub fn page_done(phone: &str, job: u64) -> Result<(), super::Refused> {
+    RUNNING.get().map_or(Ok(()), |running| running.receiver.pages.done(phone, job))
+}
+
 /// What this PC sends the page of `phone`, turned down there.
 pub fn page_refused(phone: &str, job: u64) {
     if let Some(running) = RUNNING.get() {
@@ -344,8 +349,8 @@ pub fn page_refused(phone: &str, job: u64) {
 }
 
 /// What a page sends, as `sender` (see `Receiver::offered_by_page`): refused where nearby transfer does not run.
-pub fn from_page(sender: super::Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<page::Begun, super::Refused> {
-    RUNNING.get().ok_or((403, "not receiving"))?.receiver.offered_by_page(sender, files, words, direct)
+pub fn from_page(id: &str, sender: super::Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<page::Begun, super::Refused> {
+    RUNNING.get().ok_or((403, "not receiving"))?.receiver.offered_by_page(id, sender, files, words, direct)
 }
 
 /// A piece of what a page sends (see `Receiver::piece`).

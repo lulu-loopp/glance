@@ -340,25 +340,36 @@ fun Pc.near(): Boolean? {
  * Looks for the PC where it is not at its address: on the network the phone is on now (its address may have changed
  * since it was paired), then at the other addresses it said it may be reached at ([others], as from another network,
  * by IPv6). An address where it answers, or none. What is asked there is signed and answered signed, so another
- * machine at one of them is not taken for it. Blocks for under four seconds.
+ * machine at one of them is not taken for it. Blocks for four seconds at most.
  */
 fun Pc.find(others: List<String> = addresses): String? = findNearby() ?: reachAt(others.filter { it != host })
 
-/** The first of [addresses] (each tried at once) where something takes a connection on the PC's port, within 2.5 s. */
-private fun Pc.reachAt(addresses: List<String>): String? {
+/**
+ * The first of [addresses] (each tried at once) where the PC itself answers: asked there as it is anywhere, signed, and
+ * answered signed (an answer refusing what was asked is signed too, by the key). Another machine there, or one that
+ * does not know the key, is not taken for it, and the others are still waited for. Within 3 s.
+ */
+private fun Pc.reachAt(addresses: List<String>): String? = firstProven(addresses, 3000) { address ->
+    try {
+        copy(host = address).said("/v1/nearby")
+        true
+    } catch (failed: Failure.Failed) {
+        true
+    } catch (failure: Failure) {
+        false
+    }
+}
+
+/** The first of [addresses] that [proven] holds for, each tried at once on a thread of its own, within [within] ms. */
+internal fun firstProven(addresses: List<String>, within: Long, proven: (String) -> Boolean): String? {
     if (addresses.isEmpty()) return null
     val found = java.util.concurrent.LinkedBlockingQueue<String>()
     val tries = addresses.map { address ->
-        Thread {
-            runCatching {
-                java.net.Socket().use { it.connect(java.net.InetSocketAddress(java.net.InetAddress.getByName(address), port), 2500) }
-                found.add(address)
-            }
-        }.apply { isDaemon = true; start() }
+        Thread { if (proven(address)) found.add(address) }.apply { isDaemon = true; start() }
     }
-    val until = System.currentTimeMillis() + 2600
+    val until = System.currentTimeMillis() + within
     while (System.currentTimeMillis() < until) {
-        found.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)?.let { return it }
+        found.poll(50, java.util.concurrent.TimeUnit.MILLISECONDS)?.let { return it }
         if (tries.none { it.isAlive }) return found.poll()
     }
     return null

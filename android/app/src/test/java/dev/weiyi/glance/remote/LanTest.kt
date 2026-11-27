@@ -370,4 +370,21 @@ class LanTest {
         assertTrue(none.contains("Content-Length: 0\r\n"))
         assertFalse(none.contains("Content-Type"))
     }
+
+    // ---- The PC looked for at its other addresses ----
+
+    /** An address that answers first but not as the PC is passed over for the one where the PC proves itself. */
+    @Test
+    fun anAddressIsTakenOnlyWhereThePcProvesItself() {
+        val chosen = firstProven(listOf("another machine", "the pc"), 3000) { address ->
+            if (address == "the pc") Thread.sleep(300)
+            address == "the pc"
+        }
+        assertEquals("the pc", chosen)
+        assertNull(firstProven(listOf("a", "b"), 3000) { false })
+        assertNull(firstProven(emptyList(), 3000) { true })
+        val began = System.currentTimeMillis()
+        assertNull(firstProven(listOf("slow"), 200) { Thread.sleep(2000); true })
+        assertTrue(System.currentTimeMillis() - began < 1000)
+    }
 }
