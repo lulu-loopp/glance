@@ -25,7 +25,7 @@ import kotlin.concurrent.thread
  */
 class Found(private val context: Context, private val me: () -> Lan.Info, private val heard: (Lan.Info, String, String?) -> Unit) {
     /** A device found nearby: as it says it is, where it receives, and when it was last heard (elapsed ms). */
-    data class Device(val fingerprint: String, val alias: String, val model: String?, val type: String?, val glance: Boolean, val address: String, val port: Int, val https: Boolean, val heard: Long)
+    data class Device(val fingerprint: String, val alias: String, val model: String?, val type: String?, val glance: Boolean, val address: String, val port: Int, val https: Boolean, val heard: Long, val proven: Boolean = false)
 
     companion object {
         /** A device heard within this long is nearby still (ms). */

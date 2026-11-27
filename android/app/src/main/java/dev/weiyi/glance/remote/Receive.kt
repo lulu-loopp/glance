@@ -52,6 +52,8 @@ object Receiver {
 
     /** How often the devices added by their addresses are told of this phone while it receives (ms). */
     private const val REACH_ADDED_EVERY = 60_000L
+    /** How often the devices heard are looked at for those gone quiet (ms). */
+    private const val QUIET_LOOKED_EVERY = 10_000L
 
     private val known = HashMap<String, Found.Device>()
     private val heardNow = MutableStateFlow<List<Found.Device>>(emptyList())
@@ -109,7 +111,7 @@ object Receiver {
      * Glance.
      */
     fun me(context: Context): Lan.Info {
-        val port = serving?.port ?: Lan.PORT
+        val port = port()
         return Lan.Info(Own.alias(context), "Android", "mobile", Own.fingerprint(), port, https = true, glance = true, addresses = Address.told(context, port))
     }
 
@@ -146,6 +148,17 @@ object Receiver {
                 }
             }
         }
+        // The devices gone quiet let go now and then (a device added shown not connected, nothing else heard).
+        thread(name = "nearby-quiet", isDaemon = true) {
+            while (this.serving === serving) {
+                try {
+                    Thread.sleep(QUIET_LOOKED_EVERY)
+                } catch (stopped: InterruptedException) {
+                    return@thread
+                }
+                letGoQuiet()
+            }
+        }
         // The paired PCs asked where they are and by which certificate (what they send is taken by it), and told this
         // phone's (they know it nearby as their paired phone by it).
         thread(name = "nearby-pcs", isDaemon = true) {
@@ -178,18 +191,44 @@ object Receiver {
     fun heard(info: Lan.Info, address: String, verified: String?) {
         val fingerprint = verified ?: info.fingerprint.uppercase()
         if (fingerprint.equals(Own.fingerprint(), ignoreCase = true)) return
-        val device = Found.Device(fingerprint, info.alias, info.deviceModel, info.deviceType, info.glance, address, info.port ?: Lan.PORT, info.https, SystemClock.elapsedRealtime())
+        val device = Found.Device(fingerprint, info.alias, info.deviceModel, info.deviceType, info.glance, address, info.port ?: Lan.PORT, info.https, SystemClock.elapsedRealtime(), proven = verified != null)
         // (A device added by its address that proved itself: kept as reached where it spoke from.)
         if (verified != null && info.port != null) Address.reached(app, fingerprint, address, info.port, info)
+        val held = verified == null && Address.held(app, fingerprint)
         synchronized(known) {
-            // (Where it said nothing of its port and protocol, what it said before stands.)
-            val was = known[fingerprint]
-            known[fingerprint] = if (info.port == null && was != null) device.copy(port = was.port, https = was.https, glance = device.glance || was.glance) else device
             val now = SystemClock.elapsedRealtime()
-            known.values.removeAll { now - it.heard > Found.FRESH }
-            heardNow.value = known.values.sortedWith(compareBy<Found.Device>({ !it.glance }, { it.alias.lowercase() }, { it.fingerprint }))
+            val was = known[fingerprint]?.takeIf { now - it.heard <= Found.FRESH }
+            // (Where it said nothing of its port and protocol, what it said before stands.)
+            var heard = if (info.port == null && was != null) device.copy(port = was.port, https = was.https, glance = device.glance || was.glance) else device
+            // A device known by its certificate (added by its address over HTTPS, or heard proven lately) is moved only by
+            // what proves it: what anyone only says of it, from elsewhere or as speaking otherwise, is not taken (what is
+            // sent to it would go to whoever said so), and said from where it was proven, as it spoke there, keeps it heard.
+            if (verified == null) {
+                val there = was != null && was.proven && was.address == heard.address && was.port == heard.port && was.https == heard.https
+                if (!there && (was?.proven == true || held)) return
+                heard = heard.copy(proven = there)
+            }
+            known[fingerprint] = heard
+            publish(now)
         }
     }
+
+    /** The devices heard lately shown, those quiet for [Found.FRESH] let go (called holding [known]). */
+    private fun publish(now: Long) {
+        known.values.removeAll { now - it.heard > Found.FRESH }
+        heardNow.value = known.values.sortedWith(compareBy<Found.Device>({ !it.glance }, { it.alias.lowercase() }, { it.fingerprint }))
+    }
+
+    /** The devices quiet for [Found.FRESH] let go, and shown so where any were (nothing else need be heard first). */
+    private fun letGoQuiet() {
+        synchronized(known) {
+            val now = SystemClock.elapsedRealtime()
+            if (known.values.any { now - it.heard > Found.FRESH }) publish(now)
+        }
+    }
+
+    /** The port this phone receives on (LocalSend's, where it is free). */
+    fun port(): Int = serving?.port ?: Lan.PORT
 
     /** The sending coming now, if one is. */
     fun going(context: Context): Serving.Session? = serving?.going()

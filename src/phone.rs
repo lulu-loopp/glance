@@ -40,6 +40,8 @@ const RULE: &str = "Glance Remote";
 const NEARBY_RULE: &str = "Glance Nearby";
 /// The port devices nearby say they are there on, to all the network (LocalSend's own).
 const NEARBY_PORT: u16 = 53317;
+/// The ports the helper receives on from devices nearby, the first free of them (its `nearby::OWN_PORTS`).
+const NEARBY_OWN_PORTS: &str = "53320-53329";
 /// A child program started without a window of its own.
 const NO_WINDOW: u32 = 0x0800_0000;
 /// Where the app is to be had: the page a phone is sent to by a QR code.
@@ -509,7 +511,7 @@ fn open_firewall(helper: &Path, remote: bool, nearby: bool) {
         if !wanted {
             continue;
         }
-        let open = |protocol: &str, port: Option<u16>, from: &str| {
+        let open = |protocol: &str, port: Option<&str>, from: &str| {
             let port = port.map(|port| format!("localport={port}"));
             let mut arguments = vec!["add", "rule", &name, "dir=in", "action=allow", protocol];
             arguments.extend(port.as_deref());
@@ -518,13 +520,15 @@ fn open_firewall(helper: &Path, remote: bool, nearby: bool) {
         };
         if rule == RULE {
             // (What phones ask of it, and their looking for it when its address has changed.)
-            open("protocol=TCP", Some(PORT), "remoteip=localsubnet");
-            open("protocol=UDP", Some(PORT), "remoteip=localsubnet");
+            open("protocol=TCP", Some(&PORT.to_string()), "remoteip=localsubnet");
+            open("protocol=UDP", Some(&PORT.to_string()), "remoteip=localsubnet");
         } else {
-            // (What devices send and ask of it, on the port it receives on, another where that one was taken; and
-            // their saying they are there.)
-            open("protocol=TCP", None, "remoteip=any");
-            open("protocol=UDP", Some(NEARBY_PORT), "remoteip=localsubnet");
+            // (What devices send and ask of it: from any address on its own ports, from the local network on another
+            // it receives on where all of those were taken; and their saying they are there. The phones' port stays
+            // the local network's alone.)
+            open("protocol=TCP", Some(NEARBY_OWN_PORTS), "remoteip=any");
+            open("protocol=TCP", None, "remoteip=localsubnet");
+            open("protocol=UDP", Some(&NEARBY_PORT.to_string()), "remoteip=localsubnet");
         }
     }
 }
@@ -541,8 +545,9 @@ pub fn keep_firewall() {
 /// The helper set to run for phones (`remote`), for devices nearby to send to it (`nearby`), and to send to devices
 /// nearby while they may not (`send`), each as asked, or else as it is: told what it runs for, the firewall opened for
 /// it as each needs (closed as none does): to the local network for phones, which control this PC; to every address
-/// for what devices send and ask (a device added by its address may be on another network, as across a campus: what a
-/// device not trusted sends is asked about, wherever it is), and to the local network for their saying they are there,
+/// for what devices send and ask on the helper's own nearby ports (a device added by its address may be on another
+/// network, as across a campus: what a device not trusted sends is asked about, wherever it is), and to the local
+/// network on any other it receives on and for their saying they are there,
 /// and its task made and run anew while any is on (so it takes what it was told), else stopped and gone. Whether each
 /// is on then.
 fn set(remote: Option<bool>, nearby: Option<bool>, send: Option<bool>) -> (bool, bool, bool) {

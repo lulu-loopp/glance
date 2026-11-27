@@ -181,9 +181,9 @@ pub enum Unreached {
 }
 
 /// What the device at `at` says of itself (`info`), reached by its address alone: over HTTPS, its fingerprint the
-/// one of the certificate it presented (one that says it is another's is no LocalSend device); where it does not speak
-/// TLS there (a LocalSend with encryption off), over plain HTTP, its fingerprint as it says. Its port and protocol
-/// are set as it was reached.
+/// one of the certificate it presented (one that says it is another's is no LocalSend device); where no TLS handshake
+/// is made there (a LocalSend with encryption off answers a TLS greeting with an error, or drops the connection), over
+/// plain HTTP, its fingerprint as it says. Its port and protocol are set as it was reached.
 pub fn reached(own: &tls::Own, at: SocketAddr) -> Result<Info, Unreached> {
     let socket = TcpStream::connect_timeout(&at, REACH).map_err(|_| Unreached::Nothing)?;
     let _ = socket.set_read_timeout(Some(ANSWER));
@@ -196,31 +196,34 @@ pub fn reached(own: &tls::Own, at: SocketAddr) -> Result<Info, Unreached> {
             _ => Err(Unreached::NotLocalSend),
         }
     };
-    match asked(rustls::StreamOwned::new(tls, socket), "GET", "/info", &http::host_of(at.ip()), b"") {
-        Ok(answer) => {
-            let mut said = info(Ok(answer))?;
-            let proven = seen.fingerprint().ok_or(Unreached::NotLocalSend)?;
-            if !said.fingerprint.eq_ignore_ascii_case(&proven) {
-                return Err(Unreached::NotLocalSend);
-            }
-            said.fingerprint = proven;
-            said.port = Some(at.port());
-            said.protocol = Some("https".into());
-            Ok(said)
+    let mut stream = rustls::StreamOwned::new(tls, socket);
+    let shaken = (|| -> std::io::Result<()> {
+        while stream.conn.is_handshaking() {
+            stream.conn.complete_io(&mut stream.sock)?;
         }
-        // (No TLS spoken there, the handshake fails on what came: asked again over plain HTTP.)
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            let socket = TcpStream::connect_timeout(&at, REACH).map_err(|_| Unreached::Nothing)?;
-            let _ = socket.set_read_timeout(Some(ANSWER));
-            let _ = socket.set_write_timeout(Some(ANSWER));
-            let mut said = info(asked(socket, "GET", "/info", &http::host_of(at.ip()), b""))?;
-            said.fingerprint = said.fingerprint.to_ascii_uppercase();
-            said.port = Some(at.port());
-            said.protocol = Some("http".into());
-            Ok(said)
+        Ok(())
+    })();
+    if shaken.is_ok() {
+        // (Spoken over TLS: what is said there is what it is, nothing asked over plain HTTP.)
+        let mut said = info(asked(stream, "GET", "/info", &http::host_of(at.ip()), b""))?;
+        let proven = seen.fingerprint().ok_or(Unreached::NotLocalSend)?;
+        if !said.fingerprint.eq_ignore_ascii_case(&proven) {
+            return Err(Unreached::NotLocalSend);
         }
-        Err(_) => Err(Unreached::NotLocalSend),
+        said.fingerprint = proven;
+        said.port = Some(at.port());
+        said.protocol = Some("https".into());
+        return Ok(said);
     }
+    // (No TLS spoken there: asked again over plain HTTP.)
+    let socket = TcpStream::connect_timeout(&at, REACH).map_err(|_| Unreached::Nothing)?;
+    let _ = socket.set_read_timeout(Some(ANSWER));
+    let _ = socket.set_write_timeout(Some(ANSWER));
+    let mut said = info(asked(socket, "GET", "/info", &http::host_of(at.ip()), b""))?;
+    said.fingerprint = said.fingerprint.to_ascii_uppercase();
+    said.port = Some(at.port());
+    said.protocol = Some("http".into());
+    Ok(said)
 }
 
 /// Tells the device at `address` (which announced `info`) of this PC (`register`): what it says of itself back.

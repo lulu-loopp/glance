@@ -15,12 +15,16 @@ class AddressTest {
         assertEquals("2001:da8:215:4a07:0:0:0:1c" to null, read("2001:da8:215:4a07::1c"))
         assertEquals("2001:da8:0:0:0:0:0:1" to null, read("[2001:da8::1]"))
         assertEquals("2001:da8:0:0:0:0:0:1" to 53318, read("[2001:da8::1]:53318"))
+        assertEquals("2408:8207:2461:9e30:8e06:5faa:54d2:b4c7" to null, read("2408:8207:2461:9E30:8e06:5faa:54d2:b4c7"))
+        assertEquals("0:0:0:0:0:0:0:1" to null, read("::1"))
+        assertEquals("1:0:0:0:0:0:0:0" to null, read("1::"))
+        assertEquals("10.0.0.1" to null, read("::ffff:10.0.0.1"))
     }
 
-    /** What is no address (a name, an address cut short, a number too large, a port 0) is none, and no name is looked up. */
+    /** What is no address (a name, an address cut short or too long, a number too large, a port 0, a network named) is none, and no name is looked up. */
     @Test
     fun whatIsNoAddressIsNone() {
-        for (typed in listOf("", "实验室电脑", "lab-pc", "10.21.140", "10.21.140.256", "10.21.140.12:0", "10.21.140.12:70000", "[2001:da8::1", "[2001:da8::1]x", "2001:da8::zz", "localhost")) {
+        for (typed in listOf("", "实验室电脑", "lab-pc", "10.21.140", "10.21.140.256", "10.21.140.12:0", "10.21.140.12:70000", "[2001:da8::1", "[2001:da8::1]x", "2001:da8::zz", "localhost", "2001:db8:::1", ":2001:db8::1", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::8", "12345::1", "fe80::1%wlan0", "::ffff:10.0.0.256", "2001:db8::1::2")) {
             assertNull(typed, Address.parse(typed))
         }
     }

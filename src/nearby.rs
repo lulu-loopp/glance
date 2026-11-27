@@ -323,11 +323,14 @@ pub fn add(job: u64, address: &str) {
     }
 }
 
-/// How adding `job` went no longer shown.
+/// How adding `job` went no longer shown, and, where it is still being tried, given up: the helper keeps nothing of
+/// it and tells no device of this PC.
 pub fn forget_adding(job: u64) {
-    change(|shown| {
-        shown.adding.remove(&job);
-    });
+    let mut going = false;
+    change(|shown| going = shown.adding.remove(&job).is_some_and(|outcome| outcome.is_none()));
+    if going {
+        cancel(job);
+    }
 }
 
 /// A device this PC may send to: its fingerprint, what it calls itself (a paired phone not found, what it was paired
@@ -731,11 +734,12 @@ fn serve() {
             crate::station::run::ask(crate::station::run::Ask::Arrivals(None));
             listen(told);
         }
-        // Gone: nothing to tell it, nothing it asked to answer, nothing coming, and what it was sending not sent.
+        // Gone: nothing to tell it, nothing it asked to answer, nothing coming, what it was sending not sent, and the
+        // devices it was trying to add not reached.
         *DOWN.lock().unwrap() = None;
         let going: Vec<u64> = shown().sendings.iter().filter(|(_, state)| !state.over()).map(|(job, _)| *job).collect();
-        let Shown { sendings, outgoing, .. } = shown();
-        change(|shown| *shown = Shown { sendings, outgoing, ..Shown::default() });
+        let left = left_by_helper(shown());
+        change(|shown| *shown = left);
         for job in going {
             sending(job, Sending::Failed { why: "the helper went".into() });
         }
@@ -745,6 +749,16 @@ fn serve() {
             let _ = DisconnectNamedPipe(down);
         }
     }
+}
+
+/// What is shown once the helper has gone: what was being sent (each told failed after), and how each adding went, one
+/// still tried not reached. Nothing else it told holds.
+fn left_by_helper(shown: Shown) -> Shown {
+    let Shown { sendings, outgoing, mut adding, .. } = shown;
+    for outcome in adding.values_mut() {
+        outcome.get_or_insert(Adding::Unreachable);
+    }
+    Shown { sendings, outgoing, adding, ..Shown::default() }
 }
 
 /// The helper's program, beside Glance's.
@@ -1047,5 +1061,18 @@ mod tests {
         assert!(matches!(came, Told::Came { ref session, short: None } if session == "s1"));
         let receipt: Receipt = serde_json::from_str(&format!(r#"{{"session":"s1","from":{from},"files":[{{"file":"9a.jpg","name":"a.jpg","size":5,"type":"image/jpeg"}}],"at":9}}"#)).unwrap();
         assert!(receipt.sound());
+    }
+
+    /// The helper gone while a device is tried, the adding is told as not reached (the box is not left greyed), and
+    /// one told already stays as told.
+    #[test]
+    fn an_adding_the_helper_left_is_told_not_reached() {
+        let mut shown = Shown { there: true, ..Shown::default() };
+        shown.adding.insert(1, None);
+        shown.adding.insert(2, Some(Adding::Itself));
+        shown.me = Some(Me::default());
+        let left = left_by_helper(shown);
+        assert_eq!((left.adding.get(&1), left.adding.get(&2)), (Some(&Some(Adding::Unreachable)), Some(&Some(Adding::Itself))));
+        assert!(!left.there && left.me.is_none());
     }
 }

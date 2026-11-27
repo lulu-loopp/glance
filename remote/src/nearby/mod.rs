@@ -30,6 +30,9 @@ pub const PORT: u16 = 53317;
 /// The port this PC answers on, where it is free: one of its own, so that a LocalSend app on this PC, started after
 /// Glance's helper, still has its own.
 pub const OWN_PORT: u16 = 53320;
+/// The ports this PC answers on, the first free of them (`OWN_PORT` first): the firewall lets devices on other
+/// networks reach these alone (see `phone::open_firewall` in Glance), not the phones' port.
+pub const OWN_PORTS: std::ops::RangeInclusive<u16> = OWN_PORT..=OWN_PORT + 9;
 /// The protocol's version this PC speaks.
 pub const VERSION: &str = "2.1";
 const API: &str = "/api/localsend/v2";
@@ -91,6 +94,10 @@ pub struct Device {
     pub glance: bool,
     #[serde(skip)]
     pub heard: Instant,
+    /// It proved it holds the certificate of its fingerprint where it was heard (it presented it, or was reached
+    /// pinned to it): what anyone only says of it then moves it nowhere (see `Receiver::heard`).
+    #[serde(skip)]
+    pub proven: bool,
 }
 
 /// Who sends: what they said of themselves, from where, and whether their fingerprint is theirs beyond doubt (they
@@ -618,7 +625,10 @@ impl Receiver {
     }
 
     /// A device heard of (it registered, or announced itself): known as it says, at the address it spoke from (where
-    /// it presented a certificate, by that one's fingerprint, whatever it said).
+    /// it presented a certificate, by that one's fingerprint, whatever it said). A device known by its certificate (one
+    /// added by its address over HTTPS, or one heard proven lately) is moved only by what proves it: what anyone only
+    /// says of it, from elsewhere or as speaking otherwise, is not taken (files sent where it was said to be would go to
+    /// whoever said so), and said from where it was proven, as it spoke there, keeps it heard.
     pub fn heard(&self, info: &Info, address: IpAddr, verified: Option<&str>) {
         let fingerprint = verified.map_or_else(|| info.fingerprint.to_ascii_uppercase(), str::to_string);
         if fingerprint.is_empty() || fingerprint.eq_ignore_ascii_case(&self.info.fingerprint) {
@@ -634,11 +644,22 @@ impl Receiver {
             https: info.protocol.as_deref() != Some("http"),
             glance: info.glance,
             heard: Instant::now(),
+            proven: verified.is_some(),
         };
+        let held_added = || self.added().iter().any(|added| added.https && added.fingerprint.eq_ignore_ascii_case(&fingerprint));
         let changed = {
             let mut devices = self.devices.lock().unwrap();
-            let changed = devices.get(&fingerprint).is_none_or(|was| was.alias != device.alias || was.address != device.address || was.port != device.port);
-            devices.insert(fingerprint.clone(), device.clone());
+            let was = devices.get(&fingerprint).filter(|was| was.heard.elapsed() < discover::FRESH);
+            let mut device = device.clone();
+            if !device.proven {
+                let there = was.is_some_and(|was| was.proven && was.address == device.address && was.port == device.port && was.https == device.https);
+                if !there && (was.is_some_and(|was| was.proven) || held_added()) {
+                    return;
+                }
+                device.proven = there;
+            }
+            let changed = was.is_none_or(|was| was.alias != device.alias || was.address != device.address || was.port != device.port);
+            devices.insert(fingerprint.clone(), device);
             changed
         };
         // A device added by its address that proved itself (a certificate presented, or reached pinned to it): kept as
@@ -654,6 +675,20 @@ impl Receiver {
             });
         }
         if changed {
+            self.tell_devices();
+        }
+    }
+
+    /// The devices not heard within `discover::FRESH` let go, Glance told where any were (they are listed no longer,
+    /// a device added shown as not answering): looked at now and then.
+    pub fn let_go_quiet(&self) {
+        let gone = {
+            let mut devices = self.devices.lock().unwrap();
+            let before = devices.len();
+            devices.retain(|_, device| device.heard.elapsed() < discover::FRESH);
+            devices.len() != before
+        };
+        if gone {
             self.tell_devices();
         }
     }

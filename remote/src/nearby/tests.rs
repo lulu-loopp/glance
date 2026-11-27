@@ -72,7 +72,7 @@ fn thinking_on(name: &str, answer: Option<Answer>, thinks: Duration, kept: Kept,
     std::thread::spawn(move || serving.serve(listener));
     let sender = tls::Own::in_folder(&dir.join("sender")).unwrap();
     let me = Info { alias: "Galaxy Z Fold6".into(), device_model: Some("Samsung".into()), device_type: Some("mobile".into()), fingerprint: sender.fingerprint.clone(), port: Some(1), ..Info::default() };
-    let device = Device { fingerprint: receiver.own.fingerprint.clone(), alias: "Glance PC".into(), model: None, kind: None, address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: true, heard: Instant::now() };
+    let device = Device { fingerprint: receiver.own.fingerprint.clone(), alias: "Glance PC".into(), model: None, kind: None, address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: true, heard: Instant::now(), proven: false };
     Both { receiver, heard, kept, sender, me, device }
 }
 
@@ -396,7 +396,7 @@ fn asking_for_a_pin(own: &tls::Own) -> Device {
             });
         }
     });
-    Device { fingerprint: own.fingerprint.clone(), alias: "iPhone 15".into(), model: None, kind: Some("mobile".into()), address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: false, heard: Instant::now() }
+    Device { fingerprint: own.fingerprint.clone(), alias: "iPhone 15".into(), model: None, kind: Some("mobile".into()), address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: false, heard: Instant::now(), proven: false }
 }
 
 /// Gives the PINs in `given`, one each time a PIN is asked for (cancels the sending where none is left), and keeps the
@@ -516,7 +516,7 @@ fn a_device_added_by_its_address_is_kept_and_finds_this_pc() {
     let there = thinking_on("add-there", None, Duration::ZERO, Kept { on: true, ..Kept::default() }, v6);
     let at_v6 = format!("[::1]:{}", there.device.port);
     let fingerprint = there.receiver.own.fingerprint.clone();
-    assert_eq!(this.receiver.add(&at_v6, &[]), Adding::Added { fingerprint: fingerprint.clone(), known: false });
+    assert_eq!(this.receiver.add(&at_v6, &[], &send::Job::default()), Some(Adding::Added { fingerprint: fingerprint.clone(), known: false }));
     let kept = this.kept.lock().unwrap().added.clone();
     assert_eq!(kept.len(), 1);
     assert_eq!((kept[0].fingerprint.as_str(), kept[0].alias.as_str(), kept[0].https), (fingerprint.as_str(), "Glance PC", true));
@@ -527,15 +527,15 @@ fn a_device_added_by_its_address_is_kept_and_finds_this_pc() {
     assert!(this.heard.events.lock().unwrap().iter().any(|event| matches!(event, Event::Devices { added, .. } if added.iter().any(|added| added.fingerprint == fingerprint))));
 
     // Added again, at the address typed without brackets or port, the port looked for as given.
-    assert_eq!(this.receiver.add(" ::1 ", &[1, there.device.port]), Adding::Added { fingerprint: fingerprint.clone(), known: true });
+    assert_eq!(this.receiver.add(" ::1 ", &[1, there.device.port], &send::Job::default()), Some(Adding::Added { fingerprint: fingerprint.clone(), known: true }));
     assert_eq!(this.kept.lock().unwrap().added.len(), 1);
 
-    assert_eq!(this.receiver.add(&format!("127.0.0.1:{}", this.device.port), &[]), Adding::Itself);
-    assert_eq!(this.receiver.add("10.21.140", &[]), Adding::NotAnAddress);
+    assert_eq!(this.receiver.add(&format!("127.0.0.1:{}", this.device.port), &[], &send::Job::default()), Some(Adding::Itself));
+    assert_eq!(this.receiver.add("10.21.140", &[], &send::Job::default()), Some(Adding::NotAnAddress));
     let closed = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let nobody = closed.local_addr().unwrap();
     drop(closed);
-    assert_eq!(this.receiver.add(&nobody.to_string(), &[]), Adding::Unreachable);
+    assert_eq!(this.receiver.add(&nobody.to_string(), &[], &send::Job::default()), Some(Adding::Unreachable));
     // (Something that answers every request with a page not found, over plain HTTP: no LocalSend device.)
     let other = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let other_at = other.local_addr().unwrap();
@@ -547,7 +547,7 @@ fn a_device_added_by_its_address_is_kept_and_finds_this_pc() {
             let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
     });
-    assert_eq!(this.receiver.add(&other_at.to_string(), &[]), Adding::NotLocalSend);
+    assert_eq!(this.receiver.add(&other_at.to_string(), &[], &send::Job::default()), Some(Adding::NotLocalSend));
     assert_eq!(this.kept.lock().unwrap().added.len(), 1);
 }
 
@@ -583,4 +583,97 @@ fn a_device_added_is_not_moved_by_what_another_only_says() {
     assert_eq!((kept.alias.as_str(), kept.addresses.as_slice()), ("实验室电脑", &[at][..]));
     this.receiver.heard(&said, IpAddr::from([10, 9, 9, 9]), Some("AB"));
     assert_eq!(this.kept.lock().unwrap().added[0].addresses.first(), Some(&"10.9.9.9:53320".parse().unwrap()));
+}
+
+/// What a device only says (no certificate presented, a multicast announcement, a register with none) does not move
+/// a device known by its certificate (one added by its address over HTTPS, or one heard proven lately) to where it is
+/// said to be, nor have it sent to over plain HTTP: anyone on the network could say so, and files sent there would
+/// go to them. Said from where it was proven, speaking as it did, it keeps it heard.
+#[test]
+fn what_a_device_only_says_moves_no_device_known_by_its_certificate() {
+    let this = both("only-says", None, Kept { on: true, ..Kept::default() });
+    let at: std::net::SocketAddr = "10.21.140.12:53320".parse().unwrap();
+    this.kept.lock().unwrap().added.push(Added { fingerprint: "AB".into(), alias: "实验室电脑".into(), https: true, addresses: vec![at], ..Added::default() });
+    let plain = Info { alias: "实验室电脑".into(), fingerprint: "AB".into(), port: Some(53320), protocol: Some("http".into()), ..Info::default() };
+    this.receiver.heard(&plain, IpAddr::from([10, 9, 9, 9]), None);
+    assert!(this.receiver.devices_now().iter().all(|device| device.fingerprint != "AB"), "a device added is not sent to where another only says it is");
+
+    // (A device found and proven: heard where it holds its certificate, then only said to be elsewhere, over plain HTTP.)
+    let proven = Info { alias: "Pixel 9".into(), fingerprint: "CD".into(), port: Some(53317), protocol: Some("https".into()), ..Info::default() };
+    this.receiver.heard(&proven, IpAddr::from([10, 0, 0, 5]), Some("CD"));
+    this.receiver.heard(&Info { protocol: Some("http".into()), ..proven.clone() }, IpAddr::from([10, 0, 0, 66]), None);
+    this.receiver.heard(&proven, IpAddr::from([10, 0, 0, 66]), None);
+    let device = this.receiver.devices_now().into_iter().find(|device| device.fingerprint == "CD").unwrap();
+    assert_eq!((device.address, device.https), (IpAddr::from([10, 0, 0, 5]), true));
+    // (Said again from where it was proven: heard, and proven still.)
+    this.receiver.heard(&Info { alias: "Pixel 9 Pro".into(), ..proven.clone() }, IpAddr::from([10, 0, 0, 5]), None);
+    let device = this.receiver.devices_now().into_iter().find(|device| device.fingerprint == "CD").unwrap();
+    assert_eq!((device.alias.as_str(), device.proven), ("Pixel 9 Pro", true));
+    // (Proven elsewhere: moved.)
+    this.receiver.heard(&proven, IpAddr::from([10, 0, 0, 66]), Some("CD"));
+    assert_eq!(this.receiver.devices_now().into_iter().find(|device| device.fingerprint == "CD").unwrap().address, IpAddr::from([10, 0, 0, 66]));
+    // (A device that never proved itself is known as it says, where it says.)
+    let unproven = Info { alias: "LocalSend".into(), fingerprint: "EF".into(), port: Some(53317), ..Info::default() };
+    this.receiver.heard(&unproven, IpAddr::from([10, 0, 0, 7]), None);
+    this.receiver.heard(&unproven, IpAddr::from([10, 0, 0, 8]), None);
+    assert_eq!(this.receiver.devices_now().into_iter().find(|device| device.fingerprint == "EF").unwrap().address, IpAddr::from([10, 0, 0, 8]));
+}
+
+/// A LocalSend with encryption off (Dart's plain HTTP server) closes the connection on a TLS greeting rather than
+/// answering it: added by its address, it is asked again over plain HTTP, and kept as speaking so.
+#[test]
+fn a_device_that_speaks_plain_http_is_added_though_it_closes_on_tls() {
+    let this = both("plain-this", None, Kept { on: true, ..Kept::default() });
+    let plain = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let plain_at = plain.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in plain.incoming().flatten() {
+            let mut stream = stream;
+            let mut buffer = [0u8; 2048];
+            let Ok(read) = stream.read(&mut buffer) else { continue };
+            // (A TLS record: not a method it knows, the connection dropped.)
+            if read == 0 || buffer[0] == 0x16 {
+                continue;
+            }
+            let body = json!({ "alias": "Old Laptop", "version": "2.0", "fingerprint": "plain-fp", "deviceType": "laptop", "port": plain_at.port(), "protocol": "http" }).to_string();
+            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    let outcome = this.receiver.add(&plain_at.to_string(), &[], &send::Job::default());
+    assert_eq!(outcome, Some(Adding::Added { fingerprint: "PLAIN-FP".into(), known: false }));
+    let kept = this.kept.lock().unwrap().added.clone();
+    assert_eq!((kept.len(), kept[0].https), (1, false));
+}
+
+/// An adding given up while the device is tried keeps nothing and tells nothing.
+#[test]
+fn an_adding_given_up_keeps_nothing() {
+    let this = both("given-up-this", None, Kept { on: true, ..Kept::default() });
+    let there = both("given-up-there", None, Kept { on: true, ..Kept::default() });
+    let going = send::Job::default();
+    going.cancel();
+    assert_eq!(this.receiver.add(&format!("127.0.0.1:{}", there.device.port), &[], &going), None);
+    assert!(this.kept.lock().unwrap().added.is_empty());
+    assert!(there.receiver.devices_now().iter().all(|device| device.fingerprint != this.receiver.own.fingerprint));
+}
+
+/// A device no longer heard is let go once it has been quiet `discover::FRESH`, and Glance is told so (it lists it no
+/// longer, and shows a device added as not answering): nothing else need be heard first.
+#[test]
+fn a_device_gone_quiet_is_told_gone() {
+    let this = both("quiet-this", None, Kept { on: true, ..Kept::default() });
+    let heard = |fingerprint: &str| Info { alias: fingerprint.into(), fingerprint: fingerprint.into(), port: Some(53317), ..Info::default() };
+    this.receiver.heard(&heard("AB"), IpAddr::from([10, 0, 0, 5]), None);
+    this.receiver.heard(&heard("CD"), IpAddr::from([10, 0, 0, 6]), None);
+    this.receiver.let_go_quiet();
+    let told = || this.heard.events.lock().unwrap().iter().filter(|event| matches!(event, Event::Devices { .. })).count();
+    let before = told();
+    this.receiver.devices.lock().unwrap().get_mut("AB").unwrap().heard = Instant::now() - discover::FRESH;
+    this.receiver.let_go_quiet();
+    assert_eq!(told(), before + 1);
+    let last = this.heard.events.lock().unwrap().iter().rev().find_map(|event| match event { Event::Devices { devices, .. } => Some(devices.iter().map(|device| device.fingerprint.clone()).collect::<Vec<_>>()), _ => None }).unwrap();
+    assert_eq!(last, ["CD"]);
+    // (Nothing more gone: nothing told.)
+    this.receiver.let_go_quiet();
+    assert_eq!(told(), before + 1);
 }

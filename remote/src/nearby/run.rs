@@ -40,11 +40,11 @@ pub struct Running {
 pub static RUNNING: OnceLock<Arc<Running>> = OnceLock::new();
 
 /// Starts nearby transfer, as this PC called `name` unless its configuration says otherwise (as it says each time: see
-/// `Receiver::me`): its receiver on its own port (another, where that one is taken), finding devices, and Glance told
-/// and asked.
+/// `Receiver::me`): its receiver on the first of its own ports free (another, where all of them are taken: reached
+/// then from the local network alone, as the firewall lets it), finding devices, and Glance told and asked.
 pub fn start(name: &str) -> std::io::Result<()> {
     let own = tls::Own::in_folder(&crate::config::folder())?;
-    let listener = listening(super::OWN_PORT).or_else(|_| listening(0))?;
+    let listener = super::OWN_PORTS.map(listening).find_map(Result::ok).map_or_else(|| listening(0), Ok)?;
     let port = listener.local_addr()?.port();
     let info = Info {
         alias: name.to_string(),
@@ -76,6 +76,7 @@ pub fn start(name: &str) -> std::io::Result<()> {
     std::thread::spawn(move || loop {
         std::thread::sleep(EXPIRE_EVERY);
         receiver.expire();
+        receiver.let_go_quiet();
     });
     discovery.announce();
     let reaching = RUNNING.get().expect("nearby transfer is running").clone();
@@ -130,10 +131,15 @@ impl Running {
                 std::thread::spawn(move || reaching.reach_added());
             }
             Command::Add { job, address } => {
+                let going = Arc::new(send::Job::default());
+                self.jobs.lock().unwrap().insert(job, going.clone());
                 let running = self.clone();
                 std::thread::spawn(move || {
-                    let outcome = running.receiver.add(&address, &PORTS_TRIED);
-                    running.told.tell(Event::Added { job, outcome });
+                    let outcome = running.receiver.add(&address, &PORTS_TRIED, &going);
+                    running.jobs.lock().unwrap().remove(&job);
+                    if let Some(outcome) = outcome {
+                        running.told.tell(Event::Added { job, outcome });
+                    }
                 });
             }
             Command::Send { job, to, files } => {
@@ -211,25 +217,33 @@ impl Receiver {
     /// The device at `typed` (an address, see `parse_address`) added: reached by its address alone (see
     /// `send::reached`, on the port given, else on each of `ports_tried`), told of this PC (it then finds this PC as
     /// one that announced itself), and kept with the addresses it was reached at and tells of, where it was not known
-    /// already (found nearby, or added before).
-    pub fn add(&self, typed: &str, ports_tried: &[u16]) -> Adding {
-        let Some((ip, port)) = parse_address(typed) else { return Adding::NotAnAddress };
+    /// already (found nearby, or added before). Given up meanwhile (`going` cancelled), nothing: nothing is kept and no
+    /// device told.
+    pub fn add(&self, typed: &str, ports_tried: &[u16], going: &send::Job) -> Option<Adding> {
+        let Some((ip, port)) = parse_address(typed) else { return Some(Adding::NotAnAddress) };
         let ports = port.map_or(ports_tried.to_vec(), |port| vec![port]);
         let mut reached = Err(send::Unreached::Nothing);
         for port in ports {
+            if going.cancelled() {
+                return None;
+            }
             reached = send::reached(&self.own, SocketAddr::new(ip, port));
             // (Something answered there: what it is, it is, on any other port too.)
             if reached != Err(send::Unreached::Nothing) {
                 break;
             }
         }
+        // (Given up meanwhile: nothing kept, nothing told.)
+        if going.cancelled() {
+            return None;
+        }
         let info = match reached {
             Ok(info) => info,
-            Err(send::Unreached::Nothing) => return Adding::Unreachable,
-            Err(send::Unreached::NotLocalSend) => return Adding::NotLocalSend,
+            Err(send::Unreached::Nothing) => return Some(Adding::Unreachable),
+            Err(send::Unreached::NotLocalSend) => return Some(Adding::NotLocalSend),
         };
         if info.fingerprint.eq_ignore_ascii_case(&self.info.fingerprint) {
-            return Adding::Itself;
+            return Some(Adding::Itself);
         }
         let fingerprint = info.fingerprint.clone();
         let https = info.protocol.as_deref() != Some("http");
@@ -248,7 +262,7 @@ impl Receiver {
         }
         // Told of this PC, as it is now and then (`reach_added`): found by it, and heard as it answers.
         self.tell_added(&fingerprint, at, &info);
-        Adding::Added { fingerprint, known }
+        Some(Adding::Added { fingerprint, known })
     }
 
     /// The device of `fingerprint`, at `at`, as `info` says it speaks, told of this PC: heard as it answers (proven,

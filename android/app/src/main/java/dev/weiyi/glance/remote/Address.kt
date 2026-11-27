@@ -4,7 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.system.OsConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -18,7 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -166,10 +172,31 @@ object Address {
         return InetAddress.getByAddress(parts.map { it.toInt().toByte() }.toByteArray())
     }
 
-    /** An IPv6 address (its characters those of one alone, so that nothing is looked up), an IPv4 one it maps read as that. */
+    /**
+     * An IPv6 address (eight groups of up to four hex digits, "::" standing once for one or more of zeros, the last two
+     * written as an IPv4 address or not), read here, so that nothing is ever looked up (Android looks up as a name what
+     * it cannot read as an address); an IPv4 one it maps read as that.
+     */
     private fun v6(text: String): InetAddress? {
-        if (!text.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' } || text.count { it == ':' } < 2) return null
-        return runCatching { InetAddress.getByName(text) }.getOrNull()
+        val last = text.substringAfterLast(':')
+        val v4 = if (last.contains('.')) v4(last)?.address ?: return null else null
+        val groups = if (v4 != null) text.dropLast(last.length) + "0:0" else text
+        val halves = groups.split("::")
+        if (halves.size > 2) return null
+        fun read(part: String): List<Int>? = if (part.isEmpty()) emptyList() else part.split(':').map { group ->
+            if (group.length !in 1..4 || !group.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) return null
+            group.toInt(16)
+        }
+        val head = read(halves[0]) ?: return null
+        val tail = if (halves.size == 2) read(halves[1]) ?: return null else emptyList()
+        val all = when {
+            halves.size == 1 && head.size == 8 -> head
+            halves.size == 2 && head.size + tail.size <= 7 -> head + List(8 - head.size - tail.size) { 0 } + tail
+            else -> return null
+        }
+        val bytes = all.flatMap { listOf((it shr 8).toByte(), it.toByte()) }.toByteArray()
+        v4?.copyInto(bytes, 12)
+        return InetAddress.getByAddress(bytes)
     }
 
     // ---- Reaching a device by its address ----
@@ -240,28 +267,41 @@ object Address {
     /**
      * The device at [typed] (see [parse]) added: reached by its address alone (on the port given, else Glance's PCs'
      * then LocalSend's), told of this phone (it finds this phone then), and kept, where it was not known already (found
-     * nearby, a paired PC, or added before). Blocks: called off the main thread.
+     * nearby, a paired PC, or added before). Given up meanwhile ([going] no longer), nothing: nothing kept, no device
+     * told. Blocks: called off the main thread.
      */
-    fun add(context: Context, typed: String): Outcome {
+    fun add(context: Context, typed: String, going: () -> Boolean): Outcome? {
         val (address, port) = parse(typed) ?: return Outcome.NotAnAddress
         val host = plain(address)
         var reached: Reached = Reached.Nothing
         for (tried in port?.let { listOf(it) } ?: listOf(GLANCE_PORT, Lan.PORT)) {
+            if (!going()) return null
             reached = reach(host, tried)
             // (Something answered there: what it is, it is, on any other port too.)
             if (reached != Reached.Nothing) break
         }
+        if (!going()) return null
         val info = (reached as? Reached.Device)?.info ?: return Outcome.Unreachable
         if (info.fingerprint.equals(Own.fingerprint(), ignoreCase = true)) return Outcome.Itself
         val paired = Pcs.fingerprints(context).values.any { it.equals(info.fingerprint, ignoreCase = true) }
-        val known = paired || Receiver.devices.value.any { it.fingerprint.equals(info.fingerprint, ignoreCase = true) } || all(context).any { it.fingerprint.equals(info.fingerprint, ignoreCase = true) }
-        if (!known) {
-            val told = info.addresses.filter { split(it) != null }
-            keep(context, all(context) + Added(info.fingerprint, info.alias, info.deviceModel, info.deviceType, info.glance, info.https, (listOf(at(host, info.port ?: Lan.PORT)) + told).distinct().take(MOST)))
-        }
+        val found = Receiver.devices.value.any { it.fingerprint.equals(info.fingerprint, ignoreCase = true) }
+        val told = info.addresses.filter { split(it) != null }
+        val known = paired || found || !keepNew(context, Added(info.fingerprint, info.alias, info.deviceModel, info.deviceType, info.glance, info.https, (listOf(at(host, info.port ?: Lan.PORT)) + told).distinct().take(MOST)))
         tell(context, info.fingerprint, host, info.port ?: Lan.PORT, info.https)
         return if (known) Outcome.Listed else Outcome.Added
     }
+
+    /** [added] kept, where no device of its fingerprint is (read and written as one, so that nothing kept meanwhile is lost). Whether it was. */
+    @Synchronized
+    private fun keepNew(context: Context, added: Added): Boolean {
+        val list = all(context)
+        if (list.any { it.fingerprint.equals(added.fingerprint, ignoreCase = true) }) return false
+        keep(context, list + added)
+        return true
+    }
+
+    /** Whether the device of [fingerprint] was added over HTTPS: known by its certificate, moved by nothing it only says (see [Receiver.heard]). */
+    fun held(context: Context, fingerprint: String) = all(context).any { it.https && it.fingerprint.equals(fingerprint, ignoreCase = true) }
 
     /** The device of [fingerprint] at [host]:[port] told of this phone, and heard as it answers (by its certificate, over HTTPS). Whether it answered. */
     private fun tell(context: Context, fingerprint: String, host: String, port: Int, https: Boolean): Boolean {
@@ -332,7 +372,30 @@ private const val COPIED_FOR = 2000L
 @Composable
 fun MyAddresses() {
     val context = LocalContext.current
-    val mine = remember { Address.mine(context) }
+    var mine by remember { mutableStateOf(Address.mine(context)) }
+    // (Read again as a network comes, goes or changes its addresses while the card is shown.)
+    DisposableEffect(Unit) {
+        val networks = context.getSystemService(ConnectivityManager::class.java)
+        val watching = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                mine = Address.mine(context)
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) {
+                mine = Address.mine(context)
+            }
+
+            override fun onLost(network: Network) {
+                mine = Address.mine(context)
+            }
+        }
+        val request = NetworkRequest.Builder().removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addTransportType(NetworkCapabilities.TRANSPORT_WIFI).addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build()
+        networks?.registerNetworkCallback(request, watching)
+        onDispose { networks?.unregisterNetworkCallback(watching) }
+    }
+    val on by Receiver.on.collectAsState()
+    // (Where this phone receives on a port not looked on for an address alone, given with it.)
+    val port = remember(on) { Receiver.port() }
     var copied by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(copied) {
         if (copied != null) {
@@ -342,11 +405,12 @@ fun MyAddresses() {
     }
     Line(stringResource(R.string.near_addresses), stringResource(if (mine.isEmpty()) R.string.near_addresses_none else R.string.near_addresses_what)) {}
     for (address in mine) {
+        val given = Address.shown(Address.at(address.address, port))
         Rule()
-        Line(address.address, "${address.network} · ${if (address.v6) "IPv6" else "IPv4"}") {
-            Words(stringResource(if (copied == address.address) R.string.copied else R.string.copy), Accent) {
-                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("IP", address.address))
-                copied = address.address
+        Line(given, "${address.network} · ${if (address.v6) "IPv6" else "IPv4"}") {
+            Words(stringResource(if (copied == given) R.string.copied else R.string.copy), Accent) {
+                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("IP", given))
+                copied = given
             }
         }
     }
@@ -370,7 +434,7 @@ fun AddByAddress(dismiss: () -> Unit) {
         said = context.getString(R.string.address_trying)
         scope.launch {
             val written = typed.trim()
-            val outcome = withContext(Dispatchers.IO) { Address.add(context, written) }
+            val outcome = withContext(Dispatchers.IO) { Address.add(context, written) { isActive } } ?: return@launch
             trying = false
             said = when (outcome) {
                 Address.Outcome.Added -> return@launch dismiss()

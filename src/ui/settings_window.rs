@@ -1560,7 +1560,7 @@ struct Renaming {
 }
 
 /// How tall each line of the address card is (DIPs: an address and what copies it).
-const ADDRESS_LINE: f32 = 40.0;
+const ADDRESS_LINE: f32 = 56.0;
 
 /// What the address card says under its name.
 fn addresses_words(lang: Lang) -> &'static str {
@@ -7621,8 +7621,9 @@ You can disconnect here at any time, and the original status line command will b
                         self.targets.push((field, Target::PcName));
                     }
                 }
-                // Where other devices reach this PC: its name and words, then each network's address on a line of its own
-                // under a hairline, what it is on at its left, what copies it at its right (said copied a while).
+                // Where other devices reach this PC: its name and words, then each address on a row of its own under a
+                // hairline, written whole (the longest IPv6 one at the least the window is sized to), what network and
+                // kind it is under it, what copies it at its right (said copied a while).
                 Row::Addresses => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let dimmed = self.dimmed(&row);
@@ -7633,7 +7634,6 @@ You can disconnect here at any time, and the original status line command will b
                     let small = Font::new(Family::Segoe, 13.0, 400.0);
                     match self.my_addresses() {
                         Some(addresses) if !addresses.is_empty() => {
-                            let networks = addresses.iter().map(|(network, _)| frame.gfx.measure(network, small)).fold(0.0f32, f32::max);
                             for (network, given) in addresses {
                                 fill(frame, palette.rule, left + 1.0, line, width - 2.0, 1.0, 0.0);
                                 let cy = line + ADDRESS_LINE / 2.0;
@@ -7641,9 +7641,7 @@ You can disconnect here at any time, and the original status line command will b
                                 let words = if copied { pick(lang, "已复制", "Copied") } else { pick(lang, "复制", "Copy") };
                                 let kind = if dimmed { Button::Quiet } else { Button::Plain };
                                 let button_left = self.button(frame, palette, words, left + width - ROW_SIDE, cy, Target::CopyAddress(given.clone()), kind, &hovered);
-                                text_centred(frame, &network, small, colors.1, left + ROW_SIDE, cy, networks + 1.0, Align::Start);
-                                let at = left + ROW_SIDE + networks + 16.0;
-                                text_centred(frame, &given, label, colors.0, at, cy, button_left - 12.0 - at, Align::Start);
+                                field_label_in(frame, colors, &given, Some(&network), label, hint, left + ROW_SIDE, cy, button_left - 12.0 - left - ROW_SIDE);
                                 line += ADDRESS_LINE;
                             }
                         }
@@ -9392,6 +9390,8 @@ mod pictures {
         for dark in [false, true] {
             for (name, page, case) in [
                 ("address-card", Page::Nearby, ""),
+                ("address-narrow", Page::Nearby, "narrow"),
+                ("address-narrow-en", Page::Nearby, "narrow-en"),
                 ("address-writing", Page::Nearby, "writing"),
                 ("address-trying", Page::Nearby, "trying"),
                 ("address-unreachable", Page::Nearby, "unreachable"),
@@ -9399,6 +9399,11 @@ mod pictures {
                 ("address-added", Page::Nearby, "added"),
                 ("address-devices", Page::Devices, ""),
             ] {
+                // (At the least the window is sized to, too: an address the longest IPv6 one is, written whole.)
+                let (w, h) = if case.starts_with("narrow") { MIN_SIZE } else { SIZE };
+                unsafe {
+                    let _ = SetWindowPos(hwnd, None, 0, 0, (w * scale) as i32, (h * scale) as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
                 with_ui(|ui| {
                     ui.turn_to(page);
                     pretend_nearby(ui, true);
@@ -9406,11 +9411,12 @@ mod pictures {
                     if let Some(nearby) = ui.nearby.as_mut() {
                         nearby.added = kept.clone();
                     }
-                    crate::nearby::pretend_addresses(Some(crate::nearby::Me { port: 53320, addresses: vec![me("以太网", "2001:da8:215:3c01::5a2"), me("以太网", "10.21.134.57"), me("WLAN", "172.20.8.31")] }), kept.clone());
+                    crate::nearby::pretend_addresses(Some(crate::nearby::Me { port: 53320, addresses: vec![me("以太网", "2408:8207:2461:9e30:8e06:5faa:54d2:b4c7"), me("以太网", "10.21.134.57"), me("WLAN", "172.20.8.31")] }), kept.clone());
                     // (The first added found nearby, the second not answering.)
                     let found = |fingerprint: &str, alias: &str, model: &str, kind: &str, glance: bool| crate::nearby::Device { fingerprint: fingerprint.into(), alias: alias.into(), model: Some(model.into()), kind: Some(kind.into()), glance };
                     crate::nearby::pretend_devices(vec![found("AA", "Galaxy Z Fold6", "Samsung", "mobile", true), found("DD", "Xiaomi 14", "Xiaomi", "mobile", true), found("FF", "实验室电脑", "Windows", "desktop", true)]);
-                    if !case.is_empty() {
+                    ui.lang = if case == "narrow-en" { Lang::En } else { Lang::Zh };
+                    if !case.is_empty() && !case.starts_with("narrow") {
                         let written = if case == "unreachable" { "10.21.140.12" } else { "2001:da8:215:4a07::1c" };
                         send::pretend_adding(ui, written, case, "FF");
                     }

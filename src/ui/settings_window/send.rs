@@ -44,6 +44,15 @@ pub(super) struct Adder {
     said: Option<AdderSaid>,
 }
 
+/// An adder closed (left, the page turned, the window closed) while it tries an address gives that adding up.
+impl Drop for Adder {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            crate::nearby::forget_adding(job);
+        }
+    }
+}
+
 /// What is said of an adding gone wrong, or of a device listed already.
 #[derive(Clone, PartialEq, Debug)]
 enum AdderSaid {
@@ -402,9 +411,8 @@ impl Ui {
         if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Address) {
             self.end_rename(false);
         }
-        if let Some(job) = self.send.adder.take().and_then(|adder| adder.job) {
-            crate::nearby::forget_adding(job);
-        }
+        // (What it was trying given up as it goes: see `Adder`'s drop.)
+        self.send.adder = None;
         self.next_frame = Instant::now();
     }
 
@@ -1096,7 +1104,7 @@ fn adder_font(bold: bool) -> Font {
 pub(super) fn pretend_adding(ui: &mut Ui, written: &str, case: &str, ring: &str) {
     let now = Instant::now();
     ui.end_rename(false);
-    ui.send.adder = Some(Adder { written: written.into(), ..Adder::default() });
+    ui.send.adder = Some(Adder { written: written.into(), job: None, said: None });
     match case {
         "writing" => {
             ui.begin_naming(Named::Address, written, ADDRESS_MOST);

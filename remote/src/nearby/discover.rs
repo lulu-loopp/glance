@@ -130,31 +130,6 @@ pub fn addresses() -> Vec<Address> {
     found
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A network's IPv6 address told to other devices is one of the Internet's (never one of the link alone, nor a
-    /// local one), the one meant to last: given by hand or by DHCP, then one made of the card's own address, then the
-    /// one valid longest (not an address made up for privacy, replaced within days).
-    #[test]
-    fn the_ipv6_address_told_is_the_one_meant_to_last() {
-        let v6 = |text: &str, prefix: i32, suffix: i32, valid: u32| V6 { address: text.parse().unwrap(), prefix, suffix, valid };
-        // (Prefix by router advertisement 4, suffix random 5: a privacy address, valid a day, beside the lasting one.)
-        let made_up = v6("2001:da8:215:3c01:a1b2:c3d4:e5f6:1", 4, 5, 86_400);
-        let lasting_random = v6("2001:da8:215:3c01:1111:2222:3333:4444", 4, 5, 2_592_000);
-        let link = v6("fe80::1", 0, 4, u32::MAX);
-        let local = v6("fd00::1", 1, 1, u32::MAX);
-        assert_eq!(lasting(&[made_up, lasting_random, link, local]), Some(lasting_random.address));
-        let card = v6("2001:da8:215:3c01:2e0:4cff:fe68:1", 4, 4, 86_400);
-        assert_eq!(lasting(&[made_up, lasting_random, card]), Some(card.address));
-        let dhcp = v6("2001:da8:215:3c01::5a2", 3, 3, 3_600);
-        assert_eq!(lasting(&[made_up, card, dhcp]), Some(dhcp.address));
-        assert_eq!(lasting(&[link, local]), None);
-        assert_eq!(lasting(&[]), None);
-    }
-}
-
 impl Discovery {
     /// Joins the group on every network, hears it (a thread), and announces this PC. Where the group's port cannot be
     /// listened on (another program holds it alone), this PC is found only by those it announces itself to.
@@ -285,5 +260,30 @@ impl Discovery {
             }
             Err(_) => self.to_all(&self.told(false)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A network's IPv6 address told to other devices is one of the Internet's (never one of the link alone, nor a
+    /// local one), the one meant to last: given by hand or by DHCP, then one made of the card's own address, then the
+    /// one valid longest (not an address made up for privacy, replaced within days).
+    #[test]
+    fn the_ipv6_address_told_is_the_one_meant_to_last() {
+        let v6 = |text: &str, prefix: i32, suffix: i32, valid: u32| V6 { address: text.parse().unwrap(), prefix, suffix, valid };
+        // (Prefix by router advertisement 4, suffix random 5: a privacy address, valid a day, beside the lasting one.)
+        let made_up = v6("2001:da8:215:3c01:a1b2:c3d4:e5f6:1", 4, 5, 86_400);
+        let lasting_random = v6("2001:da8:215:3c01:1111:2222:3333:4444", 4, 5, 2_592_000);
+        let link = v6("fe80::1", 0, 4, u32::MAX);
+        let local = v6("fd00::1", 1, 1, u32::MAX);
+        assert_eq!(lasting(&[made_up, lasting_random, link, local]), Some(lasting_random.address));
+        let card = v6("2001:da8:215:3c01:2e0:4cff:fe68:1", 4, 4, 86_400);
+        assert_eq!(lasting(&[made_up, lasting_random, card]), Some(card.address));
+        let dhcp = v6("2001:da8:215:3c01::5a2", 3, 3, 3_600);
+        assert_eq!(lasting(&[made_up, card, dhcp]), Some(dhcp.address));
+        assert_eq!(lasting(&[link, local]), None);
+        assert_eq!(lasting(&[]), None);
     }
 }
