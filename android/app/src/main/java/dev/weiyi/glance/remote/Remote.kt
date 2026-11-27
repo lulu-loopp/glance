@@ -247,7 +247,8 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState = PcState.from(said(
 /** What the PC answers [path] (see [ask]), as it says it. */
 fun Pc.said(path: String, body: JSONObject? = null): JSONObject = said(path, body, again = true)
 
-private fun Pc.said(path: String, body: JSONObject?, again: Boolean): JSONObject {
+/** The same, waited for [waits] ms at most once connected (where it is only asked whether the PC is there). */
+private fun Pc.said(path: String, body: JSONObject?, again: Boolean, waits: Int = 60000): JSONObject {
     val secret = unhex(key)
     val method = if (body == null) "GET" else "POST"
     val sent = body?.toString()?.toByteArray() ?: ByteArray(0)
@@ -261,7 +262,7 @@ private fun Pc.said(path: String, body: JSONObject?, again: Boolean): JSONObject
         (URL("http://${if (host.contains(':')) "[$host]" else host}:$port$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 2500
-            readTimeout = 60000
+            readTimeout = waits
             setRequestProperty("X-Glance-Time", time)
             setRequestProperty("X-Glance-Nonce", nonce)
             setRequestProperty("X-Glance-Sign", sign)
@@ -307,7 +308,7 @@ private fun Pc.said(path: String, body: JSONObject?, again: Boolean): JSONObject
             // Not of now, as the PC has it: asked again, for the run it says it is and by its clock.
             status == 401 && json.optString("error") == "stale" && again -> {
                 told[key] = json.optString("session") to (json.optLong("time") - System.currentTimeMillis() / 1000)
-                said(path, body, again = false)
+                said(path, body, again = false, waits)
             }
             status == 401 -> throw Failure.Refused
             else -> throw Failure.Failed(json.optString("error", status.toString()))
@@ -350,8 +351,10 @@ fun Pc.find(others: List<String> = addresses): String? = findNearby() ?: reachAt
  * does not know the key, is not taken for it, and the others are still waited for. Within 3 s.
  */
 private fun Pc.reachAt(addresses: List<String>): String? = firstProven(addresses, 3000) { address ->
+    // (Each asking ends within its own time too: none is left waiting on an address that took the connection and
+    // says nothing.)
     try {
-        copy(host = address).said("/v1/nearby")
+        copy(host = address).said("/v1/nearby", null, again = true, waits = 3000)
         true
     } catch (failed: Failure.Failed) {
         true

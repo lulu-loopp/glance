@@ -239,6 +239,19 @@ fn files_not_as_offered_are_refused() {
     assert!(files.is_empty() && short.is_some());
 }
 
+/// An upload refused before its body is read is still answered: the sender, sending on, reads the refusal (the
+/// connection is not reset under it).
+#[test]
+fn an_upload_refused_unread_is_answered() {
+    let both = both("refused-unread", Some(Answer { take: true, trust: false }), Kept { on: true, ..Kept::default() });
+    let offer = json!({ "info": { "alias": "Fold", "fingerprint": both.sender.fingerprint }, "files": { "a": { "id": "a", "fileName": "a.bin", "size": 4 << 20, "fileType": "application/octet-stream" } } }).to_string();
+    let answer: Value = serde_json::from_slice(&without_certificate(&both, "/prepare-upload", offer.as_bytes()).1).unwrap();
+    let session = answer["sessionId"].as_str().unwrap();
+    for _ in 0..5 {
+        assert_eq!(without_certificate(&both, &format!("/upload?sessionId={session}&fileId=a&token=nope"), &vec![1u8; 4 << 20]).0, 403);
+    }
+}
+
 /// The most a sending may be is what the station keeps room for (the drive leaving room too), and what Glance's app is
 /// told: an offer of that much is taken, one byte more is refused up front (403), as is a file beyond the most a file
 /// may be.
@@ -640,6 +653,10 @@ fn a_device_that_speaks_plain_http_is_added_though_it_closes_on_tls() {
             }
             let body = json!({ "alias": "Old Laptop", "version": "2.0", "fingerprint": "plain-fp", "deviceType": "laptop", "port": plain_at.port(), "protocol": "http" }).to_string();
             let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            // (Ended as a server does: what of the request is still unread read to its end, so the answer is not lost
+            // to a reset.)
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
         }
     });
     let outcome = this.receiver.add(&plain_at.to_string(), &[], &send::Job::default());
@@ -679,4 +696,23 @@ fn a_device_gone_quiet_is_told_gone() {
     // (Nothing more gone: nothing told.)
     this.receiver.let_go_quiet();
     assert_eq!(told(), before + 1);
+}
+
+/// A sending from a device that presented its certificate is cancelled only by that device presenting it again: not
+/// by another from the same address (behind the same router) presenting none.
+#[test]
+fn a_proven_sending_is_cancelled_by_its_own_device_alone() {
+    let both = both("cancel-proven", None, Kept { on: true, trusted: Vec::new(), ..Kept::default() });
+    both.kept.lock().unwrap().trust(&Sender { alias: "Fold".into(), model: None, kind: None, fingerprint: both.sender.fingerprint.clone(), verified: true, address: IpAddr::from([127, 0, 0, 1]), glance: true });
+    let offer = json!({ "info": { "alias": "Fold", "fingerprint": both.sender.fingerprint }, "files": { "a": { "id": "a", "fileName": "a.jpg", "size": 3, "fileType": "image/jpeg" } } }).to_string();
+    let (status, body) = posted(&both, "/prepare-upload", offer.as_bytes(), true);
+    assert_eq!(status, 200);
+    let answer: Value = serde_json::from_slice(&body).unwrap();
+    let session = answer["sessionId"].as_str().unwrap();
+    assert_eq!(without_certificate(&both, &format!("/cancel?sessionId={session}"), b"").0, 200);
+    assert_eq!(without_certificate(&both, "/cancel", b"").0, 200);
+    assert!(came(&both.heard).is_none(), "still going");
+    assert_eq!(posted(&both, &format!("/cancel?sessionId={session}"), b"", true).0, 200);
+    let (_, files, short) = came(&both.heard).expect("cancelled");
+    assert!(files.is_empty() && short.as_deref() == Some("cancelled by the sender"));
 }

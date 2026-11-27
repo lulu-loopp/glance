@@ -50,6 +50,9 @@ pub const ASKED_FOR: Duration = Duration::from_secs(60);
 const IDLE: Duration = Duration::from_secs(60);
 /// How long a connection may wait between one piece and the next.
 const QUIET: Duration = Duration::from_secs(30);
+/// How long what a sender still sends after its answer (an upload refused before its body was read) is read and let
+/// go of before the connection is closed.
+const LINGER: Duration = Duration::from_secs(2);
 /// Glance is told of a receiving's progress at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 /// How many connections are served at once, and how many of them one address may have.
@@ -430,8 +433,8 @@ pub struct Receiver {
     keep: Keeping,
     /// The receiving going on, and whether a device is being asked about (another meanwhile is turned away).
     session: Mutex<Option<Session>>,
-    /// The device whose sending the user is being asked about (one at a time), by its address and its fingerprint.
-    asking: Mutex<Option<(IpAddr, String)>>,
+    /// The device whose sending the user is being asked about (one at a time).
+    asking: Mutex<Option<Sender>>,
     /// The devices heard lately (see `discover`).
     pub devices: Mutex<HashMap<String, Device>>,
     /// Where other devices reach this PC, network by network (see `discover::addresses`), as last looked at.
@@ -509,6 +512,19 @@ impl Receiver {
         self.request(&mut stream, from, verified)?;
         stream.conn.send_close_notify();
         let _ = stream.flush();
+        // Closed with what the sender sent still unread, the connection would be reset, and the answer lost with it:
+        // this side is ended, and what still comes is let go of a while, till the sender closes too.
+        let socket = stream.sock;
+        socket.shutdown(std::net::Shutdown::Write)?;
+        let until = Instant::now() + LINGER;
+        let mut sink = vec![0u8; 64 << 10];
+        while let Some(left) = until.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) {
+            socket.set_read_timeout(Some(left))?;
+            match (&socket).read(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
         Ok(())
     }
 
@@ -623,19 +639,24 @@ impl Receiver {
             }
             ("POST", "/prepare-upload") => self.prepare(body, from, verified).map(Some),
             // A sending cancelled by its device: the one going on (named, or the device's, unnamed: LocalSend's
-            // earlier way), or, before any is, the asking about it. (Never a page's, which is known by no address: it
-            // cancels its own, signed, see `Receiver::cancelled_by`.)
+            // earlier way), or, before any is, the asking about it. Its device's: from its address, and presenting
+            // its certificate where it sent presenting one (another device behind the same router has its address).
+            // Never a page's, which is known by no address: it cancels its own, signed (see `Receiver::cancelled_by`).
             ("POST", "/cancel") => {
                 let id = head.query("sessionId");
-                let ours = |address: IpAddr, fingerprint: &str| address == from && page::phone_of(fingerprint).is_none();
+                let ours = |sender: &Sender| sender.address == from && page::phone_of(&sender.fingerprint).is_none() && (!sender.verified || verified.as_deref().is_some_and(|presented| presented.eq_ignore_ascii_case(&sender.fingerprint)));
                 let mut session = self.session.lock().unwrap();
-                if session.as_ref().is_some_and(|session| id.is_none_or(|id| session.id == id) && ours(session.from.address, &session.from.fingerprint)) {
+                if session.as_ref().is_some_and(|session| id.is_none_or(|id| session.id == id) && ours(&session.from)) {
                     let ended = session.take().unwrap();
                     drop(session);
                     self.end(ended, Some("cancelled by the sender".into()));
-                } else if id.is_none() && self.asking.lock().unwrap().as_ref().is_some_and(|(address, fingerprint)| ours(*address, fingerprint)) {
+                } else if id.is_none() {
                     drop(session);
-                    self.told.withdraw();
+                    // (Taken back while it is still the one asked about: held so, no other is asked about meanwhile.)
+                    let asking = self.asking.lock().unwrap();
+                    if asking.as_ref().is_some_and(ours) {
+                        self.told.withdraw();
+                    }
                 }
                 Ok(None)
             }
@@ -819,7 +840,7 @@ impl Receiver {
             if asking.is_some() {
                 return Err((409, "another device is being asked about"));
             }
-            *asking = Some((sender.address, sender.fingerprint.clone()));
+            *asking = Some(sender.clone());
         }
         let answer = self.told.ask(&Asked { from: sender.clone(), files: files.to_vec() });
         *self.asking.lock().unwrap() = None;

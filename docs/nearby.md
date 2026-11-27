@@ -647,25 +647,30 @@ has no app, needs files both ways on the page.
   page, written out: a page not served over HTTPS has no `crypto.subtle`). The request or answer carrying it is signed
   over the sealed bytes (encrypt-then-MAC). Sealed: offers, pieces both ways, and the page's `incoming` (hex). The
   pairing key reached the phone in the code's link after the `#`, never over the network.
+- **A browser, signed.** The page signs one part more than the app does, `browser`, after the session: a request
+  marked as a browser's on the way (which makes its phone a page's for good) is forged.
 - **Files from the page.** `POST /v1/send/offer`, its body sealed `{id, files: [{name, size, type}]}` or `{id,
   words}` (`id` the page's own: the same offer sent again, its answer lost, is answered as it was, nothing asked or
-  given twice): taken as the phone's files are (its 直接接收文件 switch), else asked about as any device's, never
+  given twice, and sent again while the first is still asked about it waits for the first's answer. Kept for each
+  offer and each receiving, so another tab of the same phone does not undo it): taken as the phone's files are (its 直接接收文件 switch), else asked about as any device's, never
   trusted by the answer (a page has no certificate: it is known as `web:<phone id>`). Words come whole. Files then come
   as `POST /v1/send/piece?s=<session>&f=<file>&at=<offset>`, the body a sealed piece (512 KB at most), signed over the
   SHA-256 of its body (`X-Glance-Body`): the head is checked before the body is waited for, and only then is it given
   60 s to arrive (unsigned, 5 s as any request, so no one unpaired holds the helper's room). A piece out of place is
   refused, an empty one too (but an empty file's), one sent again taken as come, the last too once the receiving
   ended (for 120 s). Into the inbox as any receiving's (marked as from the Internet, a receipt for Glance). `POST
-  /v1/send/cancel {session}` gives it up, what came of a file going. `{session: ""}` takes back an offer while the
-  user is asked about it. A LocalSend `/cancel` from the same address never touches a page's (two phones behind one
-  router share it). Callers over IPv6 are counted by their /64 in both servers' 16-at-once limit.
+  /v1/send/cancel {session}` gives it up, what came of a file going. `{session: "", offer}` takes back that offer,
+  refused when it comes (it may come after), taken back from the user while they are asked about it. A LocalSend
+  `/cancel` from the same address never touches a page's (two phones behind one router share it), nor a sending whose
+  device presented its certificate unless it presents it again. Callers over IPv6 are counted by their /64 in both servers' 16-at-once limit.
 - **Files to the page.** A paired phone's page asking `/v1/state` is open for 8 s: the helper lists it among the
   devices (`web:<id>`, kind mobile), so Glance lists it among the paired phones in every 发送到 while it is open. A
   sending to it waits (`Waiting`) and is told in the page's state (`incoming`, sealed: `{job, files: [{id, name, size,
   type, words: bool}]}`). The page fetches `POST /v1/take/piece {job, file, at}` (the answer a sealed piece, signed),
   words too (at once where the sending is words alone, else with its files once taken), `Sending` as it does. Once it
   has all it says `POST /v1/take/done {job}`: only then `Sent` (an answer lost on the way, the piece or the done is
-  asked again and answered alike). `POST /v1/take/refuse {job}` refuses it. Not fetched from for 120 s it fails.
+  asked again and answered as it ended: a sending cancelled before the page says it has it is cancelled, 410).
+  `POST /v1/take/refuse {job}` refuses it. Not fetched from for 120 s it fails.
   cancelled from Glance it is offered no more at once and told so.
 - **The page.** Two cards outside what the 2 s poll redraws: 发送到电脑 (a box "输入要发送的文字", 选择照片或文件, 发送文字,
   progress "正在发送 N%" with 取消, then "已发送 N 个文件", "等待电脑确认" where the PC asks, and why not: 电脑已拒绝接收,
@@ -673,5 +678,7 @@ has no app, needs files both ways on the page.
   and size, 拒绝 | 接收, "正在接收 N%", then 保存 per file and a picture under it as wide as the card, "长按图片可存储到
   照片。" on an iPhone, words with 复制, 关闭), a card for each sending: one taken stays with its 保存 while the next
   comes. One the PC stops offering before it is taken says 电脑已停止发送 with 关闭. A poll answer older than one already
-  taken is not taken. The remote off on the PC, the page says 手机遥控已关闭 and still sends and receives. Android's
+  taken is not taken. A sending ended or closed here stays the same sending, however late a poll answers, till a
+  poll asked after that no longer lists it (a later one of the same number, Glance started again, is another). A
+  taking that failed on the way may be taken again while the PC offers it. The remote off on the PC, the page says 手机遥控已关闭 and still sends and receives. Android's
   page offers the app for sharing from other apps and finding the PC as its address changes.

@@ -359,9 +359,9 @@ pub fn piece_from_page(session: &str, file: &str, from: &str, at: u64, bytes: &[
 }
 
 /// What a page sends, given up by it (see `Receiver::cancelled_by`).
-pub fn page_cancelled(session: &str, from: &str) {
+pub fn page_cancelled(session: &str, from: &str, offer: &str) {
     if let Some(running) = RUNNING.get() {
-        running.receiver.cancelled_by(session, from);
+        running.receiver.cancelled_by(session, from, offer);
     }
 }
 

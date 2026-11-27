@@ -73,6 +73,9 @@ pub struct Request<'a> {
     pub name: &'a str,
     /// The helper's run the request is meant for (see `Helper::session`).
     pub session: &'a str,
+    /// Whether a browser asks (the remote's page): signed as such, so that no one on the way makes an app's request
+    /// a browser's.
+    pub browser: bool,
     pub body: &'a [u8],
 }
 
@@ -88,9 +91,10 @@ fn mac(key: &[u8; 32], parts: &[&str], body: &[u8]) -> Hmac<Sha256> {
 
 /// What a request signs: its method, its path, its time, its number,
 /// which phone it is and what it is called, the run of the helper it is
-/// for, and its body.
+/// for, that a browser asks (where one does), and its body.
 fn signing(key: &[u8; 32], request: &Request) -> Hmac<Sha256> {
-    mac(key, &[request.method, request.path, request.time, request.nonce, request.phone, request.name, request.session], request.body)
+    let parts = [request.method, request.path, request.time, request.nonce, request.phone, request.name, request.session, "browser"];
+    mac(key, &parts[..if request.browser { 8 } else { 7 }], request.body)
 }
 
 /// A request's signature, in hex: what goes in its `sign`.
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     fn only_the_paired_phones_requests_are_taken_and_once() {
         let key = [7u8; 32];
-        let asked = |path: &'static str, nonce: &'static str, phone: &'static str, body: &'static [u8]| Request { method: "POST", path, time: "1000", nonce, sign: "", phone, name: "a%20phone", session: "s1", body };
+        let asked = |path: &'static str, nonce: &'static str, phone: &'static str, body: &'static [u8]| Request { method: "POST", path, time: "1000", nonce, sign: "", phone, name: "a%20phone", session: "s1", browser: false, body };
         let signed = |request: &Request| hex(&signing(&key, request).finalize().into_bytes());
         let good = asked("/v1/lights", "a1", "p1", b"{\"on\":false}");
         let sign = signed(&good);
@@ -185,6 +189,11 @@ mod tests {
         assert_eq!(verify(&key, &Request { sign: &sign, name: "another", ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
         assert_eq!(verify(&key, &Request { sign: &sign, session: "s2", ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
         assert_eq!(verify(&[8u8; 32], &Request { sign: &sign, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
+        // An app's request said on the way to be a browser's is not the app's any more, nor is a browser's said not to be.
+        assert_eq!(verify(&key, &Request { sign: &sign, browser: true, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
+        let browsing = super::sign(&key, &Request { browser: true, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") });
+        assert_eq!(verify(&key, &Request { sign: &browsing, browser: true, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Ok(1000));
+        assert_eq!(verify(&key, &Request { sign: &browsing, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
         // Not signed at all.
         assert_eq!(verify(&key, &Request { time: "", nonce: "", ..asked("/v1/sleep", "", "", b"") }), Err(Refused::Unsigned));
         // Of now, or kept and sent much later.

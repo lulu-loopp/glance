@@ -81,7 +81,7 @@ fn a_page_is_asked_about_and_what_it_gives_up_goes() {
     assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
     assert!(!both.kept.lock().unwrap().trusts(&page_sender("p2")), "a page is not trusted");
     both.receiver.piece(&session, &ids[0], &page::fingerprint("p2"), 0, b"12345").unwrap();
-    both.receiver.cancelled_by(&session, &page::fingerprint("p2"));
+    both.receiver.cancelled_by(&session, &page::fingerprint("p2"), "");
     let (_, came, short) = came(&both.heard).expect("told it ended");
     assert!(came.is_empty());
     assert_eq!(short.as_deref(), Some("cancelled by the sender"));
@@ -116,11 +116,11 @@ fn a_page_takes_back_its_offer_while_its_user_is_asked() {
     while both.receiver.asking.lock().unwrap().is_none() {
         std::thread::sleep(Duration::from_millis(20));
     }
-    both.receiver.cancelled_by("", &page::fingerprint("another"));
+    both.receiver.cancelled_by("", &page::fingerprint("another"), "o1");
     assert_eq!(without_certificate(&both, "/cancel", b"").0, 200);
     std::thread::sleep(Duration::from_millis(300));
     assert!(both.receiver.asking.lock().unwrap().is_some(), "still asked about");
-    both.receiver.cancelled_by("", &page::fingerprint("p7"));
+    both.receiver.cancelled_by("", &page::fingerprint("p7"), "o1");
     assert_eq!(offering.join().unwrap(), Err((403, "refused")));
     assert!(began.elapsed() < Duration::from_secs(5), "taken back, not answered by its user");
 }
@@ -215,4 +215,78 @@ fn callers_over_ipv6_are_counted_by_their_network() {
     assert_eq!(counted_as(one), counted_as(other));
     assert_ne!(counted_as(one), counted_as(elsewhere));
     assert_eq!(counted_as(IpAddr::from([10, 0, 0, 5])), IpAddr::from([10, 0, 0, 5]));
+}
+
+/// The same offer sent again while the first is still asked about waits for the first's answer, and is answered as
+/// it: one receiving, asked about once.
+#[test]
+fn an_offer_sent_again_while_asked_about_waits_for_its_answer() {
+    let both = Arc::new(thinking("page-again-asked", Some(Answer { take: true, trust: false }), Duration::from_millis(400), Kept { on: true, ..Kept::default() }));
+    let files = [("a.jpg".to_string(), 3, "image/jpeg".to_string())];
+    let first = { let (both, files) = (both.clone(), files.clone()); std::thread::spawn(move || both.receiver.offered_by_page("o1", page_sender("p8"), &files, None, false)) };
+    while both.receiver.asking.lock().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let again = both.receiver.offered_by_page("o1", page_sender("p8"), &files, None, false);
+    assert_eq!(again, first.join().unwrap());
+    assert!(again.unwrap().is_some());
+    assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
+}
+
+/// What one page's requests sent again are answered by is kept for each of its offers and receivings: another offer
+/// of the same phone's (another tab) does not undo it.
+#[test]
+fn what_a_page_did_is_kept_for_each_offer_and_receiving() {
+    let both = both("page-each", None, Kept { on: true, ..Kept::default() });
+    let from = page::fingerprint("p9");
+    assert_eq!(both.receiver.offered_by_page("w1", page_sender("p9"), &[], Some("one".into()), true), Ok(None));
+    assert_eq!(both.receiver.offered_by_page("w2", page_sender("p9"), &[], Some("two".into()), true), Ok(None));
+    assert_eq!(both.receiver.offered_by_page("w1", page_sender("p9"), &[], Some("one".into()), true), Ok(None));
+    assert_eq!(receipts(&both).iter().filter(|receipt| receipt.words == ["one"]).count(), 1);
+    let file = [("a.jpg".to_string(), 3, "image/jpeg".to_string())];
+    let (first, ids) = both.receiver.offered_by_page("f1", page_sender("p9"), &file, None, true).unwrap().unwrap();
+    both.receiver.piece(&first, &ids[0], &from, 0, b"abc").unwrap();
+    let (second, ids) = both.receiver.offered_by_page("f2", page_sender("p9"), &file, None, true).unwrap().unwrap();
+    both.receiver.piece(&second, &ids[0], &from, 0, b"abc").unwrap();
+    both.receiver.piece(&first, &ids[0], &from, 0, b"abc").expect("the first's last piece, sent again");
+}
+
+/// An offer a page takes back before it is asked about is refused when it comes, nothing asked, nothing given.
+#[test]
+fn an_offer_taken_back_before_it_comes_is_refused() {
+    let both = both("page-taken-back", Some(Answer { take: true, trust: false }), Kept { on: true, ..Kept::default() });
+    both.receiver.cancelled_by("", &page::fingerprint("p10"), "o1");
+    assert_eq!(both.receiver.offered_by_page("o1", page_sender("p10"), &[], Some("late".into()), false), Err((403, "withdrawn")));
+    assert!(both.heard.asked.lock().unwrap().is_empty());
+    assert_eq!(both.receiver.offered_by_page("o2", page_sender("p10"), &[], Some("another".into()), false), Ok(None));
+    assert_eq!(receipts(&both).iter().map(|receipt| receipt.words.clone()).collect::<Vec<_>>(), [["another"]], "the one taken back not given");
+}
+
+/// A sending the page says it has all of is not sent where it was cancelled meanwhile: cancelled, and the page told
+/// so. Said again once sent, it is answered alike. One never offered, or given up, is no sending.
+#[test]
+fn a_sending_cancelled_before_the_page_says_it_has_it_is_cancelled() {
+    let both = both("page-done-cancelled", None, Kept { on: true, ..Kept::default() });
+    let pages = &both.receiver.pages;
+    let heard = Arc::new(Heard::default());
+    let told: Arc<dyn Told> = heard.clone();
+    let last = |job: u64| heard.events.lock().unwrap().iter().rev().find_map(|event| match event {
+        Event::Sending { job: of, state } if *of == job => Some(state.clone()),
+        _ => None,
+    });
+    pages.seen("d1", "iPhone", IpAddr::from([127, 0, 0, 1]));
+    let words = [link::Outgoing::Words { words: "hi".into(), name: "text.txt".into() }];
+    let going = Arc::new(send::Job::default());
+    pages.offer("d1", 1, &words, going.clone(), told.clone());
+    pages.piece_of("d1", 1, 0, 0).unwrap();
+    going.cancel();
+    assert_eq!(pages.done("d1", 1), Err((410, "the sending was cancelled")));
+    assert_eq!(last(1), Some(send::State::Cancelled));
+    assert_eq!(pages.done("d1", 1), Err((404, "no such sending")));
+    pages.offer("d1", 2, &words, Arc::new(send::Job::default()), told.clone());
+    pages.piece_of("d1", 2, 0, 0).unwrap();
+    pages.done("d1", 2).unwrap();
+    pages.done("d1", 2).expect("said again");
+    assert_eq!(last(2), Some(send::State::Sent));
+    assert_eq!(pages.done("d1", 9), Err((404, "no such sending")));
 }

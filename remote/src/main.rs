@@ -333,7 +333,7 @@ impl Helper {
     /// One asked from this PC itself (`here`), as this PC, is taken by
     /// this PC's own key (see `Config::local`), which no other address may
     /// use.
-    fn admit(&self, request: &sign::Request, here: bool, browser: bool) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
+    fn admit(&self, request: &sign::Request, here: bool) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
         if request.phone == LOCAL {
             let secret = Config::load().local.as_deref().and_then(sign::key).filter(|_| here).ok_or((sign::Refused::Forged, None))?;
             let at = sign::verify(&secret, request).map_err(|refused| (refused, None))?;
@@ -373,6 +373,7 @@ impl Helper {
         // (A request that names no phone leaves the key as it is. A browser is known as one from its first asking, or,
         // paired before browsers said so, from the first that says it.)
         let taken = phone.device.is_none() && !request.phone.is_empty();
+        let browser = request.browser;
         if taken || (browser && !phone.web) {
             let (device, name) = (request.phone.to_string(), unescaped(request.name));
             let changed = Config::change(|config| {
@@ -571,10 +572,11 @@ impl Helper {
                 return Ok(answer);
             }
             ("GET", "/v1/state") => {}
-            // What a page sends, given up there: the receiving named, or the offer while the user is asked about it.
+            // What a page sends, given up there: the receiving named, or else the offer named (its own id for it).
             ("POST", "/v1/send/cancel") => {
                 let phone = paired(key)?;
-                nearby::run::page_cancelled(asked.get("session").and_then(Value::as_str).unwrap_or_default(), &nearby::page::fingerprint(&phone.id));
+                let said = |name: &str| asked.get(name).and_then(Value::as_str).unwrap_or_default();
+                nearby::run::page_cancelled(said("session"), &nearby::page::fingerprint(&phone.id), said("offer"));
                 return Ok(json!({}));
             }
             // What this PC sends a page, turned down there.
@@ -746,14 +748,14 @@ impl Helper {
         let browser = header("x-glance-browser") == "1";
         macro_rules! request {
             ($body:expr) => {
-                sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: $body }
+                sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), browser, body: $body }
             };
         }
         // A piece of a file a page sends is larger, and given longer to come over a slow network: once its head proves
         // it the page's, signed over the digest of the body to come (which is then to be that body's). Till then it is
         // given as long as any request, so that no one unpaired may hold this helper's room for longer.
         let digest = header("x-glance-body");
-        let first = piece.then(|| self.admit(&request!(digest.as_bytes()), here, browser));
+        let first = piece.then(|| self.admit(&request!(digest.as_bytes()), here));
         if first.as_ref().is_some_and(Result::is_ok) {
             by.set(std::time::Instant::now() + PIECE_ARRIVING);
         }
@@ -804,7 +806,7 @@ impl Helper {
                 use sha2::Digest;
                 if sign::hex(&sha2::Sha256::digest(&body)) == digest { Ok(admitted) } else { Err((sign::Refused::Forged, Some(admitted.secret))) }
             }),
-            None => self.admit(&request!(&body), here, browser),
+            None => self.admit(&request!(&body), here),
         };
         let (status, answer, secret) = match admitted {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
@@ -974,7 +976,7 @@ fn ask_here(config: &Config, method: &str, path: &str, body: &[u8]) -> std::io::
         let mut nonce = [0u8; 8];
         getrandom::getrandom(&mut nonce).map_err(|error| other(&error.to_string()))?;
         let (nonce, time) = (sign::hex(&nonce), sign::now().to_string());
-        let sign = sign::sign(&secret, &sign::Request { method, path, time: &time, nonce: &nonce, sign: "", phone: LOCAL, name: "", session: &session, body });
+        let sign = sign::sign(&secret, &sign::Request { method, path, time: &time, nonce: &nonce, sign: "", phone: LOCAL, name: "", session: &session, browser: false, body });
         let mut stream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], config.port)), Duration::from_secs(3))?;
         stream.set_read_timeout(Some(Duration::from_secs(90)))?;
         write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Glance-Time: {time}\r\nX-Glance-Nonce: {nonce}\r\nX-Glance-Sign: {sign}\r\nX-Glance-Session: {session}\r\nX-Glance-Phone: {LOCAL}\r\nX-Glance-Name: \r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;

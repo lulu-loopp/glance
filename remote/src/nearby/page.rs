@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -37,8 +37,8 @@ pub fn phone_of(fingerprint: &str) -> Option<&str> {
 /// A receiving a page began: its id, and each file's id. None for words, or nothing.
 pub type Begun = Option<(String, Vec<String>)>;
 
-/// An offer a page made: its id for it, how it was answered, when.
-type Answered = (String, Result<Begun, Refused>, Instant);
+/// How an offer of a page's was answered (none yet: it is being asked about), and when.
+type Answered = (Option<Result<Begun, Refused>>, Instant);
 
 /// A page open: its phone's name, where it asks from, when it last asked.
 struct Open {
@@ -47,15 +47,20 @@ struct Open {
     seen: Instant,
 }
 
-/// The pages open, and what this PC offers each (see `Offer`), by their phones' ids. And, by the pages' fingerprints,
-/// what each last offered and how it was answered, and the receiving each last sent whole: a request of a page sent
-/// again where its answer was lost on the way is answered as it was, and nothing is done twice.
+/// The pages open, and what this PC offers each (see `Offer`), by their phones' ids. And, for a while, what a request
+/// of a page's sent again (its answer lost on the way) is answered by, so that nothing is done twice: the offers pages
+/// made, as answered (by the pages' fingerprints and their own ids for them, one sent again while the first is asked
+/// about waiting for its answer), the offers they took back, the receivings they sent whole, and how the sendings to
+/// them ended (sent, or not).
 #[derive(Default)]
 pub struct Pages {
     open: Mutex<HashMap<String, Open>>,
     offered: Mutex<HashMap<String, Offer>>,
-    answered: Mutex<HashMap<String, Answered>>,
-    finished: Mutex<HashMap<String, (String, Instant)>>,
+    answered: Mutex<HashMap<(String, String), Answered>>,
+    settled: Condvar,
+    withdrawn: Mutex<HashMap<(String, String), Instant>>,
+    finished: Mutex<HashMap<(String, String), Instant>>,
+    outcomes: Mutex<HashMap<(String, u64), (bool, Instant)>>,
 }
 
 impl Pages {
@@ -91,18 +96,30 @@ impl Receiver {
     /// where `direct` (the phone's files are, see `Phone::files`), else as the user answers (never trusted by that: a
     /// page has no certificate to trust). The receiving's id and each file's id (its place among `files`); none for
     /// words, or nothing.
-    /// The offer is known by `id`, the page's own for it: the same offer sent again is answered as it was.
+    /// The offer is known by `id`, the page's own for it: the same offer sent again is answered as it was (sent again
+    /// while the first is still asked about, as the first is answered). One the page took back is refused (see
+    /// `cancelled_by`).
     pub fn offered_by_page(&self, id: &str, sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
-        let fingerprint = sender.fingerprint.clone();
-        if let Some((_, answer, _)) = self.pages.answered.lock().unwrap().get(&fingerprint).filter(|(offer, _, _)| offer == id) {
-            return answer.clone();
+        let key = (sender.fingerprint.clone(), id.to_string());
+        let mut answered = self.pages.answered.lock().unwrap();
+        loop {
+            match answered.get(&key) {
+                Some((Some(answer), _)) => return answer.clone(),
+                Some((None, _)) => answered = self.pages.settled.wait(answered).unwrap(),
+                None => break,
+            }
         }
-        let answer = self.offered_once(sender, files, words, direct);
-        self.pages.answered.lock().unwrap().insert(fingerprint, (id.to_string(), answer.clone(), Instant::now()));
+        answered.insert(key.clone(), (None, Instant::now()));
+        drop(answered);
+        let answer = self.offered_once(&key, sender, files, words, direct);
+        self.pages.answered.lock().unwrap().insert(key, (Some(answer.clone()), Instant::now()));
+        self.pages.settled.notify_all();
         answer
     }
 
-    fn offered_once(&self, sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
+    fn offered_once(&self, key: &(String, String), sender: Sender, files: &[(String, u64, String)], words: Option<String>, direct: bool) -> Result<Begun, Refused> {
+        let withdrawn = || if self.pages.withdrawn.lock().unwrap().contains_key(key) { Err((403, "withdrawn")) } else { Ok(()) };
+        withdrawn()?;
         let kept = (self.kept)();
         if !kept.on {
             return Err((403, "not receiving"));
@@ -131,6 +148,7 @@ impl Receiver {
         if !direct {
             self.asked_about(&sender, &offered, &kept)?;
         }
+        withdrawn()?;
         if let Some(words) = words {
             self.message(sender, words);
             return Ok(None);
@@ -147,7 +165,7 @@ impl Receiver {
     pub fn piece(&self, session: &str, file: &str, from: &str, at: u64, bytes: &[u8]) -> Result<(), Refused> {
         let mut going = self.session.lock().unwrap();
         let Some(receiving) = going.as_mut().filter(|going| going.id == session) else {
-            let finished = self.pages.finished.lock().unwrap().get(from).is_some_and(|(whole, _)| whole == session);
+            let finished = self.pages.finished.lock().unwrap().contains_key(&(from.to_string(), session.to_string()));
             return if finished { Ok(()) } else { Err((403, "no such receiving")) };
         };
         if receiving.from.fingerprint != from {
@@ -193,17 +211,20 @@ impl Receiver {
         if whole {
             let ended = going.take().expect("the receiving going on");
             drop(going);
-            self.pages.finished.lock().unwrap().insert(from.to_string(), (session.to_string(), Instant::now()));
+            self.pages.finished.lock().unwrap().insert((from.to_string(), session.to_string()), Instant::now());
             self.end(ended, None);
         }
         Ok(())
     }
 
     /// The receiving `session` given up by the page of `from` (its fingerprint) that sends it. None named, its offer
-    /// while the user is asked about it.
-    pub fn cancelled_by(&self, session: &str, from: &str) {
+    /// `offer` (its own id for it) taken back: refused, or, while the user is asked about it, taken back from them.
+    pub fn cancelled_by(&self, session: &str, from: &str, offer: &str) {
         if session.is_empty() {
-            if self.asking.lock().unwrap().as_ref().is_some_and(|(_, asked)| asked == from) {
+            self.pages.withdrawn.lock().unwrap().insert((from.to_string(), offer.to_string()), Instant::now());
+            // (Taken back while it is still the one asked about: held so, no other is asked about meanwhile.)
+            let asking = self.asking.lock().unwrap();
+            if asking.as_ref().is_some_and(|asked| asked.fingerprint == from) {
                 self.told.withdraw();
             }
             return;
@@ -282,6 +303,7 @@ impl Pages {
             tell(State::Busy);
             return;
         }
+        self.outcomes.lock().unwrap().remove(&(phone.to_string(), job));
         let fetched = vec![0; sent.len()];
         crate::journal::note(format!("nearby: {} things offered to the page of {phone}", sent.len()));
         offered.insert(phone.to_string(), Offer { job, sent, fetched, going, told: told.clone(), moved: Instant::now(), progress: Instant::now() });
@@ -295,7 +317,7 @@ impl Pages {
         let mut offered = self.offered.lock().unwrap();
         let offer = offered.get(phone)?;
         if offer.going.cancelled() {
-            offered.remove(phone).expect("offered").tell(State::Cancelled);
+            self.close(&mut offered, phone, State::Cancelled);
             return None;
         }
         Some(json!({
@@ -304,17 +326,32 @@ impl Pages {
         }))
     }
 
-    /// The page of `phone` has all of sending `job`: it is sent. (Told again, its answer lost, it is answered alike.)
+    /// The page of `phone` has all of sending `job`: it is sent, unless it was cancelled meanwhile. (Told again, its
+    /// answer lost, it is answered as it ended.)
     pub fn done(&self, phone: &str, job: u64) -> Result<(), Refused> {
         let mut offered = self.offered.lock().unwrap();
-        match offered.get(phone) {
-            Some(offer) if offer.job == job && offer.fetched_all() => {
-                offered.remove(phone).expect("offered").tell(State::Sent);
+        match offered.get(phone).filter(|offer| offer.job == job).map(|offer| (offer.going.cancelled(), offer.fetched_all())) {
+            Some((true, _)) => {
+                self.close(&mut offered, phone, State::Cancelled);
+                Err((410, "the sending was cancelled"))
+            }
+            Some((false, true)) => {
+                self.close(&mut offered, phone, State::Sent);
                 Ok(())
             }
-            Some(offer) if offer.job == job => Err((409, "not all of it fetched")),
-            _ => Ok(()),
+            Some((false, false)) => Err((409, "not all of it fetched")),
+            None => match self.outcomes.lock().unwrap().get(&(phone.to_string(), job)) {
+                Some((true, _)) => Ok(()),
+                _ => Err((404, "no such sending")),
+            },
         }
+    }
+
+    /// The sending offered to the page of `phone` ended as `state` (told so), kept for a while as sent or not.
+    fn close(&self, offered: &mut HashMap<String, Offer>, phone: &str, state: State) {
+        let offer = offered.remove(phone).expect("offered");
+        self.outcomes.lock().unwrap().insert((phone.to_string(), offer.job), (state == State::Sent, Instant::now()));
+        offer.tell(state);
     }
 
     /// A piece of thing `at` of sending `job` offered to the page of `phone`: its bytes from `from`, `PIECE` at most.
@@ -354,20 +391,22 @@ impl Pages {
     pub fn refused(&self, phone: &str, job: u64) {
         let mut offered = self.offered.lock().unwrap();
         if offered.get(phone).is_some_and(|offer| offer.job == job) {
-            offered.remove(phone).expect("offered").tell(State::Refused);
+            self.close(&mut offered, phone, State::Refused);
         }
     }
 
     /// The sendings to pages given up: cancelled (told so), or not fetched from for `WAITS` (failed: the page was
     /// closed, or its user did not take them). And what pages' requests sent again are answered by, after as long.
     pub fn expire(&self) {
-        self.answered.lock().unwrap().retain(|_, (_, _, at)| at.elapsed() < WAITS);
-        self.finished.lock().unwrap().retain(|_, (_, at)| at.elapsed() < WAITS);
+        self.answered.lock().unwrap().retain(|_, (answer, at)| answer.is_none() || at.elapsed() < WAITS);
+        self.withdrawn.lock().unwrap().retain(|_, at| at.elapsed() < WAITS);
+        self.finished.lock().unwrap().retain(|_, at| at.elapsed() < WAITS);
+        self.outcomes.lock().unwrap().retain(|_, (_, at)| at.elapsed() < WAITS);
         let mut offered = self.offered.lock().unwrap();
         let over: Vec<String> = offered.iter().filter(|(_, offer)| offer.going.cancelled() || offer.moved.elapsed() > WAITS).map(|(phone, _)| phone.clone()).collect();
         for phone in over {
-            let offer = offered.remove(&phone).expect("offered");
-            offer.tell(if offer.going.cancelled() { State::Cancelled } else { State::Failed { why: "the page did not take it".into() } });
+            let state = if offered[&phone].going.cancelled() { State::Cancelled } else { State::Failed { why: "the page did not take it".into() } };
+            self.close(&mut offered, &phone, state);
         }
     }
 }

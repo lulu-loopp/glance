@@ -166,7 +166,8 @@ const unseal = sealed => chacha20(sealKey(), sealed.subarray(0, 12), sealed.suba
 async function ask(path, body, again = true, bytes = false) {
   const method = body ? "POST" : "GET", sent = body instanceof Uint8Array ? body : encoder.encode(body ? JSON.stringify(body) : ""), time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
   const digest = path.startsWith("/v1/send/piece?") ? hex(sha256(sent)) : null;
-  const sign = signed([method, path, time, nonce, phone, name, told.session], digest ? encoder.encode(digest) : sent);
+  // (That a browser asks is signed too: no one on the way makes an app's request a browser's.)
+  const sign = signed([method, path, time, nonce, phone, name, told.session, "browser"], digest ? encoder.encode(digest) : sent);
   const headers = { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name, "X-Glance-Browser": "1" };
   if (digest) headers["X-Glance-Body"] = digest;
   const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers });
@@ -501,7 +502,7 @@ function why(error) {
 
 // Sending: what is picked goes at once, a file after another, each a piece after another.
 // (What is said of the last sending shows while the PC receives. While it does not, that is said instead.)
-const sending = { going: false, stop: false, session: "", said: "" };
+const sending = { going: false, stop: false, offer: "", session: "", said: "" };
 function sendSaid(text) { sending.said = text; sendDrawn(); }
 function sendDrawn() {
   const near = state && state.nearby, on = !!(near && near.on);
@@ -516,12 +517,12 @@ async function send(files, words) {
   const total = files.reduce((sum, file) => sum + file.size, 0);
   if (near.most_files && files.length > near.most_files) return sendSaid(t(`一次最多发送 ${near.most_files} 个文件`, `Up to ${near.most_files} files at once`));
   if ((near.most_file != null && files.some(file => file.size > near.most_file)) || (near.most_sending != null && total > near.most_sending)) return sendSaid(t("文件超出电脑可接收的大小", "Too large for the PC to receive"));
-  Object.assign(sending, { going: true, stop: false, session: "" });
+  Object.assign(sending, { going: true, stop: false, offer: random(8), session: "" });
   sendDrawn();
   sendSaid(state.files === false ? t("等待电脑确认", "Waiting for the PC to accept") : t("正在发送", "Sending"));
   try {
     // (Known by an id of its own: sent again where the network lost the answer, it is answered as it was.)
-    const offer = words != null ? { id: random(8), words } : { id: random(8), files: files.map(file => ({ name: file.name, size: file.size, type: file.type })) };
+    const offer = words != null ? { id: sending.offer, words } : { id: sending.offer, files: files.map(file => ({ name: file.name, size: file.size, type: file.type })) };
     const begun = await askAgain("/v1/send/offer", seal(encoder.encode(JSON.stringify(offer))));
     if (sending.stop) { sending.session = begun.session || ""; throw new Error("cancelled"); }
     if (words != null) {
@@ -558,9 +559,10 @@ async function send(files, words) {
 
 // What the PC sends here, a card for each sending: shown as it is offered, fetched once it is taken (words alone at once), each file then to be saved (a picture shown too), and the PC told once all of it is here.
 // A sending is the PC's to say of while it offers it ("offered", "taking"): one it stops offering before it is taken has stopped. What was taken, or stopped, stays till its card is closed.
+// A sending ended here ("ended": the last poll asked by then) is the same sending, however a poll answers, till a poll asked after that no longer lists it: a later one of the same number (the PC's Glance started again) is another.
 const sendings = [];
-// The sendings turned down or closed here while the PC still offers them (not to be shown again meanwhile).
-const putAway = new Set();
+// The sendings turned down or closed here, by their numbers, with the last poll asked by then (not shown again till let go of as above).
+const putAway = new Map();
 function copy(text, button) {
   const copied = () => { button.textContent = t("已复制", "Copied"); };
   if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(copied, () => {}); return; }
@@ -571,15 +573,17 @@ function copy(text, button) {
   if (document.execCommand("copy")) copied();
   area.remove();
 }
-// What the PC offers, as it said with how it is (sealed), or nothing.
-function offeredNow(incoming) {
+// What the PC offers, as it said with how it is (sealed), or nothing, as poll `asked` has it.
+function offeredNow(incoming, asked) {
   const offer = incoming ? JSON.parse(new TextDecoder().decode(unseal(unhex(incoming)))) : null;
-  for (const job of putAway) if (!offer || offer.job !== job) putAway.delete(job);
+  const listed = offer ? offer.job : null;
+  for (const [job, at] of putAway) if (asked > at && job !== listed) putAway.delete(job);
   for (const sending of sendings) {
-    if (sending.state === "offered" && (!offer || offer.job !== sending.job)) { sending.state = "over"; sending.said = t("电脑已停止发送", "The PC stopped sending"); cardDrawn(sending); }
+    if (sending.ended != null && asked > sending.ended && sending.job !== listed) sending.released = true;
+    if (sending.state === "offered" && sending.job !== listed) { Object.assign(sending, { state: "over", said: t("电脑已停止发送", "The PC stopped sending"), ended: polls.asked }); cardDrawn(sending); }
   }
-  if (!offer || putAway.has(offer.job) || sendings.some(sending => sending.job === offer.job && (sending.state === "offered" || sending.state === "taking"))) return;
-  const sending = { job: offer.job, files: offer.files || [], urls: {}, words: {}, state: "offered", said: "" };
+  if (!offer || putAway.has(listed) || sendings.some(sending => sending.job === listed && !sending.released)) return;
+  const sending = { job: offer.job, files: offer.files || [], urls: {}, words: {}, state: "offered", said: "", ended: null, released: false };
   sendings.push(sending);
   cardMade(sending);
   if (sending.files.every(file => file.words)) take(sending);
@@ -588,9 +592,9 @@ function cardMade(sending) {
   const card = el("section", "card"), line = el("div", "bar"), ends = el("div", "ends");
   line.append(el("i"));
   Object.assign(sending, { card, line, title: el("h2"), list: el("div", "rows"), note: el("span", "note"), refuse: el("button", "text", t("拒绝", "Decline")), accept: el("button", "go main", t("接收", "Receive")), close: el("button", "go", t("关闭", "Close")) });
-  sending.refuse.onclick = () => { putAway.add(sending.job); cardGone(sending); ask("/v1/take/refuse", { job: sending.job }).catch(() => {}); };
+  sending.refuse.onclick = () => { cardGone(sending); ask("/v1/take/refuse", { job: sending.job }).catch(() => {}); };
   sending.accept.onclick = () => take(sending);
-  sending.close.onclick = () => { if (sending.state === "offered") putAway.add(sending.job); cardGone(sending); };
+  sending.close.onclick = () => cardGone(sending);
   ends.append(sending.refuse, sending.accept, sending.close);
   card.append(sending.title, sending.list, line, sending.note, ends);
   $("came").append(card);
@@ -598,14 +602,15 @@ function cardMade(sending) {
   cardDrawn(sending);
 }
 function cardGone(sending) {
+  if (!sending.released) putAway.set(sending.job, polls.asked);
   Object.values(sending.urls).forEach(url => URL.revokeObjectURL(url));
   sending.card.remove();
   sendings.splice(sendings.indexOf(sending), 1);
 }
 function cardDrawn(sending) {
   const files = sending.files.filter(file => !file.words);
-  sending.refuse.hidden = sending.accept.hidden = sending.state !== "offered" || !files.length;
-  sending.close.hidden = sending.state === "taking" || (sending.state === "offered" && files.length > 0);
+  sending.refuse.hidden = sending.accept.hidden = sending.state !== "offered";
+  sending.close.hidden = sending.state === "taking" || sending.state === "offered";
   sending.note.textContent = sending.said;
   bar(sending.line, sending.done || 0, sending.state === "taking" ? sending.of : null);
 }
@@ -651,9 +656,11 @@ async function take(sending) {
       else sending.urls[file.id] = URL.createObjectURL(new Blob(parts, { type: file.type || "application/octet-stream" }));
     }
     await askAgain("/v1/take/done", { job: sending.job });
-    Object.assign(sending, { state: "taken", said: "" });
+    Object.assign(sending, { state: "taken", said: "", ended: polls.asked });
   } catch (error) {
-    Object.assign(sending, { state: "over", said: error.status === 404 || error.status === 410 ? t("电脑已停止发送", "The PC stopped sending") : error.status ? t("接收失败", "Couldn't receive") : t("无法连接", "Can't connect") });
+    // Given up by the PC, it is over. Else it may be taken again while the PC offers it.
+    if (error.status === 404 || error.status === 410) Object.assign(sending, { state: "over", said: t("电脑已停止发送", "The PC stopped sending"), ended: polls.asked });
+    else Object.assign(sending, { state: "offered", said: error.status ? t("接收失败", "Couldn't receive") : t("无法连接", "Can't connect") });
   }
   cardListed(sending);
   cardDrawn(sending);
@@ -668,8 +675,8 @@ $("send-cancel").textContent = t("取消", "Cancel");
 $("send-pick").onclick = () => $("send-files").click();
 $("send-files").onchange = () => { const files = Array.from($("send-files").files || []); $("send-files").value = ""; if (files.length) send(files, null); };
 $("send-words").onclick = () => { const words = $("words").value; if (words.trim()) send([], words); };
-// (Cancelled while the PC's user is asked about it, the offer is taken back from them.)
-$("send-cancel").onclick = () => { sending.stop = true; sendDrawn(); if (!sending.session) ask("/v1/send/cancel", { session: "" }).catch(() => {}); };
+// (Cancelled before it is received, the offer is taken back, from the PC's user too where they are asked about it.)
+$("send-cancel").onclick = () => { sending.stop = true; sendDrawn(); if (!sending.session) askAgain("/v1/send/cancel", { session: "", offer: sending.offer }).catch(() => {}); };
 
 // ---- how the PC is, asked while the page is looked at
 // (An answer older than one already taken, asked before it, is not taken: what the PC offered is as the latest says.)
@@ -681,7 +688,7 @@ async function look() {
     const answer = await ask("/v1/state");
     if (asked < polls.taken) return;
     polls.taken = asked;
-    offeredNow(answer.incoming);
+    offeredNow(answer.incoming, asked);
     if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); }
   }
   catch (error) { if (!busy) failed(error); }
